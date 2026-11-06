@@ -1,0 +1,6 @@
+version: 2.0
+minimumSystemVersion: 24.0.0
+files:
+  - url: arm64/App.dmg
+  - url: x64/App.zip
+  - url: App.zip

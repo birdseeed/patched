@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+  <channel>
+    <item>
+      <title>Older</title>
+      <sparkle:version>9</sparkle:version>
+      <enclosure url="Older-1.zip" length="1" type="application/zip"/>
+    </item>
+    <item>
+      <title>Newer</title>
+      <sparkle:version>12</sparkle:version>
+      <sparkle:shortVersionString>1.2</sparkle:shortVersionString>
+      <sparkle:edSignature>ELEMENTSIG==</sparkle:edSignature>
+      <sparkle:minimumSystemVersion>11.0</sparkle:minimumSystemVersion>
+      <enclosure url="Newer-1.2.zip" length="42" type="application/zip"/>
+    </item>
+  </channel>
+</rss>

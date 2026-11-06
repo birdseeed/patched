@@ -1,0 +1,1 @@
+[{"token":"real","artifacts":[{"app":["Real.app"]},{"uninstall":[{"quit":"com.real.app"}]}]},{"token":"one","artifacts":[{"app":["Collision.app"]}]},{"token":"other@example.test","artifacts":[{"app":["Collision.app"]}]}]

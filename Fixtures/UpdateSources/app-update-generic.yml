@@ -1,0 +1,4 @@
+provider: generic
+url: https://updates.example.test/app
+channel: latest
+updaterCacheDirName: example-updater

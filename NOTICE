@@ -1,0 +1,14 @@
+Patched
+Copyright 2026 Andy Bridson
+
+This distribution includes or derives from Installomator material, licensed
+under the Apache License, Version 2.0. See ThirdParty/Installomator/LICENSE.
+Installomator: https://github.com/Installomator/Installomator
+
+The Installomator license file preserves this attribution:
+Copyright 2020 Armin Briegel, Scripting OS X
+
+The repository also contains synthetic, modified Installomator test fixture
+labels. Their snapshot manifest attributes them to Installomator contributors
+and identifies them as Apache-2.0 material; see
+Fixtures/InstallomatorDiscovery/snapshot-manifest.json.

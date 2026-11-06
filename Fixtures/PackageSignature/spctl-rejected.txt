@@ -1,0 +1,3 @@
+{PATH}: rejected
+source=Unnotarized Developer ID
+origin=Developer ID Installer: Example Software Ltd (AAAAAAAAAA)

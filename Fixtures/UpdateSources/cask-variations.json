@@ -1,0 +1,13 @@
+{
+  "token": "example",
+  "version": "2.0.0",
+  "url": "https://dl.example.test/arm64/Example-2.0.0.dmg",
+  "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "depends_on": {"macos": {">=": ["12"]}},
+  "artifacts": [{"app": ["Example.app"]}],
+  "variations": {
+    "sequoia": {"url": "https://dl.example.test/intel/Example-2.0.0.dmg", "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+    "arm64_sequoia": {"url": "https://dl.example.test/arm64-sequoia/Example-2.0.0.zip", "version": "1.9.0", "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"},
+    "arm64_big_sur": {"url": "https://dl.example.test/old/Example-1.0.0.dmg", "version": "1.0.0", "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}
+  }
+}

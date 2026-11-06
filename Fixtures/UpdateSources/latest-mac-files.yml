@@ -1,0 +1,18 @@
+version: 3.1.4
+files:
+  - url: Example-3.1.4-mac.zip
+    sha512: X64SHA512==
+    size: 111
+  - url: Example-3.1.4-arm64-mac.zip
+    sha512: ARMSHA512==
+    size: 222
+    blockMapSize: 5
+  - url: Example-3.1.4.dmg
+    sha512: DMGSHA512==
+    size: 333
+  - url: Example-3.1.4-arm64.dmg
+    sha512: ARMDMGSHA==
+    size: 444
+path: Example-3.1.4-mac.zip
+sha512: X64SHA512==
+releaseDate: '2026-10-01T12:00:00.000Z'

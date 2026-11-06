@@ -1,0 +1,2 @@
+{PATH}: accepted
+source=Notarized Developer ID

@@ -1,0 +1,6 @@
+{"version":1,"apps":[
+  {"bundleID":"com.example.sparkle","source":{"sparkle":"https://updates.example.test/appcast.xml"}},
+  {"bundleID":"com.example.electron","source":{"electron":"https://updates.example.test/latest-mac.yml"}},
+  {"bundleID":"com.example.brew","source":{"homebrewCask":"example"}},
+  {"bundleID":"com.example.skip","ignore":true}
+]}

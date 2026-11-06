@@ -1,0 +1,7 @@
+{"resultCount":5,"results":[
+ {"kind":"mac-software","bundleId":"com.acme.alpha","trackId":111,"version":"2.0","trackViewUrl":"https://apps.apple.com/gb/app/alpha/id111?mt=12&uo=4","minimumOsVersion":"13.0","description":"x"},
+ {"kind":"mac-software","bundleId":"com.acme.Beta","trackId":222,"version":"1.5.1","trackViewUrl":"https://apps.apple.com/gb/app/beta/id222?mt=12","minimumOsVersion":"12.0"},
+ {"kind":"software","bundleId":"com.acme.phone","trackId":333,"version":"9.9","trackViewUrl":"https://apps.apple.com/gb/app/phone/id333"},
+ {"kind":"mac-software","bundleId":"com.acme.unrequested","trackId":444,"version":"3.0","trackViewUrl":"https://apps.apple.com/gb/app/x/id444"},
+ {"kind":"mac-software","bundleId":"com.acme.insecure","trackId":555,"version":"1.0","trackViewUrl":"http://apps.apple.com/gb/app/y/id555"}
+]}

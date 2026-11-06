@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Example App Changelog</title>
+    <link>https://updates.example.test/appcast.xml</link>
+    <item>
+      <title>Version 2.0</title>
+      <pubDate>Mon, 01 Jun 2026 10:00:00 +0000</pubDate>
+      <description><![CDATA[<h2>What's new</h2><ul><li>Faster &amp; better</li></ul>]]></description>
+      <enclosure url="https://updates.example.test/Example-2.0.zip" sparkle:version="200" sparkle:shortVersionString="2.0"
+                 sparkle:edSignature="ED2000SIG==" length="1111" type="application/octet-stream"/>
+      <sparkle:minimumSystemVersion>12.0</sparkle:minimumSystemVersion>
+    </item>
+    <item>
+      <title>Version 3.0 beta</title>
+      <sparkle:channel>beta</sparkle:channel>
+      <enclosure url="https://updates.example.test/Example-3.0b1.zip" sparkle:version="300" sparkle:shortVersionString="3.0b1" length="3333" type="application/octet-stream"/>
+    </item>
+    <item>
+      <title>Version 2.5</title>
+      <description><![CDATA[Contains deltas that must never be picked]]></description>
+      <enclosure url="https://updates.example.test/Example-2.5.dmg" sparkle:version="250" sparkle:shortVersionString="2.5"
+                 sparkle:edSignature="ED2500SIG==" length="2500" type="application/x-apple-diskimage"/>
+      <sparkle:deltas>
+        <enclosure url="https://updates.example.test/Example250-200.delta" sparkle:version="999" sparkle:shortVersionString="9.9"
+                   sparkle:deltaFrom="200" length="10" type="application/octet-stream"/>
+      </sparkle:deltas>
+    </item>
+    <item>
+      <title>Version 4.0 needs a newer macOS</title>
+      <sparkle:minimumSystemVersion>99.0</sparkle:minimumSystemVersion>
+      <enclosure url="https://updates.example.test/Example-4.0.zip" sparkle:version="400" sparkle:shortVersionString="4.0" length="4444" type="application/octet-stream"/>
+    </item>
+    <item>
+      <title>Version 5.0 for Windows</title>
+      <enclosure url="https://updates.example.test/Example-5.0.exe" sparkle:version="500" sparkle:shortVersionString="5.0" sparkle:os="windows" length="5555" type="application/octet-stream"/>
+    </item>
+    <item>
+      <title>Version 2.2</title>
+      <sparkle:version>220</sparkle:version>
+      <sparkle:shortVersionString>2.2</sparkle:shortVersionString>
+      <enclosure url="https://updates.example.test/Example-2.2.zip" length="2200" type="application/octet-stream"/>
+    </item>
+  </channel>
+</rss>

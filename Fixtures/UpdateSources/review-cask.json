@@ -1,0 +1,1 @@
+{"version":"2","url":"https://x.test/a.zip","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","depends_on":{"macos":{"==":["14","15"]}},"variations":{"sequoia":{"sha256":null}}}

@@ -1,0 +1,3 @@
+{PATH}: accepted
+source=Apple Installer
+origin=Software Update

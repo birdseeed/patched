@@ -1,0 +1,1 @@
+<?xml version="1.0"?><rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle"><channel><item><enclosure url="https://x.test/150.zip" sparkle:version="150"/></item><item><sparkle:minimumUpdateVersion>200</sparkle:minimumUpdateVersion><enclosure url="https://x.test/300.zip" sparkle:version="300"/></item></channel></rss>

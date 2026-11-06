@@ -1,0 +1,10 @@
+[
+ {"token":"example","artifacts":[{"uninstall":[{"quit":"x"}]},{"app":["Example.app"]},{"zap":[{"trash":["~/x"]}]}],"deprecated":false,"disabled":false},
+ {"token":"twin-a","artifacts":[{"app":["Twin.app"]}]},
+ {"token":"twin-b","artifacts":[{"app":["Twin.app"]}]},
+ {"token":"stable","artifacts":[{"app":["Stable.app"]}]},
+ {"token":"stable@example.test","artifacts":[{"app":["Stable.app"]}]},
+ {"token":"old-thing","artifacts":[{"app":["Old Thing.app"]}],"deprecated":true},
+ {"token":"nested","artifacts":[{"app":[{"target":"Nested.app"},"Sub/Nested.app"]}]},
+ {"token":"cli-only","artifacts":[{"binary":["bin/tool"]}]}
+]

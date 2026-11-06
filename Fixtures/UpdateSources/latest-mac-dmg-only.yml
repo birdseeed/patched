@@ -1,0 +1,6 @@
+version: 0.9.0
+files:
+  - url: https://cdn.example.test/dl/App-0.9.0-universal.dmg
+    sha512: UNIDMG==
+    size: 99
+releaseDate: 2026-02-02T00:00:00.000Z

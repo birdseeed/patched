@@ -1,0 +1,6 @@
+.build/
+dist/
+.queue-run/
+
+# Private publication scanner policy (never commit).
+/scripts/scan-internal.local

@@ -1,0 +1,1 @@
+{"token":"modern","version":"5.0","url":"https://dl.example.test/Modern.zip","sha256":"no_check","depends_on":{"macos":{">=":["99"]}},"artifacts":[{"app":["Modern.app"]}]}

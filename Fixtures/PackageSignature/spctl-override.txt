@@ -1,0 +1,4 @@
+{PATH}: accepted
+source=Notarized Developer ID
+origin=Developer ID Installer: Example Software Ltd (AAAAAAAAAA)
+override=security disabled

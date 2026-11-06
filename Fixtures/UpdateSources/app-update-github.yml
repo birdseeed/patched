@@ -1,0 +1,4 @@
+provider: github
+owner: example-org
+repo: example-app
+updaterCacheDirName: example-app-updater
