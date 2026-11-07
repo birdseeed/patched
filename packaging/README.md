@@ -53,7 +53,7 @@ Create a local release archive and checksum with:
 
 ```sh
 /bin/bash scripts/release.sh
-(cd dist && shasum -a 256 -c Patched-0.1.0.zip.sha256)
+(cd dist && shasum -a 256 -c Patched-0.1.1.zip.sha256)
 ```
 
 This produces `dist/Patched-<version>.zip` and `.zip.sha256`. It does not publish
