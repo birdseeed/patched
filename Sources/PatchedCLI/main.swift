@@ -86,15 +86,7 @@ func absolute(_ path: String) -> String {
 
 // MARK: Inventory and checking
 
-func installedApp(_ app: LocalApplicationObservation) -> InstalledApp {
-    InstalledApp(name: app.displayName, path: app.path, bundleID: app.claimedBundleIdentifier,
-                 shortVersion: app.claimedShortVersion, build: app.claimedBuild,
-                 sparkleFeed: app.vendorMetadata.sparkleFeedURL,
-                 sparkleFeedRejected: app.vendorMetadata.sparkleFeedURL == nil && app.vendorMetadata.sparkleDisposition == .malformed,
-                 electronConfig: app.vendorMetadata.electronConfigBytes,
-                 isAppStore: FileManager.default.fileExists(atPath: app.path + "/Contents/_MASReceipt"),
-                 isWrappedIOSApp: app.isWrappedIOSApp)
-}
+func installedApp(_ app: LocalApplicationObservation) -> InstalledApp { InstalledApp(observation: app) }
 
 func scan(_ roots: [String]?) async -> [InstalledApp] {
     let inventory = roots.map { LocalApplicationInventory(scanningDirectories: $0) } ?? LocalApplicationInventory()
@@ -222,6 +214,8 @@ func describe(_ row: UpdateRow) -> String {
     case .updateAvailable:
         // The App Store owns these; Patched only reports them.
         if let reason = outcome.managedByAppStore { return refusedRow(app, code: reason.code, message: reason.message) }
+        // The app pins a Sparkle key that this offer can't satisfy; the installer would refuse it.
+        if let block = outcome.edSignatureBlock { return refusedRow(app, code: block.code, message: block.message) }
         // A Homebrew match found by app filename alone is not proof of identity; the user
         // must confirm it with a catalogue entry before anything is installed.
         guard outcome.installable else {

@@ -5,6 +5,8 @@ public struct LocalInstalledVendorMetadata: Sendable, Equatable {
     public let sparkleFeedURL: String?
     public let electronConfigBytes: Data?
     public let productJSONBytes: Data?
+    /// `SUPublicEDKey` as the installer reads it: nil when absent, the string when a string, "" for any other type.
+    public let sparklePublicEDKey: String?
     public let sparkleDisposition: LocalInventoryMetadataDisposition
     public let electronDisposition: LocalInventoryMetadataDisposition
     public let productJSONDisposition: LocalInventoryMetadataDisposition
@@ -17,13 +19,15 @@ public struct LocalInstalledVendorMetadata: Sendable, Equatable {
                   sparkleDisposition: LocalInventoryMetadataDisposition,
                   electronDisposition: LocalInventoryMetadataDisposition,
                   productJSONBytes: Data? = nil,
-                  productJSONDisposition: LocalInventoryMetadataDisposition = .unavailable) {
+                  productJSONDisposition: LocalInventoryMetadataDisposition = .unavailable,
+                  sparklePublicEDKey: String? = nil) {
         self.sparkleFeedURL = sparkleFeedURL
         self.electronConfigBytes = electronConfigBytes
         self.sparkleDisposition = sparkleDisposition
         self.electronDisposition = electronDisposition
         self.productJSONBytes = productJSONBytes
         self.productJSONDisposition = productJSONDisposition
+        self.sparklePublicEDKey = sparklePublicEDKey
     }
 
     // Namespace invalidation and unavailable scans retain no vendor claims.

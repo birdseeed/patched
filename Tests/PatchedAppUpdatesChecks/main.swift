@@ -191,6 +191,22 @@ check("rows: every status is built from the fake outcomes") {
     try expect(controller.summary == "6 apps checked, 3 with updates available.", "summary: \(controller.summary)")
 }
 
+check("rows: an unsigned offer for an app that pins SUPublicEDKey is not installable and says why") {
+    let pinned = InstalledApp(name: "Pinned", path: "/Fake/Pinned.app", bundleID: "com.example.pinned", shortVersion: "1.0", build: "1.0", sparklePublicEDKey: Data(repeating: 1, count: 32).base64EncodedString())
+    let cask = UpdateSource.homebrewCask(token: "pinned")
+    // installable: false is set by hand here, so this check covers the row wording only; the checker test in
+    // UpdateSourcesChecks proves the checker itself marks these offers not installable.
+    let o = outcome(pinned, .updateAvailable(offer("2.0", source: cask)), source: cask, installable: false)
+    try expect(o.edSignatureBlock == .signatureMissing, "outcome should report the missing signature")
+    let controller = makeController(outcomes: [o])
+    await runCheck(controller)
+    guard let row = controller.rows.first else { throw CheckFailure(description: "no row") }
+    try expect(row.status == .notInstallable, "status \(row.status)")
+    try expect(row.kindNote == "Unsigned", "kindNote \(String(describing: row.kindNote))")
+    try expect(row.statusText == "Update found, but it isn't signed the way this app requires. Add a catalogue entry for the app's Sparkle feed to enable updates.", "statusText \(row.statusText)")
+    try expect(!controller.canUpdate(row), "no Update button for an unsigned offer")
+}
+
 check("update is disabled unless the update is installable, and the installer is never called") {
     let low = app("Charlie"), pkg = app("Delta"), ok = app("Bravo"), forced = app("Golf")
     let installer = FakeInstaller()

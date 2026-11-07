@@ -216,10 +216,14 @@ public struct InstalledApp: Sendable, Equatable {
     /// no `Contents`). The App Store owns it, so `isAppStore` is always true for these; its installed version is the
     /// iOS version, so an iOS listing can be compared with it directly.
     public let isWrappedIOSApp: Bool
+    /// `SUPublicEDKey` as the installer reads it (nil when absent, "" when not a string). A key means every offer needs a valid EdDSA signature.
+    public let sparklePublicEDKey: String?
+    public var pinsSparkleKey: Bool { sparklePublicEDKey != nil }
 
     public init(name: String, path: String, bundleID: String?, shortVersion: String?, build: String?,
                 sparkleFeed: String? = nil, sparkleFeedRejected: Bool = false, electronConfig: Data? = nil,
-                isAppStore: Bool = false, isWrappedIOSApp: Bool = false) {
+                isAppStore: Bool = false, isWrappedIOSApp: Bool = false, sparklePublicEDKey: String? = nil) {
+        self.sparklePublicEDKey = sparklePublicEDKey
         self.isAppStore = isAppStore || isWrappedIOSApp
         self.isWrappedIOSApp = isWrappedIOSApp
         self.name = name; self.path = path; self.bundleID = bundleID

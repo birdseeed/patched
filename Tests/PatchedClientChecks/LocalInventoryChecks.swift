@@ -1,6 +1,7 @@
 import Foundation
 import Darwin
 @_spi(Testing) import PatchedClient
+import UpdateSources
 
 // Independent physical fixtures. Expected facts below are literal, never generated
 // by the inventory implementation or its public limit constants.
@@ -122,6 +123,25 @@ private func inventoryPhysical(_ path: String) throws -> (UInt64, UInt64) {
         try expect(partial.claimedBundleIdentifier == nil && partial.claimedShortVersion == nil && partial.claimedBuild == nil && partial.metadataDisposition != .observed, "Missing mandatory fields claim successful metadata")
         try expect(wrong.claimedBundleIdentifier == nil && wrong.claimedBuild == nil && wrong.metadataDisposition == .malformed, "Wrong plist types accepted")
         try expect(broken.metadataDisposition == .malformed, "Invalid bytes accepted")
+    }
+    check("inventory: SUPublicEDKey presence, of any value, marks the app as pinning a Sparkle key") {
+        let f = try InventoryFixture(); defer { f.clean() }
+        let base: [String: Any] = ["CFBundleName": "K", "CFBundleIdentifier": "example.k", "CFBundleShortVersionString": "1", "CFBundleVersion": "2"]
+        _ = try f.app("Absent.app", metadata: base)
+        _ = try f.app("Str.app", metadata: base.merging(["SUPublicEDKey": "abc="]) { $1 })
+        _ = try f.app("Empty.app", metadata: base.merging(["SUPublicEDKey": ""]) { $1 })
+        _ = try f.app("NonStr.app", metadata: base.merging(["SUPublicEDKey": 7]) { $1 })
+        let r = await f.scan()
+        func key(_ n: String) throws -> String? {
+            guard let a = r.applications.first(where: { $0.path.hasSuffix("/\(n).app") }) else { throw CheckFailure(description: "missing \(n)") }
+            let mapped = InstalledApp(observation: a)
+            try expect(mapped.sparklePublicEDKey == a.vendorMetadata.sparklePublicEDKey, "\(n): key lost mapping into InstalledApp")
+            return a.vendorMetadata.sparklePublicEDKey
+        }
+        // Same reading as the installer (Locations.swift): absent is nil, a string is kept, any other type is "".
+        try expect(try key("Absent") == nil && key("Str") == "abc=" && key("Empty") == "" && key("NonStr") == "", "key capture wrong")
+        let absent = try r.applications.first { $0.path.hasSuffix("/Absent.app") }.map(InstalledApp.init(observation:))
+        try expect(absent?.pinsSparkleKey == false, "absent key must not pin")
     }
     check("inventory: publisher and management-looking plist keys never confer authority") {
         let f = try InventoryFixture(); defer { f.clean() }

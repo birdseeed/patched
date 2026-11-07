@@ -1,4 +1,37 @@
 import Foundation
+import CryptoKit
+
+/// Why the installer would refuse an offer on its Sparkle EdDSA rules, known before any download.
+/// Mirrors `SparkleSignature.check` (key format, signature present, signature format); the signature itself is verified at install.
+public enum EdSignatureBlock: String, Sendable, Equatable {
+    case keyMalformed, signatureMissing, signatureMalformed
+    /// Same strings as the installer's `InstallRefusal` codes.
+    public var code: String { self == .signatureMissing ? "ed_signature_missing" : "ed_signature_invalid" }
+    public var message: String {
+        switch self {
+        case .keyMalformed: return "This app's update signing key is malformed, so Patched can't verify its updates."
+        case .signatureMissing: return "Update found, but it isn't signed the way this app requires. Add a catalogue entry for the app's Sparkle feed to enable updates."
+        case .signatureMalformed: return "Update found, but its signature is malformed."
+        }
+    }
+    /// Short form for the CLI summary.
+    public var summary: String {
+        switch self {
+        case .keyMalformed: return "the app's SUPublicEDKey is malformed"
+        case .signatureMissing: return "no EdDSA signature; add a catalogue entry for the app's Sparkle feed"
+        case .signatureMalformed: return "the EdDSA signature is malformed"
+        }
+    }
+    /// nil when `key` is nil (no requirement) or the offer's signature is acceptable in form.
+    public static func evaluate(key: String?, signature: String?) -> EdSignatureBlock? {
+        guard let key else { return nil }
+        guard let keyBytes = Data(base64Encoded: key.trimmingCharacters(in: .whitespacesAndNewlines)), keyBytes.count == 32,
+              (try? Curve25519.Signing.PublicKey(rawRepresentation: keyBytes)) != nil else { return .keyMalformed }
+        guard let signature, !signature.isEmpty else { return .signatureMissing }
+        guard let bytes = Data(base64Encoded: signature.trimmingCharacters(in: .whitespacesAndNewlines)), bytes.count == 64 else { return .signatureMalformed }
+        return nil
+    }
+}
 
 public struct AppCheckOutcome: Sendable, Equatable {
     public let app: InstalledApp
@@ -30,6 +63,12 @@ public struct AppCheckOutcome: Sendable, Equatable {
     public var appStoreURL: URL? {
         if case .appStore(let trackID)? = source { return AppStoreLinks.appURL(trackID: trackID) }
         return appStoreTrackID.map(AppStoreLinks.appURL(trackID:))
+    }
+    /// Set when the installer would refuse this update on the app's pinned `SUPublicEDKey` (malformed key, or an
+    /// offer whose signature is missing or malformed). Never set for App Store apps.
+    public var edSignatureBlock: EdSignatureBlock? {
+        guard case .updateAvailable(let offer) = result, !app.isAppStore else { return nil }
+        return EdSignatureBlock.evaluate(key: app.sparklePublicEDKey, signature: offer.edSignature)
     }
     /// The reason an available update is not installed by Patched, when it is the App Store's job. Applies even when a
     /// catalogue entry names another source for a receipt-bearing app: that source is used for the version shown only.
@@ -116,7 +155,7 @@ public struct UpdateChecker: Sendable {
     static func summary(_ outcome: AppCheckOutcome) -> String {
         switch outcome.result {
         case .upToDate: return "up to date via \(outcome.source?.kind ?? "?")"
-        case .updateAvailable(let offer): return "update available (\(offer.displayVersion)) via \(outcome.source?.kind ?? "?")" + (outcome.installable ? "" : ", not installable by Patched")
+        case .updateAvailable(let offer): return "update available (\(offer.displayVersion)) via \(outcome.source?.kind ?? "?")" + (outcome.edSignatureBlock.map { ", not installable by Patched (\($0.summary))" } ?? (outcome.installable ? "" : ", not installable by Patched"))
         case .noSource: return "no source (\(outcome.noSourceReason?.text ?? ""))"
         case .refused(let reason): return "refused: \(reason.message)"
         }
@@ -162,7 +201,16 @@ public struct UpdateChecker: Sendable {
             case .success(let offer):
                 switch Self.isNewer(offer, than: app) {
                 case .failure(let reason): return make(source, .refused(reason), low: lowConfidence)
-                case .success(true): return make(source, .updateAvailable(offer), low: lowConfidence)
+                case .success(true):
+                    if !app.isAppStore, let block = EdSignatureBlock.evaluate(key: app.sparklePublicEDKey, signature: offer.edSignature) {
+                        switch block {
+                        case .keyMalformed: trace?.add("EdDSA: the app's SUPublicEDKey is malformed; not installable (\(block.code))")
+                        case .signatureMissing: trace?.add("EdDSA: the app pins SUPublicEDKey but the \(source.kind) offer has no EdDSA signature; not installable (add a catalogue entry for the app's Sparkle feed)")
+                        case .signatureMalformed: trace?.add("EdDSA: the \(source.kind) offer's EdDSA signature is not 64 base64 bytes; not installable (\(block.code))")
+                        }
+                        return make(source, .updateAvailable(offer), low: lowConfidence, installable: false)
+                    }
+                    return make(source, .updateAvailable(offer), low: lowConfidence)
                 case .success(false): return make(source, .upToDate, low: lowConfidence)
                 }
             }
@@ -301,7 +349,8 @@ public struct CheckReportRow: Encodable, Sendable, Equatable {
         case .updateAvailable(let o):
             status = "update_available"; offer = o
             // An App Store update is real but not Patched's to install: say so with a stable code.
-            reason = outcome.managedByAppStore?.code; reasonDetail = outcome.managedByAppStore?.message
+            reason = outcome.managedByAppStore?.code ?? outcome.edSignatureBlock?.code
+            reasonDetail = outcome.managedByAppStore?.message ?? outcome.edSignatureBlock?.message
         case .noSource: status = "no_source"; reason = nil; reasonDetail = nil
         case .refused(let r): status = "refused"; reason = r.code; reasonDetail = r.message
         }

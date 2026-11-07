@@ -303,9 +303,9 @@ func makeChecker(_ fetcher: FakeFetcher, catalogue: UserCatalogue = .empty, inde
                          catalogue: catalogue, environment: arm, teamID: { _ in "TEAM123456" }, storeCountry: country)
 }
 func app(_ name: String = "Example", id: String? = "com.example.app", short: String? = "1.0", build: String? = "100",
-         sparkle: String? = nil, rejected: Bool = false, electron: Data? = nil, mas: Bool = false, wrapped: Bool = false) -> InstalledApp {
+         sparkle: String? = nil, rejected: Bool = false, electron: Data? = nil, mas: Bool = false, wrapped: Bool = false, key: String? = nil) -> InstalledApp {
     InstalledApp(name: name, path: "/Applications/\(name).app", bundleID: id, shortVersion: short, build: build,
-                 sparkleFeed: sparkle, sparkleFeedRejected: rejected, electronConfig: electron, isAppStore: mas, isWrappedIOSApp: wrapped)
+                 sparkleFeed: sparkle, sparkleFeedRejected: rejected, electronConfig: electron, isAppStore: mas, isWrappedIOSApp: wrapped, sparklePublicEDKey: key)
 }
 func fakeWorld() throws -> FakeFetcher {
     FakeFetcher([
@@ -327,6 +327,55 @@ check("checker precedence: catalogue > Sparkle > Electron > Homebrew") {
     let cat = UserCatalogue(entries: ["com.example.app": .source(.homebrewCask(token: "example"))])
     try expectEqual(await (try await makeChecker(world, catalogue: cat)).checkOne(all).source, .homebrewCask(token: "example"))
     try expectEqual(try await makeChecker(world).checkOne(app("Unsupported", electron: Data("provider: s3\nbucket: b\n".utf8))).result, .noSource)
+}
+let edKey = Data(repeating: 1, count: 32).base64EncodedString(), edSignature64 = Data(repeating: 2, count: 64).base64EncodedString()
+func signedWorld(signature: String) throws -> FakeFetcher {
+    let xml = String(data: try fixture("appcast-realistic.xml"), encoding: .utf8)!.replacingOccurrences(of: "ED2500SIG==", with: signature)
+    return FakeFetcher([sparkleFeedURL: .success(Data(xml.utf8))])
+}
+check("checker: the installer's EdDSA rules are mirrored at check time") {
+    let world = try fakeWorld()
+    // A catalogue Homebrew source is not low confidence, so only the signature rule can make it uninstallable.
+    let cat = UserCatalogue(entries: ["com.example.app": .source(.homebrewCask(token: "example"))])
+    let checker = try await makeChecker(world, catalogue: cat)
+    // Homebrew offers carry no EdDSA signature.
+    let pinnedBrew = await checker.checkOne(app("Example", short: "1.2.2", build: "9999", key: edKey))
+    guard case .updateAvailable = pinnedBrew.result else { throw CheckFailure(description: "expected update, got \(pinnedBrew.result)") }
+    try expect(!pinnedBrew.installable && pinnedBrew.edSignatureBlock == .signatureMissing, "pinned app with unsigned offer: \(String(describing: pinnedBrew.edSignatureBlock))")
+    try expectEqual(pinnedBrew.edSignatureBlock?.code, "ed_signature_missing")
+    let (_, lines) = await checker.explain(app("Example", short: "1.2.2", build: "9999", key: edKey))
+    try expect(lines.contains { $0.contains("EdDSA: the app pins SUPublicEDKey") } && (lines.last ?? "").contains("no EdDSA signature"), "explain missing EdDSA line: \(lines)")
+    // The JSON report carries the reason.
+    let json = try JSONSerialization.jsonObject(with: CheckReportRow.json([pinnedBrew])) as! [[String: Any]]
+    try expectEqual(json[0]["reason"] as? String, "ed_signature_missing")
+    try expectEqual(json[0]["installable"] as? Bool, false)
+    // Unpinned app: unchanged.
+    let free = await checker.checkOne(app("Example", short: "1.2.2", build: "9999"))
+    try expect(free.installable && free.edSignatureBlock == nil, "unpinned app with Homebrew offer must stay installable")
+    // A non-string key reads as "" (malformed), same as the installer.
+    let empty = await checker.checkOne(app("Example", short: "1.2.2", build: "9999", key: ""))
+    try expect(!empty.installable && empty.edSignatureBlock == .keyMalformed, "empty key should be malformed")
+    // Sparkle item with a well-formed signature stays installable for a pinned app.
+    let good = await (try await makeChecker(try signedWorld(signature: edSignature64))).checkOne(app(short: "2.4", build: "240", sparkle: sparkleFeedURL, key: edKey))
+    guard case .updateAvailable = good.result else { throw CheckFailure(description: "expected update, got \(good.result)") }
+    try expect(good.installable && good.edSignatureBlock == nil, "well-formed signed offer for a pinned app must stay installable")
+    // Malformed key: refused whatever the signature is.
+    for bad in ["not base64!", Data(repeating: 1, count: 31).base64EncodedString()] {
+        let o = await (try await makeChecker(try signedWorld(signature: edSignature64))).checkOne(app(short: "2.4", build: "240", sparkle: sparkleFeedURL, key: bad))
+        try expect(!o.installable && o.edSignatureBlock == .keyMalformed && o.edSignatureBlock?.code == "ed_signature_invalid", "malformed key accepted: \(bad)")
+    }
+    // Garbage and whitespace-only signatures are malformed; a whitespace-padded 64-byte one is accepted (the installer trims).
+    for bad in ["not base64!", Data(repeating: 2, count: 63).base64EncodedString()] {
+        let o = await (try await makeChecker(try signedWorld(signature: bad))).checkOne(app(short: "2.4", build: "240", sparkle: sparkleFeedURL, key: edKey))
+        try expect(!o.installable && o.edSignatureBlock == .signatureMalformed, "bad signature accepted: \(bad)")
+    }
+    try expect(EdSignatureBlock.evaluate(key: edKey, signature: "   ") == .signatureMalformed, "whitespace-only signature is malformed (installer: not 64 bytes)")
+    let padded = await (try await makeChecker(try signedWorld(signature: " \(edSignature64) "))).checkOne(app(short: "2.4", build: "240", sparkle: sparkleFeedURL, key: edKey))
+    try expect(padded.installable, "trimmed signature should be accepted")
+    // App Store apps are never blocked by this rule.
+    let store = AppCheckOutcome(app: app(mas: true, key: edKey), teamID: nil, source: nil, lowConfidence: false, installable: false,
+                                result: .updateAvailable(UpdateOffer(displayVersion: "2", downloadURL: URL(string: "https://example.test/a")!, format: .unknown, source: .appStore(trackID: 1))))
+    try expect(store.edSignatureBlock == nil, "App Store app must not be blocked")
 }
 check("checker: ignored apps are skipped; App Store apps get no source; input order kept") {
     let world = try fakeWorld()

@@ -110,15 +110,16 @@ public typealias AppUpdateCatalogueProbe = @Sendable () -> String?
 public typealias AppUpdateCatalogueEdit = @Sendable (_ bundleID: String, _ ignored: Bool) throws -> Void
 
 extension InstalledApp {
-    /// Same mapping the command line uses from an inventory observation.
-    init(observation app: LocalApplicationObservation) {
+    /// The one mapping from an inventory observation, shared by the app and the command line.
+    public init(observation app: LocalApplicationObservation) {
         self.init(name: app.displayName, path: app.path, bundleID: app.claimedBundleIdentifier,
                   shortVersion: app.claimedShortVersion, build: app.claimedBuild,
                   sparkleFeed: app.vendorMetadata.sparkleFeedURL,
                   sparkleFeedRejected: app.vendorMetadata.sparkleFeedURL == nil && app.vendorMetadata.sparkleDisposition == .malformed,
                   electronConfig: app.vendorMetadata.electronConfigBytes,
                   isAppStore: FileManager.default.fileExists(atPath: app.path + "/Contents/_MASReceipt"),
-                  isWrappedIOSApp: app.isWrappedIOSApp)
+                  isWrappedIOSApp: app.isWrappedIOSApp,
+                  sparklePublicEDKey: app.vendorMetadata.sparklePublicEDKey)
     }
 }
 
@@ -207,7 +208,13 @@ public struct AppUpdateRow: Identifiable, Equatable, Sendable {
     public var kindNote: String? {
         if isAppStoreUpdate { return "App Store" }
         if status == .packageUnsupported { return "Installer package" }
-        if status == .notInstallable { return "Unconfirmed" }
+        if status == .notInstallable {
+            switch outcome?.edSignatureBlock {
+            case .keyMalformed?: return "Bad key"
+            case .signatureMissing?, .signatureMalformed?: return "Unsigned"
+            case nil: return "Unconfirmed"
+            }
+        }
         if needsManualAdmin || privilege == .admin { return "Needs admin" }
         return nil
     }
@@ -225,6 +232,7 @@ public struct AppUpdateRow: Identifiable, Equatable, Sendable {
             case .installer: return "Update available as an installer package. Apple's Installer will open and ask for your password."
             }
         case .notInstallable:
+            if let block = outcome?.edSignatureBlock { return block.message }
             if case .homebrewCask? = outcome?.source, outcome?.lowConfidence == true {
                 return "Homebrew (unconfirmed) — add a catalogue entry to enable updates"
             }

@@ -341,6 +341,7 @@ private struct InventoryScan {
         var display = fallback(bundle.name), identifier: String?, version: String?, build: String?
         var disposition: LocalInventoryMetadataDisposition = .unavailable
         var feed: String?, config: Data?, product: Data?
+        var edKey: String?
         var installedIcon: LocalInstalledIcon?
         var feedDisposition: LocalInventoryMetadataDisposition = .unavailable
         var configDisposition: LocalInventoryMetadataDisposition = .unavailable
@@ -392,6 +393,7 @@ private struct InventoryScan {
             let preferred = field("CFBundleDisplayName"), name = field("CFBundleName")
             identifier = field("CFBundleIdentifier"); version = field("CFBundleShortVersionString"); build = field("CFBundleVersion")
             display = preferred ?? name ?? display
+            edKey = dictionary["SUPublicEDKey"] == nil ? nil : (dictionary["SUPublicEDKey"] as? String ?? "")
             if let raw = dictionary["SUFeedURL"] {
                 if let text = raw as? String, InventoryIO.safeFeed(text) {
                     feed = text; feedDisposition = .observed
@@ -416,7 +418,7 @@ private struct InventoryScan {
         } catch {
             identifier = nil; version = nil; build = nil; display = fallback(bundle.name)
             disposition = (error as? InventoryFailure) == .absent ? .unavailable : .refused
-            feed = nil; config = nil; product = nil; installedIcon = nil
+            feed = nil; config = nil; product = nil; installedIcon = nil; edKey = nil
             feedDisposition = disposition; configDisposition = disposition; productDisposition = disposition
             issue((error as? InventoryFailure) == .absent ? .metadataUnavailable : InventoryIO.issue(error), bundle.path)
         }
@@ -430,7 +432,8 @@ private struct InventoryScan {
                 claimedBundleIdentifier: identifier, claimedShortVersion: version, claimedBuild: build, metadataDisposition: disposition,
                 vendorMetadata: LocalInstalledVendorMetadata(sparkleFeedURL: feed, electronConfigBytes: config,
                     sparkleDisposition: feedDisposition, electronDisposition: configDisposition,
-                    productJSONBytes: product, productJSONDisposition: productDisposition), installedIcon: installedIcon))
+                    productJSONBytes: product, productJSONDisposition: productDisposition,
+                    sparklePublicEDKey: edKey), installedIcon: installedIcon))
             if rows.count == LocalInventoryLimits.applications { issue(.applicationLimit, bundle.path) }
         }
     }
