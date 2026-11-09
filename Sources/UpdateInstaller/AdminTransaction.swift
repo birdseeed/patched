@@ -488,7 +488,21 @@ extension UpdateInstaller {
             let waited = await consent.path.waiter.waitForInstaller(appAt: target.path, installed: target.facts,
                                                                     interaction: consent.interaction)
             let now: BundleFacts
-            switch engine.judgePackage(journal) {
+            var verdict = engine.judgePackage(journal)
+            if waited == .changed {
+                // The app changed, but Installer can still be writing its binary and frameworks: a check now
+                // would fail on a half-written app and report a failure for an install that then succeeds.
+                // While Installer is running and nothing is decided, look again until it settles, the user
+                // presses Done, or a few minutes pass (a failed package leaves Installer open on its summary).
+                let waiter = consent.path.waiter
+                let settleBy = Date().addingTimeInterval(waiter.settleTimeout)
+                while case .undecided = verdict, engine.installerRunning(), Date() < settleBy, !Task.isCancelled,
+                      !consent.interaction.userSaysFinished {
+                    try? await Task.sleep(nanoseconds: UInt64(max(0.01, waiter.settleInterval) * 1_000_000_000))
+                    verdict = engine.judgePackage(journal)
+                }
+            }
+            switch verdict {
             case .untouched:
                 // The old app verifies fully as itself and Installer has quit: nothing happened.
                 engine.discardBackupCopy(&journal)

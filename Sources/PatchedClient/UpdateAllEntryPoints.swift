@@ -129,3 +129,18 @@ extension NativeClientSession {
         updateNotifier?.onUpdateAll = { [weak self] keys in self?.updateAllEntry.requestUpdateAll(only: keys) }
     }
 }
+
+extension NativeClientSession {
+    /// The self-update notification's Update… button: open Updates and ask for confirmation. It never installs;
+    /// installing needs a separate click on the confirmation itself.
+    func wireSelfUpdateAction(openUpdates: @escaping @MainActor () -> Void) {
+        wireSelfUpdateAction(updateNotifier, openUpdates: openUpdates)
+    }
+
+    @_spi(Testing) public func wireSelfUpdateAction(_ notifier: SystemUpdateNotifier?, openUpdates: @escaping @MainActor () -> Void) {
+        notifier?.onSelfUpdate = { [weak self] in
+            openUpdates()
+            self?.appUpdates.requestSelfUpdate()
+        }
+    }
+}

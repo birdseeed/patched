@@ -350,6 +350,16 @@ public enum InstallerWaitResult: Sendable, Equatable {
 /// Waits for the user to finish in Apple's Installer. The installer judges the disk afterwards either way.
 public protocol InstallerCompletionWaiting: Sendable {
     func waitForInstaller(appAt path: String, installed: BundleFacts, interaction: AdminInteraction) async -> InstallerWaitResult
+    /// Once the app has changed, Installer may still be writing the rest of it (Info.plist often lands first).
+    /// While it is running and the result is undecided, Patched looks again every `settleInterval`, for at most
+    /// `settleTimeout`, before giving up.
+    var settleInterval: TimeInterval { get }
+    var settleTimeout: TimeInterval { get }
+}
+
+extension InstallerCompletionWaiting {
+    public var settleInterval: TimeInterval { 5 }
+    public var settleTimeout: TimeInterval { 5 * 60 }
 }
 
 /// Polls the installed app's Info.plist until it differs from before and stays put for `stableReads`
@@ -358,8 +368,14 @@ public struct VersionPollingWaiter: InstallerCompletionWaiting {
     public var timeout: TimeInterval
     public var interval: TimeInterval
     public var stableReads: Int
-    public init(timeout: TimeInterval = 30 * 60, interval: TimeInterval = 2, stableReads: Int = 3) {
+    /// See `InstallerCompletionWaiting`: each look re-runs codesign and spctl, so it is not done every poll.
+    public var settleInterval: TimeInterval
+    /// Bounded well below `timeout`: a package that failed leaves Installer open on its summary screen.
+    public var settleTimeout: TimeInterval
+    public init(timeout: TimeInterval = 30 * 60, interval: TimeInterval = 2, stableReads: Int = 3,
+                settleInterval: TimeInterval = 5, settleTimeout: TimeInterval = 5 * 60) {
         self.timeout = timeout; self.interval = interval; self.stableReads = max(1, stableReads)
+        self.settleInterval = settleInterval; self.settleTimeout = settleTimeout
     }
 
     public func waitForInstaller(appAt path: String, installed: BundleFacts, interaction: AdminInteraction) async -> InstallerWaitResult {

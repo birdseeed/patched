@@ -1332,13 +1332,88 @@ check("self release: html_url on another host, path, tag or scheme is ignored") 
     for url in bad { try expect(PatchedReleaseChecker.parse(releaseJSON(url: url)) == nil, "accepted html_url \(url)") }
     try expect(PatchedReleaseChecker.parse(releaseJSON(url: base + "v0.2.0")) != nil, "the exact page was refused")
 }
-check("self release: only tag_name, html_url, draft and prerelease are used (assets are never read)") {
+check("self release: only the tag, page, flags and exact asset names and URLs are used") {
     let withAssets = releaseJSON(extra: #","assets":[{"browser_download_url":"https://evil.example/Patched.zip"}],"zipball_url":"https://evil.example/z","body":"x","name":"Evil""#)
     let release = try PatchedReleaseChecker.parse(withAssets).unwrapChecked()
     try expectEqual(release, PatchedRelease(version: "0.2.0", pageURL: releasePage))
+    try expect(release.assets == nil, "an unnamed asset on another host was accepted")
     let mirror = Mirror(reflecting: release).children.map { $0.label ?? "" }.sorted()
-    try expectEqual(mirror, ["pageURL", "version"])
+    try expectEqual(mirror, ["assets", "pageURL", "version"])
 }
+
+func asset(_ name: String, _ url: String, extra: String = "") -> String {
+    #"{"name":"\#(name)","browser_download_url":"\#(url)","size":3217704,"state":"uploaded"\#(extra)}"#
+}
+func assetsJSON(tag: String = "v0.2.0", _ assets: [String]) -> Data {
+    releaseJSON(tag: tag, extra: #","assets":["# + assets.joined(separator: ",") + "]")
+}
+let download020 = "https://github.com/birdseeed/patched/releases/download/v0.2.0/"
+let goodZip = asset("Patched-0.2.0.zip", download020 + "Patched-0.2.0.zip")
+let goodSig = asset("Patched-0.2.0.zip.sig", download020 + "Patched-0.2.0.zip.sig")
+
+check("self release assets: the exact zip and signature URLs are accepted, alongside other assets") {
+    let other = asset("Patched-0.2.0.zip.sha256", download020 + "Patched-0.2.0.zip.sha256")
+    let release = try PatchedReleaseChecker.parse(assetsJSON([other, goodZip, goodSig])).unwrapChecked()
+    let assets = try release.assets.unwrapChecked()
+    try expectEqual(assets.zipURL.absoluteString, download020 + "Patched-0.2.0.zip")
+    try expectEqual(assets.signatureURL.absoluteString, download020 + "Patched-0.2.0.zip.sig")
+    try expectEqual(release.pageURL, releasePage)
+    // A plain tag gives plain-tag URLs.
+    let plainBase = "https://github.com/birdseeed/patched/releases/download/0.2.0/"
+    let plain = try PatchedReleaseChecker.parse(assetsJSON(tag: "0.2.0", [asset("Patched-0.2.0.zip", plainBase + "Patched-0.2.0.zip"),
+                                                                        asset("Patched-0.2.0.zip.sig", plainBase + "Patched-0.2.0.zip.sig")])).unwrapChecked()
+    try expect(plain.assets?.zipURL.absoluteString == plainBase + "Patched-0.2.0.zip", "plain tag: \(String(describing: plain.assets))")
+    // The real shape GitHub returns (extra fields, a digest) parses the same way.
+    let real = try PatchedReleaseChecker.parse(assetsJSON([asset("Patched-0.2.0.zip", download020 + "Patched-0.2.0.zip",
+        extra: #","digest":"sha256:6a78","content_type":"application/zip","uploader":{"login":"birdseeed"}"#), goodSig])).unwrapChecked()
+    try expect(real.assets != nil, "real-shaped assets refused")
+    try expectEqual(PatchedReleaseChecker.evaluate(assetsJSON([goodZip, goodSig]), currentVersion: "0.1.0"), .newer(release))
+}
+
+check("self release assets: a wrong host, scheme, path, tag, name or query leaves the release notify-only") {
+    let zipName = "Patched-0.2.0.zip"
+    let badZipURLs = ["https://evil.example/birdseeed/patched/releases/download/v0.2.0/" + zipName,
+                      "https://github.com.evil.example/birdseeed/patched/releases/download/v0.2.0/" + zipName,
+                      "https://objects.githubusercontent.com/birdseeed/patched/releases/download/v0.2.0/" + zipName,
+                      "http://github.com/birdseeed/patched/releases/download/v0.2.0/" + zipName,
+                      "https://github.com/someone/patched/releases/download/v0.2.0/" + zipName,
+                      "https://github.com/birdseeed/other/releases/download/v0.2.0/" + zipName,
+                      "https://github.com/birdseeed/patched/releases/download/v0.1.0/" + zipName,
+                      "https://github.com/birdseeed/patched/releases/download/0.2.0/" + zipName,
+                      download020 + "Patched-0.1.0.zip", download020 + "patched-0.2.0.zip",
+                      download020 + zipName + "?x=1", download020 + zipName + "#f", download020 + "x/../" + zipName,
+                      "https://github.com:444/birdseeed/patched/releases/download/v0.2.0/" + zipName,
+                      "https://user@github.com/birdseeed/patched/releases/download/v0.2.0/" + zipName, ""]
+    for url in badZipURLs {
+        let release = try PatchedReleaseChecker.parse(assetsJSON([asset(zipName, url), goodSig])).unwrapChecked()
+        try expect(release.assets == nil, "accepted zip URL \(url)")
+        try expect(release.pageURL == releasePage, "the release itself must still be announced")
+    }
+    for url in [download020 + "Patched-0.2.0.zip.sig2", download020 + "Patched-0.2.0.sig", "https://evil.example/Patched-0.2.0.zip.sig"] {
+        let release = try PatchedReleaseChecker.parse(assetsJSON([goodZip, asset("Patched-0.2.0.zip.sig", url)])).unwrapChecked()
+        try expect(release.assets == nil, "accepted signature URL \(url)")
+    }
+    // Wrong names, even with a matching-looking URL.
+    for name in ["Patched.zip", "Patched-0.1.0.zip", "Patched-0.2.0.ZIP", "Patched-0.2.0.zip ", "patched-0.2.0.zip"] {
+        let release = try PatchedReleaseChecker.parse(assetsJSON([asset(name, download020 + "Patched-0.2.0.zip"), goodSig])).unwrapChecked()
+        try expect(release.assets == nil, "accepted zip named \(name.debugDescription)")
+    }
+    // Missing either file, a duplicate, or a non-list.
+    for list in [[goodZip], [goodSig], [], [goodZip, goodSig, goodZip], [goodZip, goodSig, goodSig]] {
+        let release = try PatchedReleaseChecker.parse(assetsJSON(list)).unwrapChecked()
+        try expect(release.assets == nil, "accepted \(list.count) assets")
+    }
+    for shape in [#","assets":{}"#, #","assets":"x""#, #","assets":[5,"x"]"#, ""] {
+        try expect(PatchedReleaseChecker.parse(releaseJSON(extra: shape))?.assets == nil, "assets shape \(shape)")
+    }
+    let many = (0..<70).map { asset("other-\($0)", download020 + "other-\($0)") } + [goodZip, goodSig]
+    try expect(PatchedReleaseChecker.parse(assetsJSON(many))?.assets == nil, "a huge asset list was searched")
+    // Drafts and prereleases stay rejected even with perfect assets.
+    let draft = Data(#"{"tag_name":"v0.2.0","html_url":"https://github.com/birdseeed/patched/releases/tag/v0.2.0","draft":true,"prerelease":false,"assets":["#.utf8)
+        + Data((goodZip + "," + goodSig + "]}").utf8)
+    try expect(PatchedReleaseChecker.parse(draft) == nil, "draft with assets accepted")
+}
+
 check("self release: malformed JSON, wrong shapes and oversized responses are silent") {
     for body in ["", "not json", "[]", "null", "{}", #"{"tag_name":5,"html_url":"x","draft":false,"prerelease":false}"#, "{\"tag_name\":\"v9.9.9\""] {
         try expectEqual(PatchedReleaseChecker.evaluate(Data(body.utf8), currentVersion: "0.1.0"), .noNews, body)

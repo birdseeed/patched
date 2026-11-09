@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 import Combine
 import UpdateSources
 import UpdateInstaller
@@ -264,11 +265,16 @@ extension NoSourceReason {
 }
 
 /// A newer Patched release, validated by `PatchedReleaseChecker`. Shown in the menu, the Updates view and
-/// Patched's own row; "Download" opens `url` (the release page) on a click and does nothing else.
+/// Patched's own row; "Download" opens `url` (the release page) on a click and does nothing else. When the
+/// release carries its signed zip (`assets`), "Update" asks for confirmation and then installs it.
 public struct SelfUpdate: Equatable, Sendable {
     public let version: String
     public let url: URL
-    public init(version: String, url: URL) { self.version = version; self.url = url }
+    /// The signed zip and its signature; nil for a release that can only be downloaded by hand.
+    public let assets: PatchedReleaseAssets?
+    public init(version: String, url: URL, assets: PatchedReleaseAssets? = nil) {
+        self.version = version; self.url = url; self.assets = assets
+    }
     public var text: String { "Patched \(version) is available" }
     /// Identity for "have I told the user about this" (one notification per new version).
     @_spi(Testing) public var key: String { "im.patched.self-update\u{1F}" + version }
@@ -276,6 +282,41 @@ public struct SelfUpdate: Equatable, Sendable {
 
 /// One lookup of Patched's own latest release. At most one request per call.
 public typealias SelfUpdateCheck = @Sendable () async -> PatchedReleaseResult
+
+/// Installs a signed Patched release over the running app, then reopens it. `SelfUpdater` in production;
+/// tests use a fake. Only `confirmSelfUpdate()` ever calls it.
+public protocol SelfInstalling: Sendable {
+    func install(_ release: PatchedRelease, progress: @escaping @Sendable (SelfUpdateStep) -> Void) async throws -> SelfUpdateReport
+    /// Starts the new Patched (it waits for this process to quit). Throws if it could not be started.
+    func relaunch(_ report: SelfUpdateReport) throws
+}
+
+/// Where updating Patched itself has got to. Shown beside "Patched X is available".
+public enum SelfInstallState: Equatable, Sendable {
+    case idle
+    /// Waiting for the user to confirm; nothing has been downloaded.
+    case confirming(version: String)
+    case working(version: String, step: SelfUpdateStep)
+    case reopening(version: String)
+    case failed(String)
+
+    public var text: String? {
+        switch self {
+        case .idle: return nil
+        case .confirming(let version): return "Update Patched to \(version)? Patched will quit and reopen."
+        case .working(let version, .downloading): return "Downloading Patched \(version)…"
+        case .working(_, .verifying): return "Checking the release signature…"
+        case .working(let version, .installing): return "Installing Patched \(version)…"
+        case .reopening(let version): return "Reopening Patched \(version)…"
+        case .failed(let message): return message
+        }
+    }
+    public var isConfirming: Bool { if case .confirming = self { return true }; return false }
+    public var isFailed: Bool { if case .failed = self { return true }; return false }
+    public var isBusy: Bool {
+        switch self { case .working, .reopening: return true; default: return false }
+    }
+}
 
 public struct AppUpdateQuitConfirmation: Equatable, Sendable {
     public enum Action: Equatable, Sendable { case update, rollback, recover }
@@ -408,6 +449,15 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
     @_spi(Testing) public var selfLookupTimeout: TimeInterval = 15
     /// True from the start of a check until its lookup has answered (or the check ended without using it).
     @Published public private(set) var selfLookupPending = false
+    /// Updating Patched itself: confirmation, progress or failure. Only explicit clicks change it from idle.
+    @Published public private(set) var selfInstall: SelfInstallState = .idle
+    /// Installs a signed Patched release. Only `live()` sets a real one, and only for an installed Patched.app.
+    @_spi(Testing) public var selfInstaller: (any SelfInstalling)?
+    /// Quits this Patched once the new one has been started. `live()` sets the real terminate.
+    @_spi(Testing) public var selfTerminate: @MainActor () -> Void = {}
+    /// How many times an install was actually started. For tests of the entry points.
+    @_spi(Testing) public private(set) var selfInstallStarts = 0
+    private var selfInstallTask: Task<Void, Never>?
     private var selfApplyTask: Task<Void, Never>?
     /// Called when a lookup of the current check has been applied. Used by the background scheduler.
     var onSelfLookupFinished: (() -> Void)?
@@ -501,6 +551,12 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
         // knows its version.
         if let runningVersion, !RealStateTripwire.isActive {
             controller.selfUpdateCheck = { await PatchedReleaseChecker.check(currentVersion: runningVersion, fetcher: fetcher) }
+            // Self-update only for a real Patched.app; a `swift run` build keeps Download only.
+            let bundle = Bundle.main
+            if bundle.bundlePath.hasSuffix(".app"), bundle.bundleIdentifier == PatchedReleaseKey.bundleID {
+                controller.selfInstaller = LiveSelfInstaller(state: state, appPath: bundle.bundlePath, runningVersion: runningVersion)
+                controller.selfTerminate = { NSApplication.shared.terminate(nil) }
+            }
         }
         return controller
     }
@@ -694,10 +750,13 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
             let result = await Self.raced(lookup, timeout: timeout)
             guard let self, !Task.isCancelled, self.generation == mine else { return }
             switch result {
-            case .newer(let release): self.selfUpdate = SelfUpdate(version: release.version, url: release.pageURL)
+            case .newer(let release): self.selfUpdate = SelfUpdate(version: release.version, url: release.pageURL, assets: release.assets)
             case .noNews: self.selfUpdate = nil
             case .unavailable: break      // a failed lookup says nothing: keep what was known
             }
+            // A confirmation names one version; if the offer changed under it, close it rather than let
+            // Update quietly do nothing (or install something the user did not read).
+            if case .confirming(let asked) = self.selfInstall, asked != self.selfUpdate?.version { self.selfInstall = .idle }
             let version = self.selfUpdate?.version
             for index in self.rows.indices where self.rows[index].outcome?.noSourceReason == .thisApp {
                 self.rows[index].selfUpdateVersion = version
@@ -732,6 +791,92 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
     public func downloadSelfUpdate() {
         guard let selfUpdate else { return }
         _ = urlOpener.open(selfUpdate.url)
+    }
+
+    /// Update is offered beside "Patched X is available" only for a release with a signed zip, in an installed
+    /// Patched.app, when nothing else is running.
+    public var canInstallSelfUpdate: Bool {
+        selfUpdate?.assets != nil && selfInstaller != nil && !selfInstall.isBusy
+    }
+
+    /// A click on Update beside "Patched X is available" (menu, Updates, or the button on its notification).
+    /// It only asks: nothing is downloaded until `confirmSelfUpdate()`. The scheduler, Update All and the
+    /// command line never call it.
+    public func requestSelfUpdate() {
+        guard let own = selfUpdate, canInstallSelfUpdate else { return }
+        selfInstall = .confirming(version: own.version)
+    }
+
+    /// Cancel on the confirmation, or dismissing a failure.
+    public func cancelSelfUpdate() {
+        if selfInstall.isConfirming || selfInstall.isFailed { selfInstall = .idle }
+    }
+
+    /// The confirmation's Update: download, verify against the release key, replace the running app, reopen
+    /// the new one and quit. Any failure leaves the installed Patched as it was and says why. A release that
+    /// would need admin rights opens the release page instead.
+    public func confirmSelfUpdate() {
+        guard case .confirming(let version) = selfInstall else { return }
+        guard let own = selfUpdate, own.version == version, let assets = own.assets, let installer = selfInstaller else {
+            selfInstall = .idle; return
+        }
+        guard phase == .idle, !isWorking else {
+            selfInstall = .failed("Patched can't update itself while a check or another update is running. Try again when it has finished.")
+            return
+        }
+        isWorking = true
+        epoch += 1; pendingQuit = nil
+        selfInstallStarts += 1
+        selfInstall = .working(version: version, step: .downloading)
+        let release = PatchedRelease(version: version, pageURL: own.url, assets: assets)
+        let progress: @Sendable (SelfUpdateStep) -> Void = { [weak self] step in
+            Task { @MainActor in
+                guard let self, case .working(let v, let current) = self.selfInstall, v == version, step > current else { return }
+                self.selfInstall = .working(version: version, step: step)
+            }
+        }
+        selfInstallTask = Task { [weak self] in
+            let outcome: Result<SelfUpdateReport, Error>
+            do { outcome = .success(try await Self.background { try await installer.install(release, progress: progress) }) }
+            catch { outcome = .failure(error) }
+            guard let self else { return }
+            self.selfInstallTask = nil
+            switch outcome {
+            case .success(let report):
+                self.selfInstall = .reopening(version: version)
+                do { try installer.relaunch(report) } catch {
+                    self.isWorking = false
+                    self.selfInstall = .failed("Patched \(version) is installed. Quit Patched and open it again to use it.")
+                    return
+                }
+                self.selfTerminate()
+            case .failure(let error):
+                self.isWorking = false
+                let refusal = error as? InstallRefusal
+                if refusal?.code == "needs_admin" {
+                    _ = self.urlOpener.open(own.url)
+                    self.selfInstall = .failed("Patched can't replace itself here without admin rights, so the release page is open. Install Patched \(version) from there.")
+                } else {
+                    self.selfInstall = .failed(Self.selfInstallFailure(refusal, error: error))
+                }
+            }
+        }
+    }
+
+    nonisolated static func selfInstallFailure(_ refusal: InstallRefusal?, error: Error) -> String {
+        let reason: String
+        switch refusal {
+        case .releaseSignatureInvalid?: reason = "the download isn't signed with Patched's release key"
+        case .download(let detail)?: reason = "the download failed (\(detail))"
+        case .insecureDownload?: reason = "the download went somewhere other than GitHub"
+        case .tooLarge?: reason = "the download is larger than a Patched release can be"
+        case .versionMismatch?, .notNewer?, .bundleNotFound?, .ambiguousBundle?: reason = "the download isn't the Patched release it should be"
+        case .signatureInvalid?: reason = "the new app's code signature didn't verify"
+        case .unresolved(let detail)?: return "Patched couldn't finish updating and left everything in place: \(detail)"
+        case let refusal?: reason = refusal.message
+        case nil: reason = "\(error)"
+        }
+        return "Couldn't update Patched: " + reason + ". Patched is unchanged."
     }
 
     /// A click on one row's Update. Only here (and in its quit confirmation) can the admin path be used,
@@ -983,6 +1128,7 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
         await operation?.value
         await openTask?.value
         await selfApplyTask?.value
+        await selfInstallTask?.value
     }
 
     // MARK: Operations
@@ -1407,6 +1553,19 @@ final class LazyState: @unchecked Sendable {
         guard case .failure? = known else { return nil }
         return "Update state folders are unavailable, so updates are disabled."
     }
+}
+
+/// The real self-update: the running Patched.app, the installer's backups folder (resolved on first use).
+struct LiveSelfInstaller: SelfInstalling {
+    let state: LazyState
+    let appPath: String
+    let runningVersion: String
+    func install(_ release: PatchedRelease, progress: @escaping @Sendable (SelfUpdateStep) -> Void) async throws -> SelfUpdateReport {
+        let locations = try state.result.get()
+        return try await SelfUpdater(appPath: appPath, runningVersion: runningVersion, backupsRoot: locations.backups)
+            .install(release, progress: progress)
+    }
+    func relaunch(_ report: SelfUpdateReport) throws { try SelfRelaunch.open(appPath: report.appPath) }
 }
 
 /// An installer that only resolves its folders when first asked to do something.

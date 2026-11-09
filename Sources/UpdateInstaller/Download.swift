@@ -109,13 +109,19 @@ public enum DigestCheck {
 
 /// Real https downloader: ephemeral session, https-only redirects (the Phase 1 policy), streams to the sink.
 public struct URLSessionArtifactDownloader: ArtifactDownloading {
-    public init() {}
+    /// When set, the first URL and every redirect must be on one of these hosts (lower case); nil allows any
+    /// https host, as for vendor downloads.
+    public let allowedHosts: Set<String>?
+    public init(allowedHosts: Set<String>? = nil) { self.allowedHosts = allowedHosts }
 
     public func download(_ url: URL, into sink: ArtifactSink, expectedLength: Int64?) async throws {
         guard url.scheme?.lowercased() == "https", url.host?.isEmpty == false else {
             throw InstallRefusal.insecureDownload(url.absoluteString)
         }
-        let delegate = StreamingDelegate(sink: sink, expectedLength: expectedLength)
+        if let allowedHosts, !allowedHosts.contains(url.host?.lowercased() ?? "") {
+            throw InstallRefusal.insecureDownload("\(url.absoluteString) is not on an allowed host")
+        }
+        let delegate = StreamingDelegate(sink: sink, expectedLength: expectedLength, allowedHosts: allowedHosts)
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = DownloadLimits.idleTimeout
         config.timeoutIntervalForResource = DownloadLimits.totalTimeout
@@ -147,12 +153,15 @@ public struct URLSessionArtifactDownloader: ArtifactDownloading {
 private final class StreamingDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     let sink: ArtifactSink
     let expectedLength: Int64?
+    let allowedHosts: Set<String>?
     var continuation: CheckedContinuation<Void, Error>?
     var task: URLSessionTask?
     private var failure: Error?
     private let lock = NSLock()
 
-    init(sink: ArtifactSink, expectedLength: Int64?) { self.sink = sink; self.expectedLength = expectedLength }
+    init(sink: ArtifactSink, expectedLength: Int64?, allowedHosts: Set<String>? = nil) {
+        self.sink = sink; self.expectedLength = expectedLength; self.allowedHosts = allowedHosts
+    }
 
     func cancel() { lock.withLock { task }?.cancel() }
 
@@ -163,7 +172,7 @@ private final class StreamingDelegate: NSObject, URLSessionDataDelegate, @unchec
 
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest request: URLRequest, completionHandler: @escaping @Sendable (URLRequest?) -> Void) {
-        if let allowed = HTTPSRedirectPolicy.decide(request) {
+        if let allowed = HTTPSRedirectPolicy.decide(request, allowedHosts: allowedHosts) {
             completionHandler(allowed)
         } else {
             fail(InstallRefusal.insecureDownload("redirect to \(request.url?.absoluteString ?? "?")"), task)
@@ -176,7 +185,8 @@ private final class StreamingDelegate: NSObject, URLSessionDataDelegate, @unchec
         guard let http = response as? HTTPURLResponse else {
             fail(InstallRefusal.download("non-HTTP response"), dataTask); completionHandler(.cancel); return
         }
-        guard http.url?.scheme?.lowercased() == "https" else {
+        guard http.url?.scheme?.lowercased() == "https",
+              allowedHosts.map({ $0.contains(http.url?.host?.lowercased() ?? "") }) ?? true else {
             fail(InstallRefusal.insecureDownload(http.url?.absoluteString ?? "?"), dataTask); completionHandler(.cancel); return
         }
         guard http.statusCode == 200 else {

@@ -10,6 +10,14 @@ enum PatchedEntry {
     @MainActor private static var installerLocations: InstallerLocations?
 
     @MainActor static func main() {
+        // Reopened by a self-update: let the previous Patched finish quitting before touching any state.
+        if let previous = SelfRelaunch.pidToAwait(in: CommandLine.arguments) {
+            SelfRelaunch.waitForExit(of: previous)
+        }
+        // A self-update that crashed or was killed can leave its staging folder beside the app; nothing else
+        // would ever remove it. Only Patched.app installs (not swift run builds) have one.
+        let bundlePath = Bundle.main.bundlePath
+        if bundlePath.hasSuffix(".app") { SelfUpdater.removeStaleWorkFolders(besideApp: bundlePath) }
         do {
             let locations = try InstallerLocations.standard()
             installerLocations = locations

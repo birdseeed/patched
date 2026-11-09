@@ -62,7 +62,11 @@ Notification Settings.
 
 Mac App Store apps are reported but never installed by Patched: it asks Apple's public App Store lookup for the latest version (only the bundle IDs of your App Store apps are sent, and only to Apple; ignore an app in the catalogue to stop that) and tells you to update it in the App Store.
 
-Patched also tells you when a newer Patched release exists. On the same schedule (when it opens, every three hours and on Check Now) it makes a single anonymous request to GitHub for the latest release of this repository (`api.github.com/repos/birdseeed/patched/releases/latest`). The request carries no identifying data beyond a plain `Patched/<version>` User-Agent. If the release is newer than the app you are running, the menu and the Updates screen show "Patched 0.2.0 is available" with a **Download** button, and you get one notification per new version. Download opens that release's page on GitHub in your browser, only when you click it. Patched never downloads or installs itself, and Update All never includes it.
+Patched also tells you when a newer Patched release exists. On the same schedule (when it opens, every three hours and on Check Now) it makes a single anonymous request to GitHub for the latest release of this repository (`api.github.com/repos/birdseeed/patched/releases/latest`). The request carries no identifying data beyond a plain `Patched/<version>` User-Agent. If the release is newer than the app you are running, the menu and the Updates screen show "Patched 0.2.0 is available" with a **Download** button, and you get one notification per new version. Download opens that release's page on GitHub in your browser, only when you click it.
+
+Patched can also update itself, but only when you ask. Next to **Download** there is an **Update** button (and an **Update…** button on the notification). It asks "Update Patched to 0.2.0? Patched will quit and reopen." and does nothing until you confirm. Then it downloads that release's ZIP from GitHub, checks it against an Ed25519 signature made with my release key (the public half is built into Patched), checks the new app's bundle ID, version and code signature, swaps it in for the running Patched, keeps the previous version as a backup, and reopens. If any check fails, the installed Patched is left as it was. If replacing Patched would need administrator rights, it opens the release page instead. Scheduled checks, Update All and the command line never install Patched.
+
+If you have Patched 0.1.2 or earlier, install 0.1.3 by hand once (see [Install a release](#install-a-release)); from then on Patched offers in-app updates.
 
 Patched keeps its update state and backups in
 `~/Library/Application Support/Patched/Updater`, and its cache in
@@ -83,8 +87,11 @@ source and release. If macOS blocks it, use System Settings → Privacy & Securi
 → Open Anyway for that specific app. Do not disable Gatekeeper or lower system
 security globally.
 
-Without a pinned Developer ID Team ID, Patched does not update itself. Releases
-are source and ZIP downloads; there is no Homebrew tap at this stage.
+Each release also has a `Patched-<version>.zip.sig` file: the Ed25519 signature
+Patched checks before it updates itself. Without a Developer ID there is no Team ID
+to pin, so that signature, made with my release key, is what Patched trusts for its
+own updates. Releases are source and ZIP downloads; there is no Homebrew tap at
+this stage.
 
 ## Command-line interface
 

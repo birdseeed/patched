@@ -52,6 +52,10 @@ func tool(_ path: String, _ args: [String], stdin: Data? = nil) throws -> String
     return text
 }
 
+extension Optional {
+    func unwrapChecked() throws -> Wrapped { guard let self else { throw CheckFailure(description: "unexpected nil") }; return self }
+}
+
 // MARK: Fixtures
 
 extension UpdateInstaller {
@@ -1508,18 +1512,23 @@ check("no shell anywhere and processes only through the fixed-path runner") {
         }
     }
     try expectEqual(ProcessRunner.allowedTools, ["/usr/bin/ditto", "/usr/bin/hdiutil", "/usr/sbin/spctl",
-                                                 "/usr/sbin/pkgutil", "/usr/bin/open"])
-    // `open` and `pkgutil` are only for the experimental admin path; nothing else names them.
+                                                 "/usr/sbin/pkgutil", "/usr/bin/open", "/usr/bin/codesign"])
+    // `pkgutil` is only for the admin path; `open` for the admin path and for reopening Patched after its own
+    // update; `codesign` (verify only) for that self-update. Nothing else names them.
     for relative in files where relative.hasSuffix(".swift") && relative.hasPrefix("UpdateInstaller/") {
         let text = try String(contentsOfFile: sources.path + "/" + relative, encoding: .utf8)
         if relative != "UpdateInstaller/AdminUpdates.swift" && relative != "UpdateInstaller/ProcessRunner.swift" {
-            try expect(!text.contains("/usr/bin/open") && !text.contains("/usr/sbin/pkgutil"), "\(relative) runs an admin-only tool")
+            try expect(!text.contains("/usr/sbin/pkgutil"), "\(relative) runs an admin-only tool")
+            if relative != "UpdateInstaller/SelfUpdate.swift" {
+                try expect(!text.contains("/usr/bin/open") && !text.contains("/usr/bin/codesign"), "\(relative) runs a tool it should not")
+            }
         }
     }
     try expectEqual(ProcessRunner.run("/bin/ls", [], timeout: 5).status, -1, "tool outside the allow-list ran")
 }
 
 registerAdminChecks()
+registerSelfUpdateChecks()
 
 // Run only the temporary-root migration checks when requested explicitly.
 if Array(CommandLine.arguments.dropFirst()) == ["--migration"] { cases.removeAll() }

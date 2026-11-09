@@ -28,9 +28,10 @@ public enum ProcessRunner {
     }
 
     /// The only programs the installer may start. `pkgutil` (read-only package signature check) and
-    /// `open` (hands a verified package to Apple's Installer) are used only by the experimental admin path.
+    /// `open` (hands a verified package to Apple's Installer) are used by the admin path; `codesign` (verify
+    /// only) and `open` (reopen the new Patched) by Patched's self-update.
     public static let allowedTools: Set<String> = ["/usr/bin/ditto", "/usr/bin/hdiutil", "/usr/sbin/spctl",
-                                                   "/usr/sbin/pkgutil", "/usr/bin/open"]
+                                                   "/usr/sbin/pkgutil", "/usr/bin/open", "/usr/bin/codesign"]
     static let captureLimit = 256 * 1024
 
     private final class Verdict: @unchecked Sendable {

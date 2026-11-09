@@ -33,6 +33,52 @@ fi
 /usr/bin/grep -q 'NOTARY_PROFILE requires a nonempty SIGNING_IDENTITY' "$stage/rejected-release.log"
 [[ ! -e "$stage/rejected-release" ]] || { printf 'Rejected release created output artifacts.\n' >&2; exit 1; }
 printf 'Notarisation without signing identity refused: exit 1, no output artifacts.\n'
+# Release signing uses a throwaway key in a throwaway keychain, never the owner's login Keychain item.
+test_service=im.patched.release-signing.packaging-check
+test_keychain="$stage/release-signing-test.keychain-db"
+/usr/bin/security create-keychain -p "packaging-check-$RANDOM$RANDOM" "$test_keychain"
+/usr/bin/security set-keychain-settings "$test_keychain"
+release_env=(env -u SIGNING_IDENTITY -u NOTARY_PROFILE -u PATCHED_RELEASE_PUBLIC_KEY_OVERRIDE
+             PATCHED_RELEASE_KEY_SERVICE="$test_service" PATCHED_RELEASE_KEYCHAIN="$test_keychain")
+expect_release_refusal() {
+    local name=$1 message=$2 status
+    shift 2
+    if "$@" --output-dir "$stage/$name" > "$stage/$name.log" 2>&1; then
+        printf 'Release unexpectedly succeeded (%s).\n' "$name" >&2; exit 1
+    else
+        status=$?
+    fi
+    [[ $status -eq 1 ]] || { printf 'Expected exit 1 for %s, got %s.\n' "$name" "$status" >&2; exit 1; }
+    /usr/bin/grep -q "$message" "$stage/$name.log" || { printf 'Missing refusal text for %s.\n' "$name" >&2; exit 1; }
+    [[ ! -e "$stage/$name/Patched-$PACKAGING_VERSION.zip" && ! -e "$stage/$name/Patched-$PACKAGING_VERSION.zip.sig" ]] || {
+        printf 'Refused release (%s) left a zip or signature.\n' "$name" >&2; exit 1; }
+}
+# No key: refused before building, nothing produced.
+expect_release_refusal no-key-release 'Release signing key not found' \
+    "${release_env[@]}" /bin/bash scripts/release.sh "${build_options[@]}"
+[[ ! -e "$stage/no-key-release" ]] || { printf 'Release without a key created output.\n' >&2; exit 1; }
+# The public-key override is refused for the real service.
+expect_release_refusal real-override-release 'only for a throwaway test key' \
+    env -u SIGNING_IDENTITY -u NOTARY_PROFILE -u PATCHED_RELEASE_KEY_SERVICE PATCHED_RELEASE_KEYCHAIN="$test_keychain" \
+    PATCHED_RELEASE_PUBLIC_KEY_OVERRIDE=czM+l4MfG6HP6I7YVIjQSjPvW/7wIKTfJw1wN74W1EU= /bin/bash scripts/release.sh "${build_options[@]}"
+# ...and for any other service unless a throwaway keychain is named too.
+expect_release_refusal no-keychain-override-release 'only for a throwaway test key' \
+    env -u SIGNING_IDENTITY -u NOTARY_PROFILE -u PATCHED_RELEASE_KEYCHAIN PATCHED_RELEASE_KEY_SERVICE="$test_service" \
+    PATCHED_RELEASE_PUBLIC_KEY_OVERRIDE=czM+l4MfG6HP6I7YVIjQSjPvW/7wIKTfJw1wN74W1EU= /bin/bash scripts/release.sh "${build_options[@]}"
+mkdir -p .build/packaging-module-cache
+/usr/bin/xcrun swiftc -module-cache-path "$PACKAGING_ROOT/.build/packaging-module-cache" \
+    -o "$stage/release-signing" scripts/release-signing.swift
+test_private_key=$("$stage/release-signing" generate-test-key)
+test_public_key=$(printf '%s\n' "$test_private_key" | "$stage/release-signing" public-key)
+embedded_key=$(/usr/bin/sed -n 's/^    public static let publicKeyBase64 = "\([A-Za-z0-9+\/=]*\)"$/\1/p' Sources/UpdateInstaller/SelfUpdate.swift)
+[[ "$embedded_key" = 3pXCQuK7pRsCXKXhXwld3tJw+yisZpSMKef3OjEsk/k= ]] || { printf 'Unexpected embedded release key.\n' >&2; exit 1; }
+[[ "$test_public_key" != "$embedded_key" ]]
+/usr/bin/security add-generic-password -s "$test_service" -a ed25519 -w "$test_private_key" -T /usr/bin/security "$test_keychain"
+unset test_private_key
+# A key that is not the one built into Patched: signed, but the self-check refuses to publish.
+expect_release_refusal wrong-key-release 'does not verify against the release public key built into Patched' \
+    "${release_env[@]}" /bin/bash scripts/release.sh "${build_options[@]}"
+printf 'Release signing refused without a key, with the real-service override, and with a key Patched does not embed.\n'
 env -u SIGNING_IDENTITY -u NOTARY_PROFILE /bin/bash scripts/build-app.sh "${build_options[@]}" --output-dir "$stage/build"
 app="$stage/build/Patched.app"
 cli="$app/Contents/Helpers/patched"
@@ -136,10 +182,32 @@ schedule="$stage/schedule/im.patched.check.plist"
 mkdir -p "$stage/release"
 printf 'Packaging checksum sentinel\n' > "$stage/checksum-sentinel"
 ln -s "$stage/checksum-sentinel" "$stage/release/Patched-$PACKAGING_VERSION.zip.sha256"
-env -u SIGNING_IDENTITY -u NOTARY_PROFILE /bin/bash scripts/release.sh "${build_options[@]}" --output-dir "$stage/release"
+"${release_env[@]}" PATCHED_RELEASE_PUBLIC_KEY_OVERRIDE="$test_public_key" \
+    /bin/bash scripts/release.sh "${build_options[@]}" --output-dir "$stage/release"
 [[ "$(cat "$stage/checksum-sentinel")" = 'Packaging checksum sentinel' ]]
 [[ ! -L "$stage/release/Patched-$PACKAGING_VERSION.zip.sha256" ]]
 (cd "$stage/release" && /usr/bin/shasum -a 256 -c "Patched-$PACKAGING_VERSION.zip.sha256")
+# The .sig is one base64 line that verifies over the zip with the throwaway key, and with nothing else.
+release_zip="$stage/release/Patched-$PACKAGING_VERSION.zip"
+release_sig="$release_zip.sig"
+[[ -f "$release_sig" && ! -L "$release_sig" && "$(/usr/bin/wc -l < "$release_sig" | /usr/bin/tr -d ' ')" = 1 ]]
+/usr/bin/grep -Eq '^[A-Za-z0-9+/]{86}==$' "$release_sig"
+"$stage/release-signing" verify "$release_zip" "$release_sig" "$test_public_key"
+if "$stage/release-signing" verify "$release_zip" "$release_sig" "$embedded_key" > /dev/null 2>&1; then
+    printf 'A throwaway signature verified against the real release key.\n' >&2; exit 1
+fi
+/bin/cp "$release_zip" "$stage/tampered.zip"
+printf 'x' >> "$stage/tampered.zip"
+if "$stage/release-signing" verify "$stage/tampered.zip" "$release_sig" "$test_public_key" > /dev/null 2>&1; then
+    printf 'A tampered zip verified.\n' >&2; exit 1
+fi
+printf 'Release signature verified with the throwaway key; the real key and a tampered zip are refused.\n'
+# --unsigned-for-testing still builds a zip without the Keychain, and writes no signature.
+env -u SIGNING_IDENTITY -u NOTARY_PROFILE PATCHED_RELEASE_KEY_SERVICE=im.patched.release-signing.absent \
+    PATCHED_RELEASE_KEYCHAIN="$stage/absent.keychain-db" \
+    /bin/bash scripts/release.sh "${build_options[@]}" --unsigned-for-testing --output-dir "$stage/unsigned-release"
+[[ -f "$stage/unsigned-release/Patched-$PACKAGING_VERSION.zip" && ! -e "$stage/unsigned-release/Patched-$PACKAGING_VERSION.zip.sig" ]]
+(cd "$stage/unsigned-release" && /usr/bin/shasum -a 256 -c "Patched-$PACKAGING_VERSION.zip.sha256")
 /usr/bin/ditto -x -k "$stage/release/Patched-$PACKAGING_VERSION.zip" "$stage/unpacked"
 /usr/bin/codesign --verify --deep --strict --verbose=2 "$stage/unpacked/Patched.app"
 /usr/bin/codesign --verify --strict --verbose=2 "$stage/unpacked/Patched.app/Contents/Helpers/patched"

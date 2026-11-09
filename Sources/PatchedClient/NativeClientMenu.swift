@@ -34,8 +34,10 @@ public struct NativeClientMenuUpdates: Equatable, Sendable {
     public let rows: [Row]
     /// Updates beyond the cap; the menu shows "and N more…" and opens Updates.
     public let moreCount: Int
-    /// "Patched 0.2.0 is available" when a newer Patched release was announced; the menu adds a Download button.
+    /// "Patched 0.2.0 is available" when a newer Patched release was announced; the menu adds a Download button,
+    /// and an Update button when the release can be installed (`selfUpdateInstallable`).
     public var selfUpdateText: String? = nil
+    public var selfUpdateInstallable = false
 }
 
 extension AppUpdatesController {
@@ -76,7 +78,8 @@ extension AppUpdatesController {
             NativeClientMenuUpdates.Row(id: $0.id, name: $0.name, versions: Self.menuVersions($0), note: $0.kindNote)
         }
         return NativeClientMenuUpdates(header: header, checkedAt: checkedTime, note: note, rows: Array(shown),
-                                       moreCount: max(0, ordered.count - shown.count), selfUpdateText: selfUpdate?.text)
+                                       moreCount: max(0, ordered.count - shown.count), selfUpdateText: selfUpdate?.text,
+                                       selfUpdateInstallable: canInstallSelfUpdate)
     }
 
     /// Display versions only, from the row's structured fields: "139.0 → 139.0.6053.38" rather than
@@ -222,8 +225,8 @@ public struct NativeClientMenuView: View {
             if let note = list.note {
                 Text(verbatim: note).font(.caption).foregroundStyle(.secondary).padding(.horizontal, 8)
             }
-            if let text = list.selfUpdateText {
-                SelfUpdateLine(text: text, compact: true) { updates.downloadSelfUpdate() }
+            if list.selfUpdateText != nil, let own = updates.selfUpdate {
+                updates.selfUpdateLine(own, compact: true)
                     .padding(.horizontal, 8)
             }
             if !list.rows.isEmpty {
@@ -370,19 +373,84 @@ struct MenuItemLabel: View {
     }
 }
 
-/// "Patched 0.2.0 is available" with a Download button. The button opens the release page, on a click only.
+/// "Patched 0.2.0 is available" with a Download button, which opens the release page on a click only. For a
+/// release with a signed zip, in an installed Patched.app, there is also Update: it asks "Update Patched to X?
+/// Patched will quit and reopen." and installs only once that is confirmed. Progress and failures show below.
 struct SelfUpdateLine: View {
     let text: String
     var compact = false
+    var state: SelfInstallState = .idle
+    var canInstall = false
     let download: () -> Void
+    var update: () -> Void = {}
+    var confirm: () -> Void = {}
+    var cancel: () -> Void = {}
+
+    private var version: String { text.replacingOccurrences(of: "Patched ", with: "").replacingOccurrences(of: " is available", with: "") }
+    private var showsUpdate: Bool { canInstall && !state.isConfirming && !state.isBusy }
+
     var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if compact && showsUpdate {
+                HStack(spacing: 8) { label; Spacer(minLength: 0) }
+                HStack(spacing: 8) { Spacer(minLength: 0); buttons }
+            } else {
+                HStack(spacing: 8) { label; Spacer(minLength: 8); buttons }
+            }
+            if let status = state.text {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    if state.isBusy { ProgressView().controlSize(.small) }
+                    Text(verbatim: status).font(.caption)
+                        .foregroundStyle(state.isFailed ? Color.red : Color.primary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                }
+                if state.isConfirming {
+                    HStack(spacing: 8) {
+                        Spacer(minLength: 0)
+                        Button(action: cancel) { Text(verbatim: "Cancel") }
+                            .buttonStyle(ClientButtonStyle(enabled: true, prominent: false))
+                        Button(action: confirm) { Text(verbatim: "Update and Reopen") }
+                            .buttonStyle(ClientButtonStyle(enabled: true, prominent: true))
+                            .accessibilityLabel(Text(verbatim: "Update Patched to \(version) and reopen it"))
+                    }
+                } else if state.isFailed {
+                    HStack { Spacer(minLength: 0)
+                        Button(action: cancel) { Text(verbatim: "Dismiss") }
+                            .buttonStyle(ClientButtonStyle(enabled: true, prominent: false))
+                    }
+                }
+            }
+        }
+    }
+
+    private var label: some View {
         HStack(spacing: 8) {
             Image(systemName: "arrow.down.circle").foregroundStyle(ShellBrand.accent).accessibilityHidden(true)
             Text(verbatim: text).font(compact ? .callout : .body).lineLimit(1).truncationMode(.tail)
-            Spacer(minLength: 8)
-            Button(action: download) { Text(verbatim: "Download") }
-                .buttonStyle(ClientButtonStyle(enabled: true, prominent: false))
-                .accessibilityLabel(Text(verbatim: "Download " + text.replacingOccurrences(of: " is available", with: "")))
         }
+    }
+
+    @ViewBuilder private var buttons: some View {
+        if showsUpdate {
+            Button(action: update) { Text(verbatim: "Update") }
+                .buttonStyle(ClientButtonStyle(enabled: true, prominent: true))
+                .accessibilityLabel(Text(verbatim: "Update to Patched " + version))
+        }
+        Button(action: download) { Text(verbatim: "Download") }
+            .buttonStyle(ClientButtonStyle(enabled: !state.isBusy, prominent: false))
+            .disabled(state.isBusy)
+            .accessibilityLabel(Text(verbatim: "Download " + text.replacingOccurrences(of: " is available", with: "")))
+    }
+}
+
+extension AppUpdatesController {
+    /// The self-update line for this controller's current state.
+    func selfUpdateLine(_ own: SelfUpdate, compact: Bool = false) -> SelfUpdateLine {
+        SelfUpdateLine(text: own.text, compact: compact, state: selfInstall, canInstall: canInstallSelfUpdate,
+                       download: { [weak self] in self?.downloadSelfUpdate() },
+                       update: { [weak self] in self?.requestSelfUpdate() },
+                       confirm: { [weak self] in self?.confirmSelfUpdate() },
+                       cancel: { [weak self] in self?.cancelSelfUpdate() })
     }
 }

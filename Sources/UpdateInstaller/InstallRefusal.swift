@@ -74,6 +74,8 @@ public enum InstallRefusal: Error, Sendable, Equatable {
     case installerNotFinished(String)
     /// Apple's Installer changed the app, but what is installed now failed verification.
     case installedUnverified(String)
+    /// Patched's own release zip is not signed by the release key built into Patched (self-update only).
+    case releaseSignatureInvalid(String)
 
     public var code: String {
         switch self {
@@ -122,6 +124,7 @@ public enum InstallRefusal: Error, Sendable, Equatable {
         case .installerFailed: return "installer_failed"
         case .installerNotFinished: return "installer_not_finished"
         case .installedUnverified: return "installed_unverified"
+        case .releaseSignatureInvalid: return "release_signature_invalid"
         }
     }
 
@@ -172,6 +175,7 @@ public enum InstallRefusal: Error, Sendable, Equatable {
         case .installerFailed(let d): return "could not open Apple's Installer: \(d)"
         case .installerNotFinished(let d): return "Apple's Installer did not install the update, so nothing was verified: \(d)"
         case .installedUnverified(let d): return "Apple's Installer changed the app, but it failed verification: \(d)"
+        case .releaseSignatureInvalid(let d): return "Patched's release signature is not valid: \(d)"
         }
     }
 }

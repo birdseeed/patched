@@ -43,7 +43,7 @@ public struct AppUpdatesView: View {
                 }
             }
             if let own = controller.selfUpdate {
-                SelfUpdateLine(text: own.text) { controller.downloadSelfUpdate() }
+                controller.selfUpdateLine(own)
                     .padding(.horizontal, 10).padding(.vertical, 6)
                     .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(ShellBrand.accent.opacity(0.12)))
             }

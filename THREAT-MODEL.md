@@ -43,16 +43,101 @@ notarised is refused.
 - Apple's public App Store lookup (https, size-capped, strictly parsed), only to
   report a newer version of a Mac App Store app. It sends those apps' bundle IDs to
   Apple and nobody else, and its answer can never install anything (`app_store_managed`).
-- GitHub's latest-release record for this repository (https, 256 KB cap), only to
-  say that a newer Patched exists. It is untrusted metadata: only `tag_name`,
-  `html_url`, `draft` and `prerelease` are read; the tag must be digits and dots,
-  `html_url` must be exactly this repository's release page for that same tag, and
-  drafts and prereleases are ignored. Assets are never read. The request is a single
-  anonymous GET with a plain `Patched/<version>` User-Agent and no user data. The
-  only thing ever done with the result is to show "Patched X is available" and, on
-  a direct click on Download, open that validated page in the browser. Nothing is
-  downloaded, installed or opened automatically, and Patched's own row is never
-  part of Update All.
+- GitHub's latest-release record for this repository (https, 256 KB cap), to say
+  that a newer Patched exists and where its signed zip is. It is untrusted metadata:
+  only `tag_name`, `html_url`, `draft`, `prerelease` and each asset's `name` and
+  `browser_download_url` are read; the tag must be digits and dots, `html_url` must
+  be exactly this repository's release page for that same tag, and drafts and
+  prereleases are ignored. An asset counts only if it is named exactly
+  `Patched-<version>.zip` or `Patched-<version>.zip.sig`, appears once, and its URL
+  is exactly `https://github.com/birdseeed/patched/releases/download/<tag>/<name>`;
+  otherwise the release stays notify-only. The request is a single anonymous GET
+  with a plain `Patched/<version>` User-Agent and no user data. The result is shown
+  as "Patched X is available"; a direct click on Download opens that validated page
+  in the browser, and a direct, confirmed click on Update installs the release as
+  described in "Patched updating itself" below. Nothing is downloaded, installed or
+  opened automatically, and Patched's own row is never part of Update All.
+- Patched's own Ed25519 release key, for Patched's own updates only (below).
+
+## Patched updating itself
+
+Patched releases are ad-hoc signed: there is no Apple Developer ID yet, so there is
+no Team ID to pin and nothing for Gatekeeper to accept as notarised. The rules in
+"What is checked for every update" would refuse Patched itself, and still do (the
+normal installer never touches Patched). Self-update is a separate path whose trust
+anchor is Patched's own Ed25519 release key instead.
+
+**Signing.** `scripts/release.sh` signs the final zip bytes with the private key,
+which lives only in the owner's login Keychain (generic password, service
+`im.patched.release-signing`, account `ed25519`). The key goes from `security` straight
+into the signer's stdin; it is never in an argument, a file or the log. The script
+then verifies the `.sig` against the public key built into Patched
+(`PatchedReleaseKey` in `Sources/UpdateInstaller/SelfUpdate.swift`) and refuses to
+produce release files if the key is missing or the signature does not verify. The
+packaging checks use a throwaway key in a throwaway keychain.
+
+**When it runs.** Only from a click on Update beside "Patched X is available" (menu
+or Updates screen) or on the self-update notification's Update… button, and then
+only after a second click on the confirmation ("Update Patched to X? Patched will
+quit and reopen."). The notification button only brings up that confirmation.
+Scheduled checks, Update All and the command line (including `--all`) have no path
+to it. It is offered only in an installed `Patched.app` whose bundle ID is
+`im.patched.app`, and only while nothing else is checking or installing.
+
+**What is checked, in order.** Any failure stops the update and leaves the
+installed Patched exactly as it was:
+
+1. The asset URLs are the exact GitHub release URLs above, and the release version
+   is strictly newer than the running version.
+2. The running bundle is a real, non-symlinked `Patched.app` that the user can
+   replace (owned by the user, writable, folder writable, no immutable flags, not
+   App Translocated). Otherwise it is refused as needing admin rights and the
+   release page is opened instead.
+3. Download, https only. The first URL and every redirect must be on
+   `github.com`, `release-assets.githubusercontent.com` (where GitHub redirected
+   release assets on 9 November 2026) or `objects.githubusercontent.com` (where it
+   redirected them before). The zip is capped at 64 MiB and the signature at 1 KB,
+   both streamed into a private 0700 folder beside the app.
+4. The Ed25519 signature over the zip bytes must verify against the key built into
+   Patched. A missing, malformed or wrong signature, a wrong key or a changed zip is
+   refused before anything is unpacked.
+5. The zip is unpacked with `ditto` under a small disk budget, and exactly one
+   `.app` with bundle ID `im.patched.app`, with no symlink leaving it, is chosen.
+6. The staged app's `CFBundleShortVersionString` must equal the release version
+   exactly and be strictly newer than the running and installed versions, so an
+   older, genuinely signed zip cannot be replayed under a newer tag.
+7. `codesign --verify --strict --deep` with the requirement `identifier
+   "im.patched.app"` must pass. There is no Team ID or notarisation check: an
+   ad-hoc build has neither, and the release signature is what vouches for it.
+8. Any quarantine flag is removed from the staged app (it has already been
+   verified), so macOS opens the new ad-hoc build.
+9. One atomic `renamex_np` swap with the running bundle. The installed app is
+   checked again (identity, bundle ID, version, codesign); if that fails, the old
+   app is swapped back. The previous version is moved to
+   `~/Library/Application Support/Patched/Updater/backups/im.patched.app` and kept
+   until the next self-update.
+10. The new Patched is opened with `/usr/bin/open -n` and waits (at most 15 seconds)
+    for the old process to exit before it touches any state; the old one then quits.
+    If it cannot be opened, Patched says the update is installed and keeps running.
+
+There is no journal for this path: before the swap nothing is changed, the swap is a
+single rename, and after it the worst case is the previous version left in a hidden
+`.patched-self-update-*` folder beside the app.
+
+**What a stolen key or GitHub account means.** The release key is the whole trust
+anchor. Someone with the private key and a way to serve a newer release (the GitHub
+account, or the repository) can make every copy of Patched that clicks Update
+install their code as the user, with the user's rights. That is the same as the
+compromise of any vendor's signing key, which this tool already accepts for other
+apps. A GitHub account compromise alone is not enough: without the key, a
+replaced zip fails the signature check, and the attacker can only withhold
+releases, offer an old version (refused as not newer), or point the release page
+somewhere (Download opens only the exact release page URL). If the key is lost or
+leaked, the only fix is a release with a new key built in, installed by hand.
+TLS to GitHub is relied on only for availability, not for integrity.
+
+**Later.** With a Developer ID, the same path will also pin the Team ID and require
+notarisation, as the normal installer does for every other app.
 
 ## Out of scope
 

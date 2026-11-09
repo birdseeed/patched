@@ -22,6 +22,38 @@ private func patchedOutcome(_ version: String = "0.1.0") -> AppCheckOutcome {
                     installable: false, result: .noSource, noSourceReason: .thisApp)
 }
 private func newer(_ version: String, _ page: URL) -> PatchedReleaseResult { .newer(PatchedRelease(version: version, pageURL: page)) }
+private func signedAssets(_ version: String) -> PatchedReleaseAssets {
+    let zip = "https://github.com/birdseeed/patched/releases/download/v\(version)/Patched-\(version).zip"
+    return PatchedReleaseAssets(zipURL: URL(string: zip)!, signatureURL: URL(string: zip + ".sig")!)
+}
+private func signed(_ version: String) -> PatchedReleaseResult {
+    .newer(PatchedRelease(version: version, pageURL: URL(string: "https://github.com/birdseeed/patched/releases/tag/v\(version)")!,
+                          assets: signedAssets(version)))
+}
+
+/// Stands in for `SelfUpdater`: records what it was asked to do and never touches a file.
+private final class FakeSelfInstaller: SelfInstalling, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _installs: [PatchedRelease] = []
+    private var _relaunches: [String] = []
+    var failure: InstallRefusal?
+    var relaunchFails = false
+    var gate: Gate?
+    var installs: [PatchedRelease] { lock.withLock { _installs } }
+    var relaunches: [String] { lock.withLock { _relaunches } }
+    func install(_ release: PatchedRelease, progress: @escaping @Sendable (SelfUpdateStep) -> Void) async throws -> SelfUpdateReport {
+        lock.withLock { _installs.append(release) }
+        progress(.verifying); progress(.installing)
+        if let gate { await gate.wait() }
+        if let failure { throw failure }
+        return SelfUpdateReport(appPath: "/Applications/Patched.app", fromVersion: "0.1.0", toVersion: release.version, backupPath: nil, note: nil)
+    }
+    func relaunch(_ report: SelfUpdateReport) throws {
+        lock.withLock { _relaunches.append(report.appPath) }
+        if relaunchFails { throw InstallRefusal.io("open failed") }
+    }
+}
+@MainActor private final class QuitCounter { var count = 0; func bump() { count += 1 } }
 
 /// A fake lookup whose answer can change, counting its calls.
 private final class FakeLookup: @unchecked Sendable {
@@ -380,12 +412,21 @@ private struct NoIndex: CaskIndexProviding { func index() async -> Result<CaskIn
         try expect(c.rows.first { $0.bundleID == patchedID }?.statusText == "This app", "row shows the stale answer")
     }
 
-    check("self update: its notification opens Updates only, with no buttons and no browser") {
+    check("self update: its notification opens Updates; its one button only asks, and Update All never applies to it") {
         let id = SystemUpdateNotifier.selfUpdateIdentifier
         try expect(SystemUpdateNotifier.route(requestIdentifier: id, actionIdentifier: UNNotificationDefaultActionIdentifier) == .openUpdates, "body tap")
         try expect(SystemUpdateNotifier.route(requestIdentifier: id, actionIdentifier: SystemUpdateNotifier.updateAllActionIdentifier) == nil, "update all on it")
+        try expect(SystemUpdateNotifier.route(requestIdentifier: id, actionIdentifier: SystemUpdateNotifier.selfUpdateActionIdentifier) == .selfUpdate, "update button")
+        try expect(SystemUpdateNotifier.route(requestIdentifier: SystemUpdateNotifier.requestIdentifier,
+                                              actionIdentifier: SystemUpdateNotifier.selfUpdateActionIdentifier) == nil, "self button on the apps notification")
         try expect(SystemUpdateNotifier.route(requestIdentifier: id, actionIdentifier: UNNotificationDismissActionIdentifier) == nil, "dismiss")
         try expect(id != SystemUpdateNotifier.requestIdentifier && id != SystemUpdateNotifier.summaryIdentifier, "shares an identifier")
+        let category = SystemUpdateNotifier.makeSelfUpdateCategory()
+        try expect(category.identifier == SystemUpdateNotifier.selfUpdateCategoryIdentifier && category.actions.count == 1
+                   && category.actions[0].identifier == SystemUpdateNotifier.selfUpdateActionIdentifier
+                   && category.actions[0].options.contains(.foreground), "category: \(category.actions.map(\.identifier))")
+        try expect(SystemUpdateNotifier.selfUpdateBody(installable: true).contains("after you confirm"), "installable body")
+        try expect(!SystemUpdateNotifier.selfUpdateBody(installable: false).contains("Update…"), "notify-only body offers Update")
         let notifier = SystemUpdateNotifier()
         var opened = 0
         notifier.onOpenUpdates = { opened += 1 }
@@ -422,6 +463,8 @@ private struct NoIndex: CaskIndexProviding { func index() async -> Result<CaskIn
         await runCheck(unguarded)
         try expect(open.urls.filter { $0.contains("api.github.com") } == ["https://api.github.com/repos/birdseeed/patched/releases/latest"], "requests: \(open.urls)")
         try expect(unguarded.selfUpdate?.version == "0.2.0", "live wiring found: \(String(describing: unguarded.selfUpdate))")
+        try expect(unguarded.selfInstaller == nil && !unguarded.canInstallSelfUpdate, "a checks binary (not Patched.app) can install itself")
+        try expect(guarded.selfInstaller == nil, "self-install wired under the tripwire")
         await runCheck(unguarded)
         try expect(open.urls.filter { $0.contains("api.github.com") }.count == 2, "second check: \(open.urls)")
         // No running version (not an installed app): no request at all.
@@ -429,6 +472,185 @@ private struct NoIndex: CaskIndexProviding { func index() async -> Result<CaskIn
         let unversioned = live(silent, version: nil)
         await runCheck(unversioned)
         try expect(!silent.urls.contains { $0.contains("api.github.com") }, "requested without a version: \(silent.urls)")
+    }
+
+    // MARK: Installing Patched itself (fake installer; nothing is downloaded, replaced or reopened)
+
+    func installable(_ c: AppUpdatesController, _ installer: FakeSelfInstaller?, terminated: QuitCounter? = nil) {
+        c.selfInstaller = installer
+        if let terminated { c.selfTerminate = { terminated.bump() } }
+    }
+
+    check("self update: Update appears only for a signed release in an installed Patched, and only asks first") {
+        let notifyOnly = controller(FakeLookup(newer("0.2.0", page020)))
+        installable(notifyOnly, FakeSelfInstaller())
+        await runCheck(notifyOnly)
+        try expect(notifyOnly.selfUpdate != nil && !notifyOnly.canInstallSelfUpdate && !notifyOnly.menuUpdates().selfUpdateInstallable,
+                   "a release without assets offers Update")
+        notifyOnly.requestSelfUpdate()
+        try expect(notifyOnly.selfInstall == .idle, "notify-only release asked to install")
+        let noInstaller = controller(FakeLookup(signed("0.2.0")))
+        await runCheck(noInstaller)
+        try expect(noInstaller.selfUpdate?.assets != nil && !noInstaller.canInstallSelfUpdate, "Update offered without an installer (not Patched.app)")
+        let fake = FakeSelfInstaller()
+        let c = controller(FakeLookup(signed("0.2.0")))
+        installable(c, fake)
+        await runCheck(c)
+        try expect(c.canInstallSelfUpdate && c.menuUpdates().selfUpdateInstallable, "Update not offered")
+        let session = NativeClientSession(navigation: ShellNavigation(destination: .updates), appUpdates: c, urlOpener: RecordingOpener())
+        let before = try paintedText(NativeClientMenuView(session: session, openWindow: {}))
+        try expect(before.contains("Patched 0.2.0 is available") && before.contains("Download") && !before.contains("quit and reopen"), "menu: \(before)")
+        c.requestSelfUpdate()
+        try expect(c.selfInstall == .confirming(version: "0.2.0"), "state: \(c.selfInstall)")
+        let asking = try paintedText(NativeClientMenuView(session: session, openWindow: {}))
+        try expect(c.selfInstall.text == "Update Patched to 0.2.0? Patched will quit and reopen.", "words: \(c.selfInstall.text ?? "")")
+        try expect(asking.contains("Update Patched to 0.2.0?") && asking.contains("Update and Reopen")
+                   && asking.contains("Cancel"), "menu confirmation: \(asking)")
+        let window = try paintedText(AppUpdatesView(controller: c))
+        // Painted text is read back by OCR, so only short, distinctive phrases are compared.
+        try expect(window.contains("Update Patched to 0.2.0?") && window.contains("Update and Reopen"), "Updates confirmation: \(window)")
+        c.cancelSelfUpdate()
+        try expect(c.selfInstall == .idle, "cancel: \(c.selfInstall)")
+        await c.waitUntilIdle()
+        try expect(fake.installs.isEmpty && c.selfInstallStarts == 0, "asking or cancelling installed something")
+        // Confirm without a request does nothing either.
+        c.confirmSelfUpdate(); await c.waitUntilIdle()
+        try expect(fake.installs.isEmpty, "confirm without a request installed")
+        if let dir = ProcessInfo.processInfo.environment["PATCHED_SELFCHECK_PNG_DIR"] {
+            try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            try paintView(NativeClientMenuView(session: session, openWindow: {}), width: 320, height: 460)
+                .write(to: URL(fileURLWithPath: dir + "/selfupdate-offer-menu.png"))
+            try paintView(AppUpdatesView(controller: c), width: 820, height: 300)
+                .write(to: URL(fileURLWithPath: dir + "/selfupdate-offer-updates.png"))
+            c.requestSelfUpdate()
+            try paintView(NativeClientMenuView(session: session, openWindow: {}), width: 320, height: 460)
+                .write(to: URL(fileURLWithPath: dir + "/selfupdate-confirm-menu.png"))
+            c.cancelSelfUpdate()
+        }
+    }
+
+    check("self update: a newer release arriving under an open confirmation closes it, and nothing installs") {
+        let fake = FakeSelfInstaller()
+        let lookup = FakeLookup(signed("0.2.0"))
+        let c = controller(lookup)
+        installable(c, fake)
+        await runCheck(c)
+        c.requestSelfUpdate()
+        try expect(c.selfInstall == .confirming(version: "0.2.0"), "state: \(c.selfInstall)")
+        lookup.result = signed("0.3.0")
+        await runCheck(c)
+        try expect(c.selfUpdate?.version == "0.3.0" && c.selfInstall == .idle, "stale confirmation kept: \(c.selfInstall)")
+        c.confirmSelfUpdate(); await c.waitUntilIdle()
+        try expect(fake.installs.isEmpty, "a confirmation for 0.2.0 installed something")
+        // The same version announced again keeps the confirmation open.
+        c.requestSelfUpdate()
+        await runCheck(c)
+        try expect(c.selfInstall == .confirming(version: "0.3.0"), "same-version recheck closed it: \(c.selfInstall)")
+        c.cancelSelfUpdate()
+    }
+
+    check("self update: confirming installs the signed release once, reopens the new Patched and quits") {
+        let fake = FakeSelfInstaller(), terminated = QuitCounter()
+        let c = controller(FakeLookup(signed("0.2.0")))
+        installable(c, fake, terminated: terminated)
+        await runCheck(c)
+        c.requestSelfUpdate(); c.confirmSelfUpdate(); c.confirmSelfUpdate()
+        await c.waitUntilIdle()
+        try expect(fake.installs.count == 1 && fake.installs[0].version == "0.2.0" && fake.installs[0].assets == signedAssets("0.2.0"),
+                   "installs: \(fake.installs)")
+        try expect(fake.relaunches == ["/Applications/Patched.app"] && terminated.count == 1, "relaunch \(fake.relaunches), quit \(terminated.count)")
+        try expect(c.selfInstall == .reopening(version: "0.2.0"), "state: \(c.selfInstall)")
+    }
+
+    check("self update: a failure says why, leaves Patched running, and needs admin opens the release page") {
+        let cases: [(String, InstallRefusal, String)] = [
+            ("signature", .releaseSignatureInvalid("does not match"), "isn't signed with Patched's release key"),
+            ("download", .download("HTTP 500"), "the download failed (HTTP 500)"),
+            ("version", .versionMismatch("0.3.0"), "isn't the Patched release it should be"),
+            ("codesign", .signatureInvalid("x"), "code signature didn't verify"),
+            ("swapped back", .verificationFailedAfterSwap("x"), "Patched is unchanged"),
+        ]
+        for (name, refusal, words) in cases {
+            let fake = FakeSelfInstaller(), terminated = QuitCounter(), opener = RecordingOpener()
+            fake.failure = refusal
+            let c = controller(FakeLookup(signed("0.2.0")))
+            installable(c, fake, terminated: terminated)
+            c.urlOpener = opener
+            await runCheck(c)
+            c.requestSelfUpdate(); c.confirmSelfUpdate(); await c.waitUntilIdle()
+            try expect(c.selfInstall.text?.contains(words) == true && c.selfInstall.isFailed, "\(name): \(c.selfInstall)")
+            try expect(terminated.count == 0 && fake.relaunches.isEmpty && opener.nothingOpened, "\(name): quit, reopened or opened something")
+            try expect(!c.isWorking && c.canCheck && c.canInstallSelfUpdate, "\(name): Patched is stuck after a failure")
+            let session = NativeClientSession(navigation: ShellNavigation(destination: .updates), appUpdates: c, urlOpener: opener)
+            let menu = try paintedText(NativeClientMenuView(session: session, openWindow: {}))
+            try expect(menu.contains("Couldn't update Patched") && menu.contains("Dismiss"), "\(name) menu: \(menu)")
+            c.cancelSelfUpdate()
+            try expect(c.selfInstall == .idle, "\(name): dismiss")
+        }
+        let fake = FakeSelfInstaller(), opener = RecordingOpener(), terminated = QuitCounter()
+        fake.failure = .needsAdmin("/Applications is not writable by this user")
+        let c = controller(FakeLookup(signed("0.2.0")))
+        installable(c, fake, terminated: terminated)
+        c.urlOpener = opener
+        await runCheck(c)
+        c.requestSelfUpdate(); c.confirmSelfUpdate(); await c.waitUntilIdle()
+        try expect(opener.urls == [page020] && opener.apps.isEmpty, "admin: opened \(opener.urls)")
+        try expect(c.selfInstall.text?.contains("admin rights") == true && terminated.count == 0, "admin: \(c.selfInstall)")
+        // Installed but not reopened: say so, and do not quit.
+        let reopenFails = FakeSelfInstaller(), quit = QuitCounter()
+        reopenFails.relaunchFails = true
+        let r = controller(FakeLookup(signed("0.2.0")))
+        installable(r, reopenFails, terminated: quit)
+        await runCheck(r)
+        r.requestSelfUpdate(); r.confirmSelfUpdate(); await r.waitUntilIdle()
+        try expect(r.selfInstall.text?.contains("is installed. Quit Patched and open it again") == true && quit.count == 0, "reopen: \(r.selfInstall)")
+    }
+
+    check("self update: progress shows while installing, and nothing else can start meanwhile") {
+        let fake = FakeSelfInstaller(), gate = Gate()
+        fake.gate = gate
+        let c = controller(FakeLookup(signed("0.2.0")), others: [outcome(app("Plain"), .updateAvailable(offer("2.0")))])
+        installable(c, fake, terminated: QuitCounter())
+        await runCheck(c)
+        c.requestSelfUpdate(); c.confirmSelfUpdate()
+        var waited = 0
+        while c.selfInstall != .working(version: "0.2.0", step: .installing) && waited < 200 { try await Task.sleep(nanoseconds: 10_000_000); waited += 1 }
+        try expect(c.selfInstall == .working(version: "0.2.0", step: .installing), "progress: \(c.selfInstall)")
+        let session = NativeClientSession(navigation: ShellNavigation(destination: .updates), appUpdates: c, urlOpener: RecordingOpener())
+        let menu = try paintedText(NativeClientMenuView(session: session, openWindow: {}))
+        try expect(menu.contains("Installing Patched 0.2.0"), "menu progress: \(menu)")
+        try expect(!c.canCheck && !c.canUpdateAll && !c.canInstallSelfUpdate, "other actions open while Patched installs itself")
+        try expect(!c.updateAll(), "Update All started during a self-update")
+        gate.open(); await c.waitUntilIdle()
+    }
+
+    check("self update: scheduled checks, Update All and the notification never install Patched") {
+        let rig = Rig([patchedOutcome(), outcome(app("Plain"), .updateAvailable(offer("2.0")))])
+        let fake = FakeSelfInstaller()
+        rig.controller.selfInstaller = fake
+        rig.controller.selfUpdateCheck = FakeLookup(signed("0.2.0")).check
+        rig.scheduler.start(); await rig.settle()
+        for _ in 0..<2 { rig.clock.advance(UpdateCheckScheduler.interval + 1); try rig.timer.fireActive(); await rig.settle() }
+        try expect(rig.notifier.postedSelf.map(\.version) == ["0.2.0"] && rig.notifier.postedSelf[0].assets != nil, "posted: \(rig.notifier.postedSelf)")
+        try expect(rig.controller.selfInstall == .idle && fake.installs.isEmpty, "a scheduled check started a self-update")
+        _ = rig.controller.updateAll(); await rig.settle()
+        try expect(fake.installs.isEmpty && rig.controller.selfInstall == .idle, "Update All installed Patched")
+        // The notification's Update… button opens Updates and asks; it does not install.
+        let notifier = SystemUpdateNotifier()
+        let session = NativeClientSession(navigation: ShellNavigation(destination: .applications), appUpdates: rig.controller, urlOpener: RecordingOpener())
+        var opened = 0
+        session.wireSelfUpdateAction(notifier, openUpdates: { opened += 1 })
+        notifier.handle(requestIdentifier: SystemUpdateNotifier.selfUpdateIdentifier, actionIdentifier: SystemUpdateNotifier.selfUpdateActionIdentifier)
+        await rig.settle()
+        try expect(opened == 1 && rig.controller.selfInstall == .confirming(version: "0.2.0"), "button: opened \(opened), \(rig.controller.selfInstall)")
+        try expect(fake.installs.isEmpty, "the notification button installed without confirmation")
+        // The scheduler, Update All and the command line have no way to reach the install.
+        for (file, words) in [("PatchedClient/BackgroundUpdateChecks.swift", ["requestSelfUpdate", "confirmSelfUpdate", "selfInstaller", "SelfUpdater"]),
+                              ("PatchedClient/UpdateAllEntryPoints.swift", ["confirmSelfUpdate", "selfInstaller", "SelfUpdater"]),
+                              ("PatchedCLI/main.swift", ["requestSelfUpdate", "confirmSelfUpdate", "selfInstaller", "SelfUpdater", "SelfRelaunch"])] {
+            let text = try String(contentsOfFile: sourcesRoot() + "/" + file, encoding: .utf8)
+            for word in words { try expect(!text.contains(word), "\(file) mentions \(word)") }
+        }
     }
 }
 

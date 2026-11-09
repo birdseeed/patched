@@ -34,7 +34,8 @@ public struct AvailableUpdate: Hashable, Sendable {
 /// treat those updates as announced.
 @MainActor public protocol UpdateNotifying: AnyObject {
     func notify(updates: [AvailableUpdate], completion: @escaping @MainActor (Bool) -> Void)
-    /// "Patched 0.2.0 is available". One call per new version; clicking it opens the Updates view only.
+    /// "Patched 0.2.0 is available". One call per new version; clicking it opens the Updates view only, and
+    /// its Update… button (installable releases only) opens Updates with the confirmation showing.
     func notify(selfUpdate: SelfUpdate, completion: @escaping @MainActor (Bool) -> Void)
 }
 
@@ -417,6 +418,7 @@ extension NativeClientSession {
         }
         updateNotifier?.onOpenUpdates = openUpdates
         wireNotificationActions(openUpdates: openUpdates)
+        wireSelfUpdateAction(openUpdates: openUpdates)
         updateNotifier?.activate()
         backgroundChecks.start()
     }

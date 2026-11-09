@@ -49,15 +49,36 @@ The runtime flag is `0x10000`; an ad-hoc signature also requires the `0x2` ad-ho
 bit, so its exact displayed flags are `0x10002(adhoc,runtime)`. The verifier accepts
 only that combination or the certificate-signed `0x10000(runtime)` combination.
 
-Create a local release archive and checksum with:
+Create a local release archive, checksum and signature with:
 
 ```sh
 /bin/bash scripts/release.sh
-(cd dist && shasum -a 256 -c Patched-0.1.2.zip.sha256)
+(cd dist && shasum -a 256 -c Patched-0.1.3.zip.sha256)
 ```
 
-This produces `dist/Patched-<version>.zip` and `.zip.sha256`. It does not publish
-anything. The archive keeps the outer `Patched.app` directory. Later, with an
+This produces `dist/Patched-<version>.zip`, `.zip.sha256` and `.zip.sig`. It does
+not publish anything. The archive keeps the outer `Patched.app` directory.
+
+The `.sig` is Patched's self-update anchor: an Ed25519 signature over the final zip
+bytes, as one line of base64 (64 bytes). The private key is a generic password in
+the login Keychain, service `im.patched.release-signing`, account `ed25519`, holding
+the base64 raw 32-byte `Curve25519.Signing` private key. Before building, the script
+checks only that the item exists, and refuses to produce release artifacts if it is
+missing. After the zip is final it compiles `scripts/release-signing.swift`, pipes the
+key from `security find-generic-password -w` straight into it (the key is never in a
+variable, argument, file or log), writes the `.sig`, and verifies it against the
+public key built into Patched (`PatchedReleaseKey.publicKeyBase64` in
+`Sources/UpdateInstaller/SelfUpdate.swift`). A signature that does not verify
+against that key stops the release. macOS may ask to allow `security` to read the
+item.
+
+`--unsigned-for-testing` builds the zip and checksum without the Keychain and
+without a `.sig`; Patched never installs such a zip. For the packaging checks only,
+`PATCHED_RELEASE_KEY_SERVICE` and `PATCHED_RELEASE_KEYCHAIN` point at a throwaway key
+in a throwaway keychain, and `PATCHED_RELEASE_PUBLIC_KEY_OVERRIDE` names its public
+key; the override is refused for the real service. Upload all three files to the
+GitHub release: the app accepts only assets named exactly `Patched-<version>.zip`
+and `Patched-<version>.zip.sig` on that release. Later, with an
 existing Developer ID Application identity and an existing notarytool keychain
 profile, use exactly these environment variables:
 
@@ -77,7 +98,8 @@ Only a parsed status of `Accepted` permits stapling, validation, rebuilding the
 zip and writing the checksum. A missing or rejected status aborts the release;
 it never falls back to an unnotarised archive. Without `NOTARY_PROFILE`, it
 creates a local zip without notarisation. Credentials stay in the
-existing keychain profile. This packaging work does not enable self-update.
+existing keychain profile. Notarised or not, every release zip is also signed with
+the release key as above.
 
 The command-line check schedule is optional and requires an explicit command:
 
@@ -134,5 +156,11 @@ arm64 and x86_64 slices in both packaged executables and the extracted archive:
 
 Both modes require empty signed entitlements and the expected signing
 identifiers, and check that a notarisation request without a signing identity
-fails before creating output artifacts. Verification never uses notarisation
+fails before creating output artifacts. They also check release signing with a
+throwaway key in a throwaway keychain: a missing key is refused before building, a
+key that is not the one built into Patched is refused after signing with no zip
+left behind, the public-key override is refused for the real service, a signed
+release's `.sig` verifies with the throwaway key and not with the real one or over
+a changed zip, and `--unsigned-for-testing` produces no `.sig`. The owner's real
+Keychain item is never read. Verification never uses notarisation
 credentials or installs the app or a real LaunchAgent.

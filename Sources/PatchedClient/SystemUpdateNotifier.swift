@@ -8,13 +8,16 @@ import UserNotifications
     nonisolated public static let requestIdentifier = "im.patched.updates-available"
     /// The one summary notification after an Update All started from the menu or the notification.
     nonisolated public static let summaryIdentifier = "im.patched.update-all-summary"
-    /// The "Patched X is available" notification. Clicking it opens Updates; it has no buttons.
+    /// The "Patched X is available" notification. Clicking it opens Updates. When the release can be installed
+    /// it has one button, Update…, which opens Updates and asks for confirmation; it never installs by itself.
     nonisolated public static let selfUpdateIdentifier = "im.patched.self-update"
     nonisolated public static let categoryIdentifier = "im.patched.updates-available.category"
     nonisolated public static let updateAllActionIdentifier = "im.patched.update-all"
+    nonisolated public static let selfUpdateCategoryIdentifier = "im.patched.self-update.category"
+    nonisolated public static let selfUpdateActionIdentifier = "im.patched.self-update.update"
 
-    /// What a notification response asks for.
-    public enum Route: Equatable, Sendable { case openUpdates, updateAll }
+    /// What a notification response asks for. `selfUpdate` only brings up the self-update confirmation.
+    public enum Route: Equatable, Sendable { case openUpdates, updateAll, selfUpdate }
 
     /// The "updates available" category: an Update All button. It does not bring Patched to the front, and it
     /// needs the Mac unlocked. Only this one notification carries it, never the summary.
@@ -25,6 +28,15 @@ import UserNotifications
                                       intentIdentifiers: [], options: [])
     }
 
+    /// The installable "Patched X is available" category: one Update… button that brings Patched to the front
+    /// with the confirmation showing. Confirming is a separate click in Patched.
+    public static func makeSelfUpdateCategory() -> UNNotificationCategory {
+        let action = UNNotificationAction(identifier: selfUpdateActionIdentifier, title: "Update…",
+                                          options: [.foreground, .authenticationRequired])
+        return UNNotificationCategory(identifier: selfUpdateCategoryIdentifier, actions: [action],
+                                      intentIdentifiers: [], options: [])
+    }
+
     /// Body tap of either notification opens the Updates screen; only the button on the "updates available"
     /// notification updates anything. Anything else is ignored.
     nonisolated public static func route(requestIdentifier: String, actionIdentifier: String) -> Route? {
@@ -32,6 +44,7 @@ import UserNotifications
             || requestIdentifier == Self.selfUpdateIdentifier,
            actionIdentifier == UNNotificationDefaultActionIdentifier { return .openUpdates }
         if requestIdentifier == Self.requestIdentifier, actionIdentifier == Self.updateAllActionIdentifier { return .updateAll }
+        if requestIdentifier == Self.selfUpdateIdentifier, actionIdentifier == Self.selfUpdateActionIdentifier { return .selfUpdate }
         return nil
     }
 
@@ -48,9 +61,15 @@ import UserNotifications
             if let keys = pendingUpdateAll, let handler = onUpdateAll { pendingUpdateAll = nil; handler(keys) }
         }
     }
+    /// Called when the user chooses Update… on the self-update notification: open Updates and show the
+    /// confirmation. Queued like the open request, and run once.
+    public var onSelfUpdate: (@MainActor () -> Void)? {
+        didSet { if pendingSelfUpdate, let handler = onSelfUpdate { pendingSelfUpdate = false; handler() } }
+    }
     /// userInfo key holding the advertised update keys.
     nonisolated public static let updateKeysUserInfoKey = "updateKeys"
     private var pendingOpen = false
+    private var pendingSelfUpdate = false
     private var pendingUpdateAll: Set<String>?
     private var delegateSet = false
 
@@ -76,6 +95,8 @@ import UserNotifications
         case .updateAll?:
             // A response without the advertised keys advertises nothing, so it can install nothing.
             updateAllRequested(keys: Set((userInfo[Self.updateKeysUserInfoKey] as? [String]) ?? []))
+        case .selfUpdate?:
+            if let onSelfUpdate { onSelfUpdate() } else { pendingSelfUpdate = true }
         case nil: break
         }
     }
@@ -87,7 +108,7 @@ import UserNotifications
         delegateSet = true
         let center = UNUserNotificationCenter.current()
         center.delegate = self
-        center.setNotificationCategories([Self.makeCategory()])
+        center.setNotificationCategories([Self.makeCategory(), Self.makeSelfUpdateCategory()])
     }
 
     public func notify(updates: [AvailableUpdate], completion: @escaping @MainActor (Bool) -> Void) {
@@ -108,8 +129,9 @@ import UserNotifications
         activate()
         let content = UNMutableNotificationContent()
         content.title = selfUpdate.text
-        content.body = "Open Patched to see where to download it. Nothing is installed automatically."
+        content.body = Self.selfUpdateBody(installable: selfUpdate.assets != nil)
         content.threadIdentifier = Self.selfUpdateIdentifier
+        if selfUpdate.assets != nil { content.categoryIdentifier = Self.selfUpdateCategoryIdentifier }
         post(content, identifier: Self.selfUpdateIdentifier, completion: completion)
     }
 
@@ -131,6 +153,11 @@ import UserNotifications
                 completion(true)
             } catch { completion(false) }
         }
+    }
+
+    nonisolated public static func selfUpdateBody(installable: Bool) -> String {
+        installable ? "Choose Update… to install it after you confirm. Nothing is installed automatically."
+                    : "Open Patched to see where to download it. Nothing is installed automatically."
     }
 
     /// Posts the summary only when notifications are already authorised; never asks.

@@ -119,7 +119,8 @@ func makeFlatPackage(at path: String, magic: [UInt8] = Array("xar!".utf8), versi
 
 func adminPath(replacer: FakeReplacer = FakeReplacer(), packages: any PackageVerifying = fixturePackageVerifier(),
                opener: FakeOpener = FakeOpener(),
-               waiter: any InstallerCompletionWaiting = VersionPollingWaiter(timeout: 1.5, interval: 0.02, stableReads: 2),
+               waiter: any InstallerCompletionWaiting = VersionPollingWaiter(timeout: 1.5, interval: 0.02, stableReads: 2,
+                                                                             settleInterval: 0.05, settleTimeout: 1.5),
                session: FakeSession = FakeSession(), replacement: Bool = true, pkg: Bool = true) -> AdminUpdatePath {
     AdminUpdatePath(replacer: replacer, packages: packages, opener: opener, waiter: waiter, session: session,
                     allowsReplacement: replacement, allowsPackages: pkg)
@@ -782,6 +783,71 @@ func registerAdminChecks() {
         if case .failure(let refusal) = result.reports.first?.result { try expectEqual(refusal.code, "recovery_ambiguous") }
         else { throw CheckFailure(description: "recovery accepted a corrupted app: \(result.reports)") }
         try expectEqual(try version(w.box.locations.backups + backupBundle), "1.0", "recovery deleted the backup")
+    }
+
+    check("pkg: Installer still writing after the version changed is waited out, not reported as a failure") {
+        let w = try packageWorld()
+        let opener = FakeOpener()
+        let running = Flag(true)
+        let target = w.target
+        let exe = target + "/Contents/MacOS/Example"
+        opener.onOpen = { _ in
+            // Info.plist lands first; the executable is still half-written (fails its signature check).
+            try installByInstaller(target)
+            try "TAMPERED half-written".write(toFile: exe, atomically: false, encoding: .utf8)
+            Task {
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                try? "2.0 executable".write(toFile: exe, atomically: false, encoding: .utf8)
+            }
+        }
+        let report = try await adminInstaller(w.box, admin: adminPath(opener: opener), downloader: w.downloader, uid: geteuid(),
+                                              installerRunning: { running.value })
+            .update(appAt: w.target, offer: offer(v2pkg, format: .pkg, sha256: try sha256Hex(w.archive)), installable: true, admin: AdminInteraction())
+        try expectEqual(report.status, .installed)
+        try expectEqual(report.toVersion, "2.0 (200)")
+        try expect(unfinished(w.box).isEmpty, "journal left behind")
+    }
+
+    check("pkg: Installer that quits with the app still half-written is installed_unverified, after waiting") {
+        let w = try packageWorld()
+        let opener = FakeOpener()
+        let running = Flag(true)
+        let target = w.target
+        opener.onOpen = { _ in
+            try installByInstaller(target)
+            try "TAMPERED half-written".write(toFile: target + "/Contents/MacOS/Example", atomically: false, encoding: .utf8)
+            Task { try? await Task.sleep(nanoseconds: 300_000_000); running.value = false }
+        }
+        let started = Date()
+        try await expectRefusal("installed_unverified") {
+            _ = try await adminInstaller(w.box, admin: adminPath(opener: opener), downloader: w.downloader, uid: geteuid(),
+                                         installerRunning: { running.value })
+                .update(appAt: w.target, offer: offer(v2pkg, format: .pkg), installable: true, admin: AdminInteraction())
+        }
+        try expect(Date().timeIntervalSince(started) >= 0.3, "gave up before Installer quit")
+    }
+
+    check("pkg: the wait for a half-written app ends at Done or after the settle limit, never holding a failure open") {
+        for pressDone in [true, false] {
+            let w = try packageWorld()
+            let opener = FakeOpener()
+            let target = w.target
+            let interaction = AdminInteraction()
+            opener.onOpen = { _ in
+                try installByInstaller(target)
+                try "TAMPERED half-written".write(toFile: target + "/Contents/MacOS/Example", atomically: false, encoding: .utf8)
+                if pressDone { Task { try? await Task.sleep(nanoseconds: 200_000_000); interaction.userFinishedInstaller() } }
+            }
+            let waiter = VersionPollingWaiter(timeout: 5, interval: 0.02, stableReads: 2, settleInterval: 0.05, settleTimeout: pressDone ? 30 : 0.4)
+            let started = Date()
+            try await expectRefusal("unresolved") {
+                _ = try await adminInstaller(w.box, admin: adminPath(opener: opener, waiter: waiter), downloader: w.downloader,
+                                             uid: geteuid(), installerRunning: { true })
+                    .update(appAt: w.target, offer: offer(v2pkg, format: .pkg), installable: true, admin: interaction)
+            }
+            let took = Date().timeIntervalSince(started)
+            try expect(took < 3, "\(pressDone ? "Done" : "settle limit") did not end the wait (\(took) s)")
+        }
     }
 
     check("pkg: a timeout while Installer is still running keeps everything until Installer has quit") {
