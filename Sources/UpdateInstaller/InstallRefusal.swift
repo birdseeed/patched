@@ -46,9 +46,11 @@ public enum InstallRefusal: Error, Sendable, Equatable {
     case verificationFailedAfterSwap(String)
     case journal(String)
     case noBackup(String)
+    /// The newest backup was replaced by an installer package update, which Patched cannot undo.
+    case rollbackUnsupported(String)
     case recoveryAmbiguous(String)
     case io(String)
-    // Admin updates (experimental, off unless PATCHED_ENABLE_ADMIN_UPDATES=1 or --enable-admin-updates).
+    // Admin updates: root-owned replacement (off unless PATCHED_ENABLE_ADMIN_UPDATES=1) and .pkg (on unless PATCHED_ENABLE_PKG_UPDATES=0).
     /// The update needs admin rights but there is nobody at the Mac to answer macOS's prompt
     /// (no graphical login session, for example over SSH, or another user is at the screen).
     case needsInteractiveAdmin(String)
@@ -107,6 +109,7 @@ public enum InstallRefusal: Error, Sendable, Equatable {
         case .verificationFailedAfterSwap: return "verification_failed_after_swap"
         case .journal: return "journal_error"
         case .noBackup: return "no_backup"
+        case .rollbackUnsupported: return "rollback_unsupported"
         case .recoveryAmbiguous: return "recovery_ambiguous"
         case .io: return "io_error"
         case .needsInteractiveAdmin: return "needs_interactive_admin"
@@ -156,6 +159,7 @@ public enum InstallRefusal: Error, Sendable, Equatable {
         case .verificationFailedAfterSwap(let d): return "new app failed verification after the swap and the old app was put back: \(d)"
         case .journal(let d): return "journal error: \(d)"
         case .noBackup(let d): return "no backup: \(d)"
+        case .rollbackUnsupported(let d): return "rollback is not supported for installer packages: \(d)"
         case .recoveryAmbiguous(let d): return "cannot recover automatically: \(d)"
         case .io(let d): return "file error: \(d)"
         case .needsInteractiveAdmin(let d): return "admin updates need you at this Mac to answer macOS's prompt: \(d)"

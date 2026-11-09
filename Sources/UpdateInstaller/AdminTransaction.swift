@@ -153,12 +153,13 @@ extension SwapEngine {
     }
 
     /// Installer installed something that failed verification: keep the verified copy of the previous
-    /// version with its record (so it can be rolled back), clean up our own files, and say so.
+    /// version with its record (marked as replaced by a package, so it is never rolled back automatically),
+    /// clean up our own files, and say so.
     func keepCopyAfterInstaller(_ journal: inout TransactionJournal, because refusal: InstallRefusal) -> InstallRefusal {
         var kept: String?
         if verifiedBackupCopy(journal) != nil, (try? writeBackupRecord(journal)) != nil { kept = journal.backupDir }
         _ = try? settle(&journal, then: nil)
-        return .installedUnverified(refusal.message + (kept.map { "; the previous version is kept in \($0) and can be rolled back" }
+        return .installedUnverified(refusal.message + (kept.map { "; the previous version is kept in \($0), but Roll back isn't supported for installer packages, so reinstall the previous version from its developer if you need it" }
             ?? "; no copy of the previous version could be kept"))
     }
 

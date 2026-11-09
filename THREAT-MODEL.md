@@ -1,9 +1,9 @@
 # Patched threat model
 
 This covers `patched update`, `rollback` and `recover` for apps the current
-user can replace without admin rights, from zip and dmg downloads. An
-experimental admin path for root-owned apps and `.pkg` installers exists but is
-off by default; it is described at the end.
+user can replace without admin rights, from zip and dmg downloads. `.pkg`
+updates handed to Apple's Installer are on by default; replacing root-owned apps
+is experimental and off by default. Both are described at the end.
 
 ## What is checked for every update
 
@@ -96,11 +96,12 @@ recovery selects the moved support root and retains any unmoved cache until its
 journals have been recovered. Quit the app before running recovery so its retained
 migration lease can be released.
 
-## Admin updates (experimental, off by default)
+## Admin updates
 
-Phase 2b is built in two parts, each switched off by default and with its own switch.
-With both off, everything above is exactly as before (root-owned apps say "needs
-admin, update this app manually").
+Phase 2b is built in two parts, each with its own switch: installer packages are on
+by default, root-owned app replacement is off by default. With both off, everything
+above is exactly as before (root-owned apps say "needs admin, update this app
+manually").
 
 - **Root-owned apps**: `PATCHED_ENABLE_ADMIN_UPDATES=1`, or the hidden
   `--enable-admin-updates` flag on `patched update` / `rollback`. **Untested, and known
@@ -111,9 +112,11 @@ admin, update this app manually").
   ("update this app manually") and changes nothing. It is to be revisited once there
   is Developer ID signing. There is no fallback to `osascript`, `do shell script`,
   `sudo` or any other way of running commands as root.
-- **Installer packages**: `PATCHED_ENABLE_PKG_UPDATES=1`, or the hidden
-  `--enable-pkg-updates` flag on `patched update`. This does not depend on Patched's
-  own signing, because Apple's Installer does the installing.
+- **Installer packages**: on by default since 9 November 2026;
+  `PATCHED_ENABLE_PKG_UPDATES=0` turns them off. This does not depend on Patched's
+  own signing, because Apple's Installer does the installing and asks for the
+  password. The package checks were run against a real notarised vendor package
+  (DisplayLink 17.1): the right Team ID passed and a wrong one was refused.
 
 **When either part can be used.** Only for an explicit action by the person at the Mac: a
 click on one app's "Update (admin)", "Update (installer)" or "Roll back" in the app,
@@ -169,12 +172,14 @@ Installer and cannot be avoided or inspected, so the package must earn that:
    (cancelled, still open, or after the 30-minute wait), nothing is verified and
    nothing more happens.
 
-**Rollback limits for packages.** A read-only copy of the installed app is taken
-before Installer opens when possible, and becomes the backup once the new version
-verifies. Only the `.app` can be put back: anything else the package installed
-(launch daemons, kernel or system extensions, files elsewhere) stays. If Installer
-installs something that fails verification, the copy of the previous version is
-kept so it can be rolled back. If no copy could be taken, there is no rollback.
+**No rollback for packages.** A package can install more than the app (launch
+daemons, kernel or system extensions, files elsewhere), so putting back only the old
+`.app` would leave a mismatched install. Rollback is therefore not supported after a
+`.pkg` update: `patched rollback` refuses with `rollback_unsupported`, `patched
+backups` marks the copy, and the app shows "Roll back isn't supported for installer
+packages." A read-only copy of the previous app is still taken before Installer opens
+when possible, and kept, so it can be restored by hand. If Installer installs
+something that fails verification, that copy is kept for the same reason.
 
 **What the admin path adds to what is trusted.** Apple's authorization prompt and
 `FileManager(authorization:)`, Apple's Installer and `installd`, and the scripts

@@ -150,6 +150,10 @@ private struct AppUpdateRowView: View {
                     }
                 }
                 statusLine
+                if row.rollbackUnsupported {
+                    Text(verbatim: AppUpdateRow.rollbackUnsupportedCaption).font(.footnote).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 if row.needsManualAdmin {
                     Text(verbatim: AppUpdateRow.needsAdminCaption).font(.footnote).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)

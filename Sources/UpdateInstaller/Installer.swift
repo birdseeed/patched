@@ -19,7 +19,7 @@ public struct InstallReport: Sendable, Equatable {
     public let relaunched: Bool
     /// Temporary files or mounts that could not be removed (the journal is kept for `recover`).
     public var leftovers: [String] = []
-    /// Installed through the experimental admin path (macOS's prompt, or Apple's Installer for a pkg).
+    /// Installed through the admin path (macOS's prompt, or Apple's Installer for a pkg).
     public var privileged: Bool = false
     /// Owner (uid) of the installed bundle afterwards, recorded on the admin path.
     public var installedOwner: UInt32? = nil
@@ -84,7 +84,7 @@ public struct UpdateInstaller: Sendable {
     let unpackBudget: UnpackBudget
     let forceCopyBackup: Bool
     let diskImageDetacher: @Sendable (String) -> Bool
-    /// Experimental admin path; nil (the default) means admin updates are off and refused as before.
+    /// Admin path (pkg through Apple's Installer, and experimental root-owned replacement); nil means both are off.
     let adminPath: AdminUpdatePath?
     /// Whether Apple's Installer is running; injectable for checks.
     let installerRunning: @Sendable () -> Bool
@@ -553,6 +553,10 @@ public struct UpdateInstaller: Sendable {
         guard let backup = newestBackup(bundleID: target.facts.bundleID), let backupBundle = backup.bundlePath,
               let backupFolder = backup.folder else {
             throw InstallRefusal.noBackup("no backup for \(target.facts.bundleID)")
+        }
+        guard backup.installedByPackage != true else {
+            throw InstallRefusal.rollbackUnsupported(
+                "\(target.name) was updated by an installer package, which can install more than the app; reinstall the older version's package to go back")
         }
         guard backup.bundleID == target.facts.bundleID, backup.teamID == target.teamID else {
             throw InstallRefusal.signatureInvalid("backup metadata is for \(backup.bundleID) / \(backup.teamID)")

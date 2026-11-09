@@ -41,7 +41,7 @@ var positional: [String] = []
 // Hidden, for testing: target a temporary folder instead of /Applications and keep state beside it.
 var applicationsRoot: String?
 var stateRoot: String?
-// Hidden and experimental: admin updates (root-owned apps and .pkg installers through macOS's own prompt).
+// Hidden flags: experimental root-owned replacement, and .pkg through Apple's Installer (on by default anyway).
 var enableAdminUpdates = false, enablePackageUpdates = false
 var probePackage: String?, probeTeam: String?
 while !arguments.isEmpty {
@@ -141,8 +141,8 @@ let fetcher = URLSessionFetcher()
     return locations
 }
 
-/// Each part is off unless its hidden flag or environment variable turns it on: privileged replacement
-/// (PATCHED_ENABLE_ADMIN_UPDATES=1) and .pkg through Apple's Installer (PATCHED_ENABLE_PKG_UPDATES=1).
+/// Privileged replacement is off unless its hidden flag or PATCHED_ENABLE_ADMIN_UPDATES=1 turns it on. .pkg
+/// through Apple's Installer is on unless PATCHED_ENABLE_PKG_UPDATES=0 (the hidden flag still turns it on).
 let adminUpdates = enableAdminUpdates || AdminUpdateFlag.isEnabled()
 let packageUpdates = enablePackageUpdates || AdminUpdateFlag.isPackageEnabled()
 
@@ -321,7 +321,7 @@ case "recover":
 case "admin-probe":
     guard positional.isEmpty else { fail("admin-probe takes no app", code: 2) }
     if let probePackage {
-        guard packageUpdates else { fail("admin-probe --package needs \(AdminUpdateFlag.packageCommandLineFlag) or \(AdminUpdateFlag.packageEnvironmentVariable)=1", code: 2) }
+        guard packageUpdates else { fail("admin-probe --package is off because \(AdminUpdateFlag.packageEnvironmentVariable)=0", code: 2) }
         guard let probeTeam else { fail("admin-probe --package needs --team <Team ID>", code: 2) }
         exit(AdminProbe.checkPackage(probePackage, team: probeTeam))
     }
@@ -334,7 +334,8 @@ case "backups":
     if records.isEmpty { print("no backups") }
     for record in records {
         let version = [record.shortVersion, record.build.map { "(\($0))" }].compactMap { $0 }.joined(separator: " ")
-        print("\(record.bundleID)  \(version)  \(record.createdAt)  \(record.bundlePath ?? "?")")
+        let note = record.installedByPackage == true ? "  (installer package, no rollback)" : ""
+        print("\(record.bundleID)  \(version)  \(record.createdAt)  \(record.bundlePath ?? "?")\(note)")
     }
     exit(0)
 

@@ -19,7 +19,7 @@ import UpdateInstaller
         await runCheck(controller)
         try expect(!controller.adminUpdatesEnabled, "admin on by default")
         @MainActor func row(_ name: String) -> AppUpdateRow { controller.rows.first { $0.name == name }! }
-        try expect(row("Pkgy").status == .packageUnsupported && row("Pkgy").statusText == "Installer packages not supported yet", "pkg row changed")
+        try expect(row("Pkgy").status == .packageUnsupported && row("Pkgy").statusText == "Installer package updates are turned off", "pkg row changed")
         try expect(row("Pkgy").updateActionTitle == "Update" && row("Admin").updateActionTitle == "Update", "button titles changed")
         await runOperation(controller) { controller.update(id: admin.path) }
         try expect(row("Admin").result?.text == "Admin: Needs admin rights. Open the app and use its own updater.", "needs_admin text: \(String(describing: row("Admin").result))")

@@ -172,6 +172,9 @@ public struct AppUpdateRow: Identifiable, Equatable, Sendable {
     public internal(set) var result: Result?
     /// Version a rollback would restore, when a backup exists.
     public internal(set) var rollbackVersion: String?
+    /// The last update came from an installer package, so there is no Roll back; the row says so instead.
+    public internal(set) var rollbackUnsupported = false
+    public static let rollbackUnsupportedCaption = "Roll back isn't supported for installer packages."
     public internal(set) var privilege: Privilege = .standard
     /// The app needs admin rights to replace and the experimental admin path is off, so Patched cannot update
     /// it. The row offers "Open <app>" instead of Update, for the app's own updater.
@@ -237,7 +240,7 @@ public struct AppUpdateRow: Identifiable, Equatable, Sendable {
                 return "Homebrew (unconfirmed) — add a catalogue entry to enable updates"
             }
             return "Update found, but the source isn't confirmed. Add a catalogue entry to enable updates."
-        case .packageUnsupported: return "Installer packages not supported yet"
+        case .packageUnsupported: return "Installer package updates are turned off"
         case .appStoreUpdate: return "Update in the App Store"
         case .noSource:
             if let selfUpdateVersion, outcome?.noSourceReason == .thisApp { return "Update to " + selfUpdateVersion }
@@ -393,7 +396,7 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
     /// Experimental privileged replacement of root-owned apps (PATCHED_ENABLE_ADMIN_UPDATES=1). Off: as before.
     /// Known not to work for ad-hoc-signed builds (macOS refuses the replacement with EIO).
     public let adminUpdatesEnabled: Bool
-    /// Experimental `.pkg` updates through Apple's Installer (PATCHED_ENABLE_PKG_UPDATES=1). Off: as before.
+    /// `.pkg` updates handed to Apple's Installer, which asks for the password. On unless PATCHED_ENABLE_PKG_UPDATES=0.
     public let packageUpdatesEnabled: Bool
 
     /// A newer Patched release, when one was found by the last check that could tell. Notify-only.
@@ -1012,6 +1015,7 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
             var row = makeRow(fresh, icon: old.icon)
             row.result = old.result
             row.rollbackVersion = old.rollbackVersion
+            row.rollbackUnsupported = old.rollbackUnsupported
             replace(row)
         } catch {
             catalogueError = Self.catalogueMessage(error)
@@ -1074,6 +1078,7 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
             guard case .updateAvailable = fresh.result, fresh.installable, inScope else {
                 var row = makeRow(fresh, icon: shown.icon)
                 row.rollbackVersion = shown.rollbackVersion
+                row.rollbackUnsupported = shown.rollbackUnsupported
                 row.result = .init(kind: .info, text: "\(shown.name) changed since the last check, so nothing was installed.")
                 replace(row)
                 return onlyKeys == nil ? .failed : .changed
@@ -1223,8 +1228,10 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
             let match = records.first { record in
                 record.bundleID == row.bundleID && (record.originalPath.isEmpty || record.originalPath == row.path)
             }
-            rows[index].rollbackVersion = row.bundleID == nil ? nil : match.map {
-                Self.versionText(short: $0.shortVersion, build: $0.build)
+            let usable = row.bundleID == nil ? nil : match
+            rows[index].rollbackUnsupported = usable?.installedByPackage == true
+            rows[index].rollbackVersion = usable.flatMap {
+                $0.installedByPackage == true ? nil : Self.versionText(short: $0.shortVersion, build: $0.build)
             }
         }
     }
@@ -1264,7 +1271,7 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
         case .adminReplaceUnavailable:
             return .init(kind: .info, text: "\(name): macOS refused the privileged replacement for this build. Update this app manually.")
         case .unsupportedFormat:
-            return .init(kind: .info, text: format == .pkg ? "\(name): Installer packages not supported yet"
+            return .init(kind: .info, text: format == .pkg ? "\(name): Installer package updates are turned off"
                                                         : "\(name): This download format is not supported yet")
         default:
             return .init(kind: .failure, text: OutcomeText.line(name: name, status: "refused", from: nil, to: nil,

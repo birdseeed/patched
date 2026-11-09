@@ -10,10 +10,14 @@ public struct BackupRecord: Codable, Sendable, Equatable {
     public let build: String?
     public let originalPath: String
     public let createdAt: String
+    /// The update that replaced this version came from an installer package. Such a package can install more
+    /// than the app (launch daemons, agents, drivers), so putting back only the old bundle is not a rollback:
+    /// these backups are never restored. Absent (nil) in older records and for every other update.
+    public var installedByPackage: Bool?
     /// Folder holding `appName` and `backup.json`; filled in when listed, not stored.
     public var folder: String?
 
-    enum CodingKeys: String, CodingKey { case bundleID, teamID, appName, shortVersion, build, originalPath, createdAt }
+    enum CodingKeys: String, CodingKey { case bundleID, teamID, appName, shortVersion, build, originalPath, createdAt, installedByPackage }
     public var bundlePath: String? { folder.map { $0 + "/" + appName } }
 }
 
@@ -396,7 +400,8 @@ struct SwapEngine: Sendable {
         guard let backupDir = journal.backupDir else { throw InstallRefusal.journal("no backup folder chosen") }
         let record = BackupRecord(bundleID: journal.bundleID, teamID: journal.teamID, appName: journal.targetName,
                                   shortVersion: journal.oldShortVersion, build: journal.oldBuild,
-                                  originalPath: journal.targetPath, createdAt: TransactionJournal.now(), folder: nil)
+                                  originalPath: journal.targetPath, createdAt: TransactionJournal.now(),
+                                  installedByPackage: journal.viaInstaller == true ? true : nil, folder: nil)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
         try FileSafety.writeAtomically(try encoder.encode(record), to: backupDir + "/backup.json")

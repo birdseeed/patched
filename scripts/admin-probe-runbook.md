@@ -1,11 +1,13 @@
-# Admin updates probe runbook (experimental, off by default)
+# Admin updates probe runbook
 
 > **Result so far (macOS 27, ad-hoc build):** the owner's GUI probe got macOS's prompt
 > and `authorization granted`, but `replaceItemAt` failed with NSCocoaErrorDomain 512 /
 > POSIX EIO for a root-owned folder and a root-owned file. Patched now reports that as
 > `admin_replace_unavailable`. Steps 1 to 5 are kept for re-testing once there is a
 > Developer ID build; step 6 (packages) does not depend on Patched's signing and uses
-> its own switch, `--enable-pkg-updates` / `PATCHED_ENABLE_PKG_UPDATES=1`.
+> its own switch. Step 6 passed on 9 November 2026 against DisplayLink 17.1 (Team
+> 73YQY62QM3), so `.pkg` updates are now on by default; `PATCHED_ENABLE_PKG_UPDATES=0`
+> turns them off.
 
 Admin updates (root-owned apps and `.pkg` installers) are built but switched off
 until this probe shows that macOS's own authorization works for Patched on this
@@ -34,7 +36,7 @@ Every entry should be owned by `root wheel` and not group- or world-writable. Th
 probe refuses to run otherwise, and it only ever targets
 `/private/tmp/patched-admin-probe/root/Fake.app`.
 
-## 2. Check that it is off by default
+## 2. Check that admin replacement is off by default
 
     $PATCHED admin-probe
 
@@ -105,17 +107,17 @@ strict parser did not recognise.
 
 ## 7. The app
 
-The app reads the same switch from its environment, so it is only on when started
-from Terminal with it set:
+The app reads the same switches from its environment. `.pkg` updates are on unless
+`PATCHED_ENABLE_PKG_UPDATES=0`; admin replacement is only on when started from
+Terminal with its switch set:
 
     swift build --product PatchedApp
-    PATCHED_ENABLE_PKG_UPDATES=1 .build/debug/PatchedApp
+    .build/debug/PatchedApp                                  # .pkg updates are on by default
     PATCHED_ENABLE_ADMIN_UPDATES=1 .build/debug/PatchedApp   # replacement; fails with EIO on ad-hoc builds
 
-With the pkg switch on, a `.pkg` update shows "Update (installer)". With the admin
-switch on, an app that needs admin rights shows "Update (admin)" after its first
-Update attempt (or after Update All skips it). Started from Finder or at login, both
-are off.
+A `.pkg` update shows "Update (installer)". With the admin switch on, an app that
+needs admin rights shows "Update (admin)" after its first Update attempt (or after
+Update All skips it). Started from Finder or at login, admin replacement is off.
 
 ## 8. Clean up
 
@@ -123,9 +125,7 @@ are off.
 
 ## What not to do yet
 
-- Do not set `PATCHED_ENABLE_ADMIN_UPDATES=1` or `PATCHED_ENABLE_PKG_UPDATES=1` for everyday use until steps 3 to 6
+- Do not set `PATCHED_ENABLE_ADMIN_UPDATES=1` for everyday use until steps 3 to 5
   have passed and been reviewed.
-- Do not try a real `.pkg` update through Apple's Installer until step 6 passes.
-  Package scripts run as root under Apple's Installer; see `THREAT-MODEL.md`.
 - Do not run the probe over SSH; it should refuse with `needs_interactive_admin`
   (trying that once is a useful extra check).

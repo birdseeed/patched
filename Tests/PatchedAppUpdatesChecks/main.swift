@@ -185,7 +185,7 @@ check("rows: every status is built from the fake outcomes") {
     try expect(try row("Bravo").status == .updateAvailable && row("Bravo").latestVersion == "2.0" && row("Bravo").installedVersion == "1.0", "update available versions")
     try expect(try row("Bravo").source == "sparkle", "source kind")
     try expect(try row("Charlie").status == .notInstallable && row("Charlie").source == "homebrew?", "low confidence must show ? and be not installable: \(try row("Charlie").source)")
-    try expect(try row("Delta").status == .packageUnsupported && row("Delta").statusText == "Installer packages not supported yet", "pkg status")
+    try expect(try row("Delta").status == .packageUnsupported && row("Delta").statusText == "Installer package updates are turned off", "pkg status")
     try expect(try row("Echo").status == .noSource && row("Echo").source == "—", "no source")
     try expect(try row("Foxtrot").statusText == "Can't check: network error: offline", "refused reason: \(try row("Foxtrot").statusText)")
     try expect(controller.summary == "6 apps checked, 3 with updates available.", "summary: \(controller.summary)")
@@ -302,6 +302,22 @@ check("needs_admin and pkg refusals use the friendly wording, not an error style
     try expect(admin.result?.text == "Admin: Needs admin rights. Open the app and use its own updater." && admin.result?.kind == .info, "admin: \(String(describing: admin.result))")
     try expect(pkg.result?.text == "Pkgy: This download format is not supported yet" && pkg.result?.kind == .info, "pkg: \(String(describing: pkg.result))")
     try expect(admin.status == .updateAvailable, "row must stay as it was")
+}
+
+check("a backup replaced by an installer package shows no Roll back, only the unsupported caption") {
+    let a = app("Alpha"), b = app("Bravo")
+    let installer = FakeInstaller()
+    var pkgBackup = try backup(a, version: "0.9")
+    pkgBackup.installedByPackage = true
+    installer.backups = [pkgBackup, try backup(b, version: "0.9")]
+    let controller = makeController(outcomes: [outcome(a, .upToDate), outcome(b, .upToDate)], installer: installer)
+    await runCheck(controller)
+    let alpha = controller.rows.first { $0.name == "Alpha" }!, bravo = controller.rows.first { $0.name == "Bravo" }!
+    try expect(alpha.rollbackUnsupported && !alpha.canRollBack && alpha.rollbackVersion == nil && !controller.canRollBack(alpha), "Alpha: \(alpha)")
+    try expect(!bravo.rollbackUnsupported && bravo.canRollBack, "Bravo keeps its ordinary rollback")
+    try expect(AppUpdateRow.rollbackUnsupportedCaption == "Roll back isn't supported for installer packages.", "caption")
+    await runOperation(controller) { controller.rollBack(id: alpha.id) }
+    try expect(!installer.recorder.events.contains { $0.hasPrefix("rollback") }, "package rollback was attempted")
 }
 
 check("rollback is offered only where a matching backup exists, and shows the CLI wording") {

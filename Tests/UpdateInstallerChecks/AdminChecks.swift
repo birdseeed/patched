@@ -185,14 +185,21 @@ func registerAdminChecks() {
             try expect(!AdminUpdateFlag.isEnabled(environment: ["PATCHED_ENABLE_ADMIN_UPDATES": value]), "\"\(value)\" turned it on")
         }
         try expect(AdminUpdateFlag.isEnabled(environment: ["PATCHED_ENABLE_ADMIN_UPDATES": "1"]), "1 did not turn it on")
-        try expect(AdminUpdatePath.ifEnabled(environment: [:]) == nil, "path built with the flags off")
-        let cli = AdminUpdatePath.ifEnabled(adminFlag: true, environment: [:])
+        let pkgOff = ["PATCHED_ENABLE_PKG_UPDATES": "0"]
+        try expect(AdminUpdatePath.ifEnabled(environment: pkgOff) == nil, "path built with both parts off")
+        let byDefault = AdminUpdatePath.ifEnabled(environment: [:])
+        try expect(byDefault?.allowsPackages == true && byDefault?.allowsReplacement == false,
+                   "by default only pkg updates are on, never replacement")
+        for value in ["1", "", "true", "yes", "00"] {
+            try expect(AdminUpdateFlag.isPackageEnabled(environment: ["PATCHED_ENABLE_PKG_UPDATES": value]), "\"\(value)\" turned pkg off")
+        }
+        try expect(!AdminUpdateFlag.isPackageEnabled(environment: pkgOff), "0 did not turn pkg off")
+        let cli = AdminUpdatePath.ifEnabled(adminFlag: true, environment: pkgOff)
         try expect(cli?.allowsReplacement == true && cli?.allowsPackages == false, "admin CLI flag must not enable pkg")
         let pkgOnly = AdminUpdatePath.ifEnabled(environment: ["PATCHED_ENABLE_PKG_UPDATES": "1"])
         try expect(pkgOnly?.allowsPackages == true && pkgOnly?.allowsReplacement == false, "pkg flag must not enable replacement")
-        let adminEnv = AdminUpdatePath.ifEnabled(environment: ["PATCHED_ENABLE_ADMIN_UPDATES": "1"])
+        let adminEnv = AdminUpdatePath.ifEnabled(environment: ["PATCHED_ENABLE_ADMIN_UPDATES": "1", "PATCHED_ENABLE_PKG_UPDATES": "0"])
         try expect(adminEnv?.allowsReplacement == true && adminEnv?.allowsPackages == false, "admin env must not enable pkg")
-        try expect(AdminUpdatePath.ifEnabled(environment: ["PATCHED_ENABLE_PKG_UPDATES": "true"]) == nil, "pkg flag \"true\" accepted")
         try expectEqual(AdminUpdateFlag.commandLineFlag, "--enable-admin-updates")
         try expectEqual(AdminUpdateFlag.packageCommandLineFlag, "--enable-pkg-updates")
     }
@@ -632,6 +639,13 @@ func registerAdminChecks() {
         try expectEqual(opener.opened.count, 1)
         try expect(messages.all.first?.contains("Apple's Installer has opened") == true, "no notice: \(messages.all)")
         try expectConsistent(w, new: true)
+        // The kept copy of 1.0 is marked as replaced by a package and is never rolled back.
+        let kept = try installer(w.box).backups()
+        try expect(kept.map(\.shortVersion) == ["1.0"] && kept.allSatisfy { $0.installedByPackage == true }, "\(kept)")
+        try await expectRefusal("rollback_unsupported") {
+            _ = try await adminInstaller(w.box, admin: adminPath(opener: FakeOpener()), uid: geteuid()).rollback(appAt: w.target, admin: AdminInteraction())
+        }
+        try expectEqual(try BundleFacts.read(bundleAt: w.target).shortVersion, "2.0", "rollback changed the app")
     }
 
     check("pkg: a package that fails any check never reaches Apple's Installer") {
@@ -713,9 +727,10 @@ func registerAdminChecks() {
                 throw CheckFailure(description: "accepted \(short) \(team)")
             } catch let refusal as InstallRefusal {
                 try expectEqual(refusal.code, "installed_unverified")
-                try expect(refusal.message.contains("can be rolled back"), refusal.message)
+                try expect(refusal.message.contains("Roll back isn't supported for installer packages"), refusal.message)
             }
-            try expectEqual(installer(w.box).backups().map(\.shortVersion), ["1.0"], "no rollback copy")
+            try expectEqual(installer(w.box).backups().map(\.shortVersion), ["1.0"], "no copy kept")
+            try expect(installer(w.box).backups().allSatisfy { $0.installedByPackage == true }, "copy not marked as replaced by a package")
             try expectClean(w.box)
         }
     }

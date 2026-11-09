@@ -6,12 +6,13 @@ import Security
 import SystemConfiguration
 import UpdateSources
 
-// Experimental admin path (Phase 2b), in two parts with separate switches, both off by default:
+// Admin path (Phase 2b), in two parts with separate switches:
 // - privileged replacement of root-owned apps: PATCHED_ENABLE_ADMIN_UPDATES=1 or --enable-admin-updates.
 //   UNTESTED and known NOT to work for ad-hoc-signed builds: on macOS 27 the prompt appears and is granted,
 //   then replaceItemAt fails with EIO (refused as admin_replace_unavailable). Revisit with Developer ID.
-// - .pkg updates through Apple's Installer: PATCHED_ENABLE_PKG_UPDATES=1 or --enable-pkg-updates. These do
-//   not depend on Patched's own signing.
+// - .pkg updates through Apple's Installer: on by default; PATCHED_ENABLE_PKG_UPDATES=0 turns them off. These
+//   do not depend on Patched's own signing. Checked against a real notarised vendor package (DisplayLink 17.1,
+//   9 November 2026): the right Team ID passes and a wrong one is refused.
 // When a part is off, nothing for it is reachable from an update: it refuses exactly as before
 // (needs_admin, unsupported_format). There is no fallback to osascript, "do shell script" or any other
 // way of running commands as root.
@@ -37,8 +38,10 @@ public enum AdminUpdateFlag {
     public static func isEnabled(environment: [String: String] = ProcessInfo.processInfo.environment) -> Bool {
         environment[environmentVariable] == "1"
     }
+    /// `.pkg` updates are on by default (Apple's Installer asks for the password and does the installing);
+    /// exactly "0" turns them off.
     public static func isPackageEnabled(environment: [String: String] = ProcessInfo.processInfo.environment) -> Bool {
-        environment[packageEnvironmentVariable] == "1"
+        environment[packageEnvironmentVariable] != "0"
     }
 }
 
@@ -389,7 +392,7 @@ public struct AdminUpdatePath: Sendable {
     public let session: any InteractiveSessionChecking
     /// Root-owned apps through macOS's prompt (PATCHED_ENABLE_ADMIN_UPDATES).
     public let allowsReplacement: Bool
-    /// `.pkg` through Apple's Installer (PATCHED_ENABLE_PKG_UPDATES).
+    /// `.pkg` through Apple's Installer (on unless PATCHED_ENABLE_PKG_UPDATES=0).
     public let allowsPackages: Bool
 
     public init(replacer: any PrivilegedReplacing, packages: any PackageVerifying, opener: any PackageInstallerOpening,

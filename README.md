@@ -101,8 +101,13 @@ patched backups
 
 `check` is read-only. `--dry-run` downloads and verifies an update in a staging
 folder, then cleans it up without installing. `--quit` asks a running app to
-quit; it is not force-killed. The updater currently refuses apps that require
-administrator privileges and `.pkg` installers.
+quit; it is not force-killed. The updater refuses to replace apps that require
+administrator privileges; use the app's own updater for those. A `.pkg` update
+is verified (hash, the installed app's Developer ID Installer Team ID and
+notarisation) and then opened in Apple's Installer, where you finish it with
+your own password. Roll back isn't supported after a `.pkg` update, because a
+package can install more than the app. Set `PATCHED_ENABLE_PKG_UPDATES=0` to
+turn `.pkg` updates off.
 
 ## What update verification checks
 
