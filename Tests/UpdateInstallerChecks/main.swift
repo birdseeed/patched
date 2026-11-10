@@ -207,6 +207,21 @@ final class FakeRunningApps: RunningAppControlling, @unchecked Sendable {
     private var duringQuit: (@Sendable () -> Void)?
     private(set) var relaunched: [String] = []
     private(set) var quitRequests = 0
+    private var helpers: [String: [BundleProcess]] = [:]
+    private var helperCalls = 0
+    private var helpersAppearAfter = 0
+    /// Processes inside the bundle that are not app instances (a login item, an XPC service). With `afterCalls`
+    /// n they show up only from the (n + 1)th look, like a helper started during the update.
+    func set(helpers list: [BundleProcess], at path: String, afterCalls: Int = 0) {
+        lock.withLock { helpers[path] = list; helpersAppearAfter = afterCalls; helperCalls = 0 }
+    }
+    func clearHelpers() { lock.withLock { helpers = [:] } }
+    func bundleProcesses(path: String) -> [BundleProcess] {
+        lock.withLock {
+            helperCalls += 1
+            return helperCalls > helpersAppearAfter ? (helpers[path] ?? []) : []
+        }
+    }
     func set(running path: String, willQuit: Bool, respawnAfterQuit: Bool = false, duringQuit: (@Sendable () -> Void)? = nil) {
         lock.withLock {
             running[path] = [4242]; self.willQuit = willQuit; respawn = respawnAfterQuit; self.duringQuit = duringQuit
@@ -622,6 +637,218 @@ check("running app: refused without --quit, quit and relaunched with it, refused
     try expectEqual(report.status, .installed); try expect(report.relaunched, "not relaunched")
     try expectEqual(running.relaunched, [w.target])
 }
+check("running helper: an app quit for the update is reopened when a helper blocks it; a helper with the app closed refuses before downloading") {
+    let url = "https://example.test/v2.zip"
+    // The app quits on request, but its login item keeps running from inside the bundle.
+    var w = try world()
+    var running = FakeRunningApps()
+    running.set(running: w.target, willQuit: true)
+    running.set(helpers: [BundleProcess(pid: 4321, executablePath: w.target + "/Contents/Library/LoginItems/Agent.app/Contents/MacOS/Agent")], at: w.target)
+    try await expectRefusal("helper_running") {
+        _ = try await installer(w.box, downloader: w.downloader, running: running)
+            .update(appAt: w.target, offer: offer(url), options: UpdateOptions(quitIfRunning: true))
+    }
+    try expectEqual(running.relaunched, [w.target], "the app was left closed")
+    try expectEqual(try version(w.target), "1.0"); try expectClean(w.box)
+    // With --quit but the app not open, a helper won't go away: refused before any download.
+    w = try world()
+    running = FakeRunningApps()
+    running.set(helpers: [BundleProcess(pid: 4321, executablePath: w.target + "/Contents/MacOS/agent")], at: w.target)
+    try await expectRefusal("helper_running") {
+        _ = try await installer(w.box, downloader: w.downloader, running: running)
+            .update(appAt: w.target, offer: offer(url), options: UpdateOptions(quitIfRunning: true))
+    }
+    try expectEqual(w.downloader.calls, 0, "downloaded although a helper blocked the update")
+    try expectEqual(running.relaunched, [], "relaunched an app that was never open")
+}
+
+check("running helper: a login item inside the bundle is refused by name, never asked to quit, and checked again before the swap") {
+    let w = try world()
+    let helperPath = w.target + "/Contents/Library/LoginItems/Helper.app/Contents/MacOS/Helper"
+    let helper = BundleProcess(pid: 777, executablePath: helperPath)
+    let running = FakeRunningApps()
+    running.set(helpers: [helper], at: w.target)
+    let url = "https://example.test/v2.zip"
+    for quit in [false, true] {
+        do {
+            _ = try await installer(w.box, downloader: w.downloader, running: running).update(appAt: w.target, offer: offer(url),
+                                                                                            options: UpdateOptions(quitIfRunning: quit))
+            throw CheckFailure(description: "updated under a running helper (quit=\(quit))")
+        } catch let refusal as InstallRefusal {
+            try expectEqual(refusal.code, "helper_running", "quit=\(quit): \(refusal)")
+            try expect(refusal.message.contains("Contents/Library/LoginItems/Helper.app/Contents/MacOS/Helper (pid 777)"), "helper not named: \(refusal.message)")
+        }
+    }
+    try expectEqual(running.quitRequests, 0, "a helper that is not an app instance was asked to quit")
+    try expectEqual(try version(w.target), "1.0", "bundle changed under a helper"); try expectClean(w.box)
+    // The helper starts after the checks before the download and the quit step, but before the swap: still refused, and nothing is swapped.
+    let late = FakeRunningApps()
+    late.set(helpers: [helper], at: w.target, afterCalls: 2)
+    try await expectRefusal("helper_running") {
+        _ = try await installer(w.box, downloader: w.downloader, running: late).update(appAt: w.target, offer: offer(url))
+    }
+    try expectEqual(try version(w.target), "1.0", "swapped under a helper that started late"); try expectClean(w.box)
+    // Gone: the update goes through.
+    running.clearHelpers()
+    let report = try await installer(w.box, downloader: w.downloader, running: running).update(appAt: w.target, offer: offer(url))
+    try expectEqual(report.status, .installed); try expectEqual(try version(w.target), "2.0")
+}
+check("running helper: a path-prefix match needs the bundle plus a slash") {
+    let bundle = "/Applications/Foo.app"
+    try expect(BundleProcessScan.isInside(executable: "/Applications/Foo.app/Contents/MacOS/Foo", bundle: bundle), "main executable")
+    try expect(BundleProcessScan.isInside(executable: "/Applications/Foo.app/Contents/Library/LoginItems/H.app/Contents/MacOS/H", bundle: bundle), "login item")
+    try expect(BundleProcessScan.isInside(executable: "/Applications/Foo.app/Contents/MacOS/Foo", bundle: bundle + "/"), "trailing slash on bundle")
+    try expect(!BundleProcessScan.isInside(executable: "/Applications/Foo.app2/Contents/MacOS/Foo", bundle: bundle), "Foo.app2 matched Foo.app")
+    try expect(!BundleProcessScan.isInside(executable: "/Applications/Foo.application", bundle: bundle), "prefix without slash")
+    try expect(!BundleProcessScan.isInside(executable: "/Applications/Foo.app", bundle: bundle), "the bundle itself is not a process inside it")
+    try expect(!BundleProcessScan.isInside(executable: "/Applications/Bar.app/Contents/MacOS/Foo", bundle: bundle), "other bundle")
+    let found = BundleProcessScan.filter(pids: [1, 2, 3, 4], bundle: bundle) { pid in
+        [1: "/Applications/Foo.app/Contents/MacOS/Foo", 2: "/Applications/Foo.app2/x", 3: nil, 4: "/usr/bin/true"][pid] ?? nil
+    }
+    try expectEqual(found.map(\.pid), [1], "filter")
+}
+check("running helper: a real child process from inside a temporary bundle is found, through a symlink too") {
+    let base = NSTemporaryDirectory() + "patched-helper-\(UUID().uuidString)"
+    defer { try? FileManager.default.removeItem(atPath: base) }
+    let bundle = base + "/Host.app", sibling = base + "/Host.app2"
+    for dir in [bundle, sibling] { try FileManager.default.createDirectory(atPath: dir + "/Contents/MacOS", withIntermediateDirectories: true) }
+    // Real files rather than a symlink to /bin/sleep: the process path is the vnode's path.
+    try FileManager.default.copyItem(atPath: "/bin/sleep", toPath: bundle + "/Contents/MacOS/sleeper")
+    try FileManager.default.copyItem(atPath: "/bin/sleep", toPath: sibling + "/Contents/MacOS/sleeper")
+    let link = base + "/linked-sleeper"
+    try FileManager.default.createSymbolicLink(atPath: link, withDestinationPath: bundle + "/Contents/MacOS/sleeper")
+    func spawn(_ path: String) throws -> Process {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: path); process.arguments = ["60"]
+        try process.run(); return process
+    }
+    let inside = try spawn(link), outside = try spawn(sibling + "/Contents/MacOS/sleeper")
+    defer { for p in [inside, outside] { p.terminate(); p.waitUntilExit() } }
+    // Give the exec a moment to finish.
+    var pids: [pid_t] = []
+    for _ in 0..<50 {
+        pids = WorkspaceRunningApps().bundleProcesses(path: bundle).map(\.pid)
+        if pids.contains(inside.processIdentifier) { break }
+        try await Task.sleep(nanoseconds: 100_000_000)
+    }
+    try expect(pids.contains(inside.processIdentifier), "child started through a symlink was not found: \(pids)")
+    try expect(!pids.contains(outside.processIdentifier), "a process in Host.app2 matched Host.app")
+    let linked = BundleProcessScan.processes(inBundle: link.replacingOccurrences(of: "linked-sleeper", with: "Host.app"))
+    try expect(linked.contains { $0.pid == inside.processIdentifier }, "not found by its own path")
+    inside.terminate(); inside.waitUntilExit()
+    try expect(!WorkspaceRunningApps().bundleProcesses(path: bundle).contains { $0.pid == inside.processIdentifier }, "still found after it exited")
+}
+// MARK: Progress and cancellation
+
+final class ProgressLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var steps: [UpdateProgress] = []
+    private var action: (@Sendable (UpdateProgress) -> Void)?
+    var all: [UpdateProgress] { lock.withLock { steps } }
+    func onStep(_ action: @escaping @Sendable (UpdateProgress) -> Void) { lock.withLock { self.action = action } }
+    var handler: UpdateProgressHandler {
+        { [self] step in
+            let action = lock.withLock { () -> (@Sendable (UpdateProgress) -> Void)? in steps.append(step); return self.action }
+            action?(step)
+        }
+    }
+}
+final class TaskBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var task: Task<InstallReport, Error>?
+    func set(_ task: Task<InstallReport, Error>) { lock.withLock { self.task = task } }
+    func cancel() { lock.withLock { task }?.cancel() }
+}
+final class Signal: @unchecked Sendable {
+    private let lock = NSLock(); private var on = false
+    func fire() { lock.withLock { on = true } }
+    var fired: Bool { lock.withLock { on } }
+}
+/// Sends half of the archive, says so, then waits to be cancelled (a cancelled real download fails like this).
+final class StallingDownloader: ArtifactDownloading, @unchecked Sendable {
+    let path: String
+    let reached = Signal()
+    init(serving path: String) { self.path = path }
+    func download(_ url: URL, into sink: ArtifactSink, expectedLength: Int64?) async throws {
+        let data = try Data(contentsOf: URL(fileURLWithPath: path))
+        try sink.append(data.prefix(data.count / 2))
+        reached.fire()
+        while !Task.isCancelled { try? await Task.sleep(nanoseconds: 2_000_000) }
+        throw InstallRefusal.download("cancelled")
+    }
+}
+func plainInstaller(_ box: Sandbox, downloader: any ArtifactDownloading) -> UpdateInstaller {
+    UpdateInstaller(locations: box.locations, downloader: downloader, verifier: FakeVerifier(), runningApps: FakeRunningApps(),
+                    teamIDReader: fakeTeamReader, quitTimeout: 1)
+}
+func expectCancelledAndUntouched(_ w: World, _ task: Task<InstallReport, Error>, line: Int = #line) async throws {
+    do {
+        _ = try await task.value
+        throw CheckFailure(description: "the update was not cancelled (line \(line))")
+    } catch is CancellationError {}
+    try expectEqual(try version(w.target), "1.0", "the app changed"); try expectClean(w.box)
+    try expect(plainInstaller(w.box, downloader: w.downloader).backups().isEmpty, "a backup was made")
+    try expect(journals(w.box).isEmpty, "a journal was left: \(journals(w.box).map(\.phase))")
+}
+
+check("progress: the download, verifying and the commit point are reported in order, with the offered length") {
+    let w = try world()
+    let size = try Data(contentsOf: URL(fileURLWithPath: w.archive)).count
+    let log = ProgressLog()
+    let report = try await installer(w.box, downloader: w.downloader).update(
+        appAt: w.target, offer: offer("https://example.test/v2.zip", length: size), installable: true, progress: log.handler)
+    try expectEqual(report.status, .installed)
+    let steps = log.all
+    try expectEqual(steps.first, .downloading(received: 0, expected: Int64(size)), "first step")
+    try expect(steps.contains(.downloading(received: Int64(size), expected: Int64(size))), "no final byte count: \(steps)")
+    let order = steps.map { step -> Int in switch step { case .downloading: return 0; case .verifying: return 1; case .installing: return 2 } }
+    try expect(order == order.sorted() && order.last == 2 && order.contains(1), "out of order: \(steps)")
+}
+check("cancel: stopping a download leaves the app, backups, downloads and journals as they were") {
+    let w = try world()
+    let downloader = StallingDownloader(serving: w.archive)
+    let task = Task {
+        try await plainInstaller(w.box, downloader: downloader).update(appAt: w.target, offer: offer("https://example.test/v2.zip"), installable: true)
+    }
+    while !downloader.reached.fired { try await Task.sleep(nanoseconds: 2_000_000) }
+    task.cancel()
+    try await expectCancelledAndUntouched(w, task)
+}
+check("cancel: while verifying, before the commit point, nothing is swapped and nothing is left") {
+    let w = try world()
+    let box = TaskBox(), log = ProgressLog()
+    log.onStep { step in if step == .verifying { box.cancel() } }
+    let task = Task {
+        try await installer(w.box, downloader: w.downloader).update(appAt: w.target, offer: offer("https://example.test/v2.zip"),
+                                                                  installable: true, progress: log.handler)
+    }
+    box.set(task)
+    try await expectCancelledAndUntouched(w, task)
+    try expect(!log.all.contains(.installing), "reached the commit point: \(log.all)")
+}
+check("cancel: a cancellation at the commit point is not acted on, and the update completes") {
+    let w = try world()
+    let box = TaskBox(), log = ProgressLog()
+    log.onStep { step in if step == .installing { box.cancel() } }
+    let task = Task {
+        try await installer(w.box, downloader: w.downloader).update(appAt: w.target, offer: offer("https://example.test/v2.zip"),
+                                                                  installable: true, progress: log.handler)
+    }
+    box.set(task)
+    let report = try await task.value
+    try expectEqual(report.status, .installed); try expectEqual(try version(w.target), "2.0")
+    try expectEqual(installer(w.box).backups().count, 1); try expectClean(w.box)
+}
+check("cancel: a task cancelled before it starts does nothing at all") {
+    let w = try world()
+    let task = Task {
+        while !Task.isCancelled { await Task.yield() }
+        return try await installer(w.box, downloader: w.downloader).update(appAt: w.target, offer: offer("https://example.test/v2.zip"), installable: true)
+    }
+    task.cancel()
+    try await expectCancelledAndUntouched(w, task)
+    try expectEqual(w.downloader.calls, 0, "downloaded for a cancelled update")
+}
 check("dry run verifies, changes nothing and cleans up") {
     let w = try world()
     let report = try await installer(w.box, downloader: w.downloader).update(appAt: w.target, offer: offer("https://example.test/v2.zip"),
@@ -655,6 +882,79 @@ check("swap succeeds, backup kept (only the newest), journal finished") {
         try expectEqual(FileSafety.mode(dir), 0o700, dir)
     }
     try expectEqual(FileSafety.mode(w.box.locations.transactions + "/" + js[0].id + ".json"), 0o600)
+}
+/// Names under the app's backups folder, hidden ones included.
+func backupFolderNames(_ box: Sandbox) -> [String] {
+    (((try? FileManager.default.contentsOfDirectory(atPath: box.locations.backups + "/" + bundleID)) ?? [])).sorted()
+}
+/// Puts a fresh 1.0 (100) app at the target, as if the user reinstalled the version that is already in backups.
+func reinstallOldVersion(_ w: World) throws {
+    try FileManager.default.removeItem(atPath: w.target)
+    _ = try makeApp(at: w.target, short: "1.0", build: "100")
+}
+
+check("same-version backup: a failure before the swap puts the old backup record back; success leaves exactly one") {
+    let w = try world()
+    let url = "https://example.test/v2.zip"
+    _ = try await installer(w.box, downloader: w.downloader).update(appAt: w.target, offer: offer(url))
+    let first = installer(w.box).backups()
+    try expectEqual(first.count, 1); try expectEqual(first[0].shortVersion, "1.0")
+    let names = backupFolderNames(w.box)
+    try reinstallOldVersion(w)
+    // A helper appears just before the swap, so the commit is refused after the old backup was set aside.
+    let late = FakeRunningApps()
+    late.set(helpers: [BundleProcess(pid: 99, executablePath: w.target + "/Contents/MacOS/Helper")], at: w.target, afterCalls: 2)
+    try await expectRefusal("helper_running") {
+        _ = try await installer(w.box, downloader: w.downloader, running: late).update(appAt: w.target, offer: offer(url))
+    }
+    try expectEqual(try version(w.target), "1.0"); try expectClean(w.box)
+    let after = installer(w.box).backups()
+    try expectEqual(after.count, 1, "the earlier backup record is hidden after a failed update: \(backupFolderNames(w.box))")
+    try expectEqual(backupFolderNames(w.box), names, "backup folder names changed or a .superseded- folder was left")
+    try expectEqual(after[0].shortVersion, "1.0"); try expect(FileSafety.directoryIdentity(after[0].bundlePath!) != nil, "backup bundle missing")
+    // The same update, unobstructed: exactly one backup, nothing hidden.
+    let report = try await installer(w.box, downloader: w.downloader).update(appAt: w.target, offer: offer(url))
+    try expectEqual(report.status, .installed)
+    try expectEqual(installer(w.box).backups().count, 1)
+    try expect(backupFolderNames(w.box).allSatisfy { !$0.hasPrefix(".") }, "hidden folder left after success: \(backupFolderNames(w.box))")
+}
+check("same-version backup: a swap that fails verification and swaps back, and a recovered crash, restore it too") {
+    let w = try world()
+    let url = "https://example.test/v2.zip"
+    _ = try await installer(w.box, downloader: w.downloader).update(appAt: w.target, offer: offer(url))
+    let names = backupFolderNames(w.box)
+    // Swap back after the new app fails verification.
+    try reinstallOldVersion(w)
+    let verifier = FakeVerifier(failSignatureAt: [w.target], onlyVersion: "2.0")
+    try await expectRefusal("verification_failed_after_swap") {
+        _ = try await installer(w.box, downloader: w.downloader, verifier: verifier).update(appAt: w.target, offer: offer(url))
+    }
+    try expectEqual(backupFolderNames(w.box), names, "swap-back hid the backup: \(backupFolderNames(w.box))")
+    try expectEqual(installer(w.box).backups().count, 1)
+    // A crash right after the swap was prepared, then recovery.
+    try reinstallOldVersion(w)
+    do {
+        _ = try await installer(w.box, downloader: w.downloader, crashAt: .prepared).update(appAt: w.target, offer: offer(url))
+        throw CheckFailure(description: "no crash")
+    } catch is SimulatedCrash {}
+    try expect(backupFolderNames(w.box).contains { $0.hasPrefix(".superseded-") }, "setup: nothing set aside: \(backupFolderNames(w.box))")
+    let recovery = await installer(w.box, downloader: w.downloader).recover()
+    try expectEqual(recovery.reports.count, 1)
+    guard case .success(.discarded) = recovery.reports[0].result else { throw CheckFailure(description: "recovery: \(recovery.reports[0].result)") }
+    try expectEqual(backupFolderNames(w.box), names, "recovery left the backup hidden: \(backupFolderNames(w.box))")
+    try expectEqual(installer(w.box).backups().count, 1); try expectClean(w.box)
+    // A journal still in the staging phase (the set-aside happened, then the process died).
+    try reinstallOldVersion(w)
+    do {
+        _ = try await installer(w.box, downloader: w.downloader, crashAt: .prepared).update(appAt: w.target, offer: offer(url))
+    } catch is SimulatedCrash {}
+    guard var journal = journals(w.box).first(where: { !$0.isTerminal }) else { throw CheckFailure(description: "no unfinished journal") }
+    journal.phase = .staging
+    let store = JournalStore(directory: w.box.locations.transactions)
+    try store.write(&journal)
+    _ = await installer(w.box, downloader: w.downloader).recover()
+    try expectEqual(backupFolderNames(w.box), names, "staging-phase recovery left the backup hidden: \(backupFolderNames(w.box))")
+    try expectClean(w.box)
 }
 check("re-verification failure after the swap swaps back") {
     let w = try world()

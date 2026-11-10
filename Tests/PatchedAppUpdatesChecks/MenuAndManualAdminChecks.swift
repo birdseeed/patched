@@ -318,4 +318,36 @@ final class FakeVerifier: CodeVerifying, @unchecked Sendable {
             try expect(view.contains(needed), "menu lacks \(needed)")
         }
     }
+
+    check("menu view: 6 pt above the first line, 12 pt at the sides and bottom") {
+        let menu = try String(contentsOfFile: sourcesRoot() + "/PatchedClient/NativeClientMenu.swift", encoding: .utf8)
+        let view = String(menu[menu.range(of: "public struct NativeClientMenuView")!.lowerBound...])
+        try expect(view.contains(".padding(EdgeInsets(top: 6, leading: 12, bottom: 12, trailing: 12))"), "menu padding")
+        try expect(!view.contains("        .padding(12)\n"), "menu still pads 12 pt all round")
+    }
+
+    check("menu: the checked time is dated unless it is today, in the user's locale") {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+        func at(_ day: Int, _ hour: Int, _ minute: Int) -> Date {
+            calendar.date(from: DateComponents(year: 2026, month: 11, day: day, hour: hour, minute: minute))!
+        }
+        let gb = Locale(identifier: "en_GB"), fr = Locale(identifier: "fr_FR")
+        let now = at(9, 15, 0)
+        func label(_ date: Date, _ locale: Locale = gb) -> String {
+            AppUpdatesController.shortTime(date, now: now, calendar: calendar, locale: locale)
+        }
+        try expect(label(at(9, 10, 42)) == "10:42", "today: \(label(at(9, 10, 42)))")
+        try expect(label(at(9, 0, 5)) == "00:05", "today, early: \(label(at(9, 0, 5)))")
+        try expect(label(at(8, 23, 59)) == "Yesterday 23:59", "yesterday: \(label(at(8, 23, 59)))")
+        try expect(label(at(8, 10, 42)) == "Yesterday 10:42", "yesterday: \(label(at(8, 10, 42)))")
+        let older = label(at(5, 10, 42))
+        try expect(older.contains("05/11") && older.contains("10:42") && !older.contains("Yesterday"), "older: \(older)")
+        // The wording comes from the locale rather than the code.
+        let french = label(at(8, 10, 42), fr)
+        try expect(french.lowercased().hasPrefix("hier") && french.contains("10:42"), "French yesterday: \(french)")
+        // Midnight is the boundary, not 24 hours.
+        let early = AppUpdatesController.shortTime(at(8, 23, 0), now: at(9, 0, 30), calendar: calendar, locale: gb)
+        try expect(early == "Yesterday 23:00", "across midnight: \(early)")
+    }
 }

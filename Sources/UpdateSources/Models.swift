@@ -120,6 +120,9 @@ public enum RefusalReason: Error, Sendable, Equatable {
     case missingInstalledVersion
     case invalidSource(String)
     case network(String)
+    /// The server could not be reached at all (no connection, DNS failure, timeout, connection lost). Unlike
+    /// `network` (which includes HTTP errors such as 404), this says nothing about the feed itself.
+    case offline(String)
     /// Not a failure: the update exists but the App Store owns installing it.
     case appStoreManaged
     /// Apple returned conflicting App Store listings for one bundle ID.
@@ -137,6 +140,7 @@ public enum RefusalReason: Error, Sendable, Equatable {
         case .missingInstalledVersion: return "missing_installed_version"
         case .invalidSource: return "invalid_source"
         case .network: return "network"
+        case .offline: return "offline"
         case .appStoreManaged: return "app_store_managed"
         case .lookupConflict: return "lookup_conflict"
         }
@@ -153,6 +157,7 @@ public enum RefusalReason: Error, Sendable, Equatable {
         case .missingInstalledVersion: return "installed app has no readable version"
         case .invalidSource(let detail): return "invalid update source: \(detail)"
         case .network(let detail): return "network error: \(detail)"
+        case .offline(let detail): return "couldn't reach the server: \(detail)"
         case .appStoreManaged: return "Update in the App Store"
         case .lookupConflict(let detail): return "conflicting App Store listings: \(detail)"
         }

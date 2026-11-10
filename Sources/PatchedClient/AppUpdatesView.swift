@@ -150,6 +150,9 @@ private struct AppUpdateRowView: View {
                     }
                 }
                 statusLine
+                if let note = row.recheckNote {
+                    Text(verbatim: note).font(.footnote).foregroundStyle(.secondary)
+                }
                 if row.rollbackUnsupported {
                     Text(verbatim: AppUpdateRow.rollbackUnsupportedCaption).font(.footnote).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -189,7 +192,17 @@ private struct AppUpdateRowView: View {
         case .checking:
             HStack(spacing: 6) { ProgressView().controlSize(.small); Text(verbatim: "Checking…") }.font(.callout)
         case .updating:
-            HStack(spacing: 6) { ProgressView().controlSize(.small); Text(verbatim: "Updating…") }.font(.callout)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    if let fraction = row.downloadFraction, !row.cancelRequested {
+                        ProgressView(value: fraction).frame(width: 120)
+                    } else {
+                        ProgressView().controlSize(.small)
+                    }
+                    Text(verbatim: row.progressText ?? "Updating…")
+                        .accessibilityLabel(Text(verbatim: row.name + ": " + (row.progressText ?? "Updating")))
+                }
+            }.font(.callout)
         case .rollingBack:
             HStack(spacing: 6) { ProgressView().controlSize(.small); Text(verbatim: "Rolling back…") }.font(.callout)
         case .idle:
@@ -214,6 +227,11 @@ private struct AppUpdateRowView: View {
                     .buttonStyle(ClientButtonStyle(enabled: enabled, prominent: true))
                     .disabled(!enabled)
                     .accessibilityLabel(Text(verbatim: "Update " + row.name))
+            }
+            if controller.canCancelUpdate(row) {
+                Button(action: { controller.cancelUpdate(id: row.id) }) { Text(verbatim: "Cancel") }
+                    .buttonStyle(ClientButtonStyle(enabled: true, prominent: false))
+                    .accessibilityLabel(Text(verbatim: "Cancel updating " + row.name))
             }
             if row.isAppStoreUpdate || row.isAppStoreUnconfirmed {
                 // The App Store installs these; Patched only opens it, on this click.

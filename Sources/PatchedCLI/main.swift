@@ -170,14 +170,7 @@ struct UpdateRow: Encodable {
     var note: String? = nil
 }
 
-func versionText(_ app: InstalledApp) -> String {
-    switch (app.shortVersion, app.build) {
-    case let (s?, b?) where s != b: return "\(s) (\(b))"
-    case let (s?, _): return s
-    case let (nil, b?): return b
-    default: return "?"
-    }
-}
+func versionText(_ app: InstalledApp) -> String { InstallTarget.versionText(app.shortVersion, app.build) }
 
 func row(_ app: InstalledApp, _ report: InstallReport) -> UpdateRow {
     UpdateRow(name: app.name, path: app.path, bundleID: app.bundleID, status: report.status.rawValue,

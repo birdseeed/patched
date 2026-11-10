@@ -82,6 +82,8 @@ public enum LoginItemStatus: Equatable, Sendable { case notRegistered, enabled, 
     public static let wakeDelay: TimeInterval = 20
     /// How long to wait before trying again when an install or rollback is in progress.
     public static let deferDelay: TimeInterval = 5 * 60
+    /// After a check that mostly could not reach the network, look again after this long instead of the full interval.
+    public static let offlineRetryDelay: TimeInterval = 10 * 60
 
     private enum Origin { case launch, interval, deferred }
 
@@ -178,6 +180,11 @@ public enum LoginItemStatus: Equatable, Sendable { case notRegistered, enabled, 
         ownCheckInFlight = false
         // A check the user started counts as the latest check too.
         if !mine { store.lastCheck = now() }
+        // A check that was mostly offline says little: ask again soon. Backdating the stamp makes the timer's
+        // wall-clock decision agree with the short wait.
+        if outcome == .succeeded, controller.lastCheckMostlyOffline {
+            store.lastCheck = now().addingTimeInterval(-(Self.interval - Self.offlineRetryDelay))
+        }
         if outcome == .succeeded { settle(notify: mine); pendingSelfSettle = mine; settleSelfUpdateWhenReady() }
         else { pendingSelfSettle = nil }
         arm()

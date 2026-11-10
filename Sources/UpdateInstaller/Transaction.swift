@@ -219,22 +219,31 @@ struct SwapEngine: Sendable {
         let appBackups = (backupDir as NSString).deletingLastPathComponent
         try FileSafety.makePrivateDirectory(appBackups)
         if FileSafety.exists(backupDir) {
-            // An older backup with the same version: set it aside, pruned once this transaction finishes.
+            // An older backup with the same version: set it aside. It is pruned once this transaction finishes,
+            // and put back if the swap does not happen.
             guard rename(backupDir, appBackups + "/.superseded-" + journal.id) == 0 else {
                 throw InstallRefusal.io("cannot move aside existing backup \(backupDir)")
             }
         }
-        guard journal.oldIdentity == FileSafety.directoryIdentity(journal.targetPath),
-              journal.newIdentity == FileSafety.directoryIdentity(journal.stagedBundlePath) else {
-            throw InstallRefusal.io("the installed or staged bundle changed while the update was being prepared")
-        }
+        do {
+            guard journal.oldIdentity == FileSafety.directoryIdentity(journal.targetPath),
+                  journal.newIdentity == FileSafety.directoryIdentity(journal.stagedBundlePath) else {
+                throw InstallRefusal.io("the installed or staged bundle changed while the update was being prepared")
+            }
 
-        journal.phase = .prepared
-        try write(&journal)
-        try preSwapCheck()
-        let swapError = Self.swap(journal.stagedBundlePath, journal.targetPath)
-        guard swapError == 0 else {
-            throw InstallRefusal.swapFailed("renamex_np: \(String(cString: strerror(swapError)))")
+            journal.phase = .prepared
+            try write(&journal)
+            try preSwapCheck()
+            let swapError = Self.swap(journal.stagedBundlePath, journal.targetPath)
+            guard swapError == 0 else {
+                throw InstallRefusal.swapFailed("renamex_np: \(String(cString: strerror(swapError)))")
+            }
+        } catch let crash as SimulatedCrash {
+            throw crash   // a crash leaves things as they are; recovery restores the set-aside backup
+        } catch {
+            // The swap did not happen: the earlier backup must not stay hidden.
+            restoreSuperseded(journal)
+            throw error
         }
         var swapped = journal
         defer { journal = swapped }
@@ -243,6 +252,15 @@ struct SwapEngine: Sendable {
             try write(&swapped)
             return try finishAfterSwap(&swapped)
         }
+    }
+
+    /// Puts back the backup `commit` (or the admin path's backup copy) set aside as `.superseded-<id>`, when this
+    /// transaction ends without a swap. Does nothing if there is nothing set aside or the backup folder is taken.
+    func restoreSuperseded(_ journal: TransactionJournal) {
+        guard let backupDir = journal.backupDir else { return }
+        let aside = (backupDir as NSString).deletingLastPathComponent + "/.superseded-" + journal.id
+        guard FileSafety.pathState(aside) != .absent, FileSafety.pathState(backupDir) == .absent else { return }
+        _ = rename(aside, backupDir)
     }
 
     /// From `swapped`: verify what is installed, then back up the old bundle and finish; or swap back.
@@ -280,6 +298,7 @@ struct SwapEngine: Sendable {
         } catch let refusal as InstallRefusal {
             return EngineResult(outcome: .unresolved, refusal: .unresolved("the restored app failed verification: \(refusal.message)"))
         }
+        restoreSuperseded(journal)
         let left = try settle(&journal, then: .reverted)
         return EngineResult(outcome: .restoredVerified, refusal: .verificationFailedAfterSwap(reason.message), leftovers: left)
     }
@@ -442,6 +461,7 @@ struct SwapEngine: Sendable {
         }
         if journal.isPrivileged { return try recoverPrivileged(journal) }
         if journal.phase == .staging {
+            restoreSuperseded(journal)
             return (.discarded, try settle(&journal, then: nil))
         }
         let target = FileSafety.directoryIdentity(journal.targetPath)
@@ -465,10 +485,12 @@ struct SwapEngine: Sendable {
         switch (target, staged) {
         case (old, new):
             // Never swapped.
+            restoreSuperseded(journal)
             return (.discarded, try settle(&journal, then: nil))
         case (old, nil):
             // Swapped back (or never swapped) and the staged copy is already gone.
             try verifyOld(journal.targetPath, journal)
+            restoreSuperseded(journal)
             return (.reverted, try settle(&journal, then: .reverted))
         case (new, old):
             if journal.phase == .swapBack {

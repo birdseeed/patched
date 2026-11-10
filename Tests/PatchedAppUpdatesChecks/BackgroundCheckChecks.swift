@@ -302,6 +302,65 @@ struct FakeNetworkDown: Error {}
         try expect(rig.notifier.posted.count == 1, "re-notified after a transient network failure")
     }
 
+    check("offline: one offline check keeps the known updates and statuses, with a note, and does not notify again") {
+        let alpha = app("Alpha"), bravo = app("Bravo"), charlie = app("Charlie")
+        let rig = Rig([outcome(alpha, .updateAvailable(offer("2.0"))), outcome(bravo, .upToDate), outcome(charlie, .noSource, noSource: true)])
+        rig.scheduler.start(); await rig.settle()
+        try expect(rig.controller.availableUpdateCount == 1 && rig.notifier.posted.count == 1, "setup")
+        for a in [alpha, bravo] { rig.world[a.path] = outcome(a, .refused(.offline("offline"))) }
+        rig.clock.advance(interval); try rig.timer.fireActive(); await rig.settle()
+        let rows = rig.controller.rows
+        try expect(rows.first { $0.name == "Alpha" }?.status == .updateAvailable, "update erased: \(rows.map(\.status))")
+        try expect(rows.first { $0.name == "Bravo" }?.status == .upToDate, "up to date erased")
+        try expect(rows.first { $0.name == "Alpha" }?.recheckNote == AppUpdateRow.offlineRecheckNote, "no note on a kept row")
+        try expect(rows.first { $0.name == "Charlie" }?.recheckNote == nil, "note on a row that never needed the network")
+        try expect(rig.controller.availableUpdateCount == 1 && rig.controller.canUpdate(rows.first { $0.name == "Alpha" }!), "badge or Update lost")
+        let menu = rig.controller.menuUpdates()
+        try expect(menu.rows.map(\.name) == ["Alpha"] && menu.header == "1 update available" && menu.note == "Couldn't re-check 2 apps (offline)",
+                   "menu: \(menu.header) / \(menu.note ?? "-") / \(menu.rows.map(\.name))")
+        try expect(rig.notifier.posted.count == 1, "re-notified for a kept status")
+        // Back online with the same offer: still silent. A changed install on disk is not kept: it is refused.
+        rig.world[alpha.path] = outcome(alpha, .updateAvailable(offer("2.0"))); rig.world[bravo.path] = outcome(bravo, .upToDate)
+        rig.clock.advance(interval); try rig.timer.fireActive(); await rig.settle()
+        try expect(rig.notifier.posted.count == 1 && rig.controller.rows.allSatisfy { $0.recheckNote == nil }, "note stuck after recovery")
+        let changed = app("Alpha", version: "1.5")
+        rig.world[alpha.path] = outcome(changed, .refused(.offline("offline")))
+        rig.clock.advance(interval); try rig.timer.fireActive(); await rig.settle()
+        if case .refused = rig.controller.rows.first(where: { $0.name == "Alpha" })?.status {} else {
+            throw CheckFailure(description: "a row for a different installed version was kept")
+        }
+    }
+
+    check("offline: a check that is mostly offline retries in 10 minutes; a half-answered one waits the full interval") {
+        let retry = UpdateCheckScheduler.offlineRetryDelay
+        try expect(retry >= 10 * 60 && retry <= 15 * 60, "retry delay \(retry)")
+        let alpha = app("Alpha"), bravo = app("Bravo")
+        let rig = Rig([outcome(alpha, .refused(.offline("offline"))), outcome(bravo, .refused(.offline("offline")))])
+        rig.scheduler.start(); await rig.settle()
+        try expect(rig.timer.active.count == 1 && rig.timer.active[0].delay == retry, "offline retry: \(rig.timer.active.map(\.delay))")
+        rig.clock.advance(retry); try rig.timer.fireActive(); await rig.settle()
+        try expect(rig.checks.count == 2, "the short retry did not check: \(rig.checks.count)")
+        // Back online: the next check is a full interval away.
+        rig.world[alpha.path] = outcome(alpha, .upToDate); rig.world[bravo.path] = outcome(bravo, .upToDate)
+        rig.clock.advance(retry); try rig.timer.fireActive(); await rig.settle()
+        try expect(rig.checks.count == 3 && rig.timer.active.count == 1 && rig.timer.active[0].delay == interval,
+                   "after recovery: \(rig.checks.count) checks, \(rig.timer.active.map(\.delay))")
+        // One failure in three is not "offline".
+        let charlie = app("Charlie")
+        let mixed = Rig([outcome(alpha, .refused(.network("x"))), outcome(bravo, .upToDate), outcome(charlie, .upToDate)])
+        mixed.scheduler.start(); await mixed.settle()
+        try expect(mixed.timer.active.count == 1 && mixed.timer.active[0].delay == interval, "mixed: \(mixed.timer.active.map(\.delay))")
+        // An HTTP error (a moved or broken feed) is not "offline": it is shown as refused and never speeds up the schedule.
+        let broken = Rig([outcome(alpha, .upToDate)])
+        broken.scheduler.start(); await broken.settle()
+        broken.world[alpha.path] = outcome(alpha, .refused(.network("HTTP 404")))
+        broken.clock.advance(interval); try broken.timer.fireActive(); await broken.settle()
+        let row = broken.controller.rows.first { $0.name == "Alpha" }
+        if case .refused? = row?.status {} else { throw CheckFailure(description: "a 404 kept the old status: \(String(describing: row?.status))") }
+        try expect(row?.recheckNote == nil, "a 404 was labelled offline")
+        try expect(broken.timer.active.count == 1 && broken.timer.active[0].delay == interval, "a 404 sped up the schedule: \(broken.timer.active.map(\.delay))")
+    }
+
     check("notify: the badge matches, and a user-run check seen on screen does not notify") {
         let rig = Rig([outcome(app("Alpha"), .updateAvailable(offer("2.0"))), outcome(app("Bravo"), .updateAvailable(offer("3.0"))),
                        outcome(app("Charlie"), .upToDate)], gated: true)

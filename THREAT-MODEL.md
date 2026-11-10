@@ -159,14 +159,30 @@ notarisation, as the normal installer does for every other app.
   put back.
 - **Backups.** The old version is kept in
   `~/Library/Application Support/Patched/Updater/backups` until the next update.
-  `rollback` puts it back the same way.
+  `rollback` puts it back the same way. A same-version backup is set aside while an
+  update is prepared and put back if the swap does not happen (also by `recover`).
 - **Journal.** A journal written before every step lets `recover` finish or undo
   an interrupted update. When it cannot prove which state is safe, it changes and
   deletes nothing, leaves the app stopped, and says so.
 - **Running apps.** Updates, rollbacks and `recover` refuse to touch an app that is
   running from an affected bundle. An app is only quit if you ask (`--quit`). It is asked to
   quit, never force-killed, and is only relaunched once the result has been
-  verified.
+  verified. The check looks at more than the app's own instances: it also lists every
+  process on the Mac whose executable lives inside the bundle (login items in
+  `Contents/Library/LoginItems`, XPC services, and tools in `Contents/MacOS` however
+  they were launched, symlinks included), using `proc_listallpids` and `proc_pidpath`.
+  The bundle path is compared with a trailing "/", so `Foo.app` never matches
+  `Foo.app2`. Such a helper is not an app instance and cannot be asked to quit, so
+  the update is refused with `app_running` and the message names the helper and its
+  pid, even with `--quit`; you quit it yourself. The sweep runs before the download,
+  again before the app is quit, once more after the quit (helpers get a few seconds
+  to follow the app out) and a last time immediately before the swap. It is
+  best-effort: it sees only processes the current user may inspect.
+- **Cancelling.** A single update can be cancelled from its row until the commit
+  point (the quit and swap). Cancelling stops the download or unpacking and removes the
+  download and staging folders, leaving the app and its backups as they were. After
+  the commit point there is no Cancel, and a late one is ignored, so the swap and
+  its verification always run to a verified result or a verified swap back.
 
 ## State migration
 

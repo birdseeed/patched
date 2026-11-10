@@ -15,6 +15,22 @@ public enum FetchError: Error, Sendable, Equatable {
     case tooLarge
     case http(Int)
     case transport(String)
+    /// The request never reached a server: see `FetchError.offlineCodes`.
+    case offline(String)
+
+    /// URLSession failures that mean "no usable connection", not "the server answered badly".
+    public static let offlineCodes: Set<URLError.Code> = [
+        .notConnectedToInternet, .networkConnectionLost, .timedOut, .cannotFindHost, .cannotConnectToHost,
+        .dnsLookupFailed, .dataNotAllowed, .internationalRoamingOff, .callIsActive,
+    ]
+
+    /// Classifies a URLSession error: offline for the codes above, transport for anything else.
+    public static func classify(_ error: Error) -> FetchError {
+        if let url = error as? URLError, offlineCodes.contains(url.code) { return .offline(url.localizedDescription) }
+        let ns = error as NSError
+        if ns.domain == NSURLErrorDomain, offlineCodes.contains(URLError.Code(rawValue: ns.code)) { return .offline(ns.localizedDescription) }
+        return .transport(ns.localizedDescription)
+    }
 
     public var refusal: RefusalReason {
         switch self {
@@ -23,6 +39,7 @@ public enum FetchError: Error, Sendable, Equatable {
         case .tooLarge: return .tooLarge
         case .http(let code): return .network("HTTP \(code)")
         case .transport(let detail): return .network(detail)
+        case .offline(let detail): return .offline(detail)
         }
     }
 }
@@ -109,7 +126,7 @@ public struct URLSessionFetcher: HTTPFetching {
         } catch let error as FetchError {
             throw error
         } catch {
-            throw FetchError.transport((error as NSError).localizedDescription)
+            throw FetchError.classify(error)
         }
     }
 }

@@ -372,6 +372,28 @@ func registerAdminChecks() {
         }
     }
 
+    check("admin: a same-version backup set aside for the copy comes back when authorization is denied, and stays one after success") {
+        let w = try world()
+        let replacer = FakeReplacer()
+        _ = try await adminInstaller(w.box, admin: adminPath(replacer: replacer), downloader: w.downloader)
+            .update(appAt: w.target, offer: offer(v2zip), installable: true, admin: AdminInteraction())
+        let names = backupFolderNames(w.box)
+        try expectEqual(adminInstaller(w.box, admin: nil).backups().count, 1)
+        try reinstallOldVersion(w)
+        replacer.grant = .deny
+        try await expectRefusal("admin_denied") {
+            _ = try await adminInstaller(w.box, admin: adminPath(replacer: replacer), downloader: w.downloader)
+                .update(appAt: w.target, offer: offer(v2zip), installable: true, admin: AdminInteraction())
+        }
+        try expectEqual(backupFolderNames(w.box), names, "the earlier backup stayed hidden: \(backupFolderNames(w.box))")
+        try expectEqual(adminInstaller(w.box, admin: nil).backups().count, 1)
+        replacer.grant = .grant
+        _ = try await adminInstaller(w.box, admin: adminPath(replacer: replacer), downloader: w.downloader)
+            .update(appAt: w.target, offer: offer(v2zip), installable: true, admin: AdminInteraction())
+        try expectEqual(backupFolderNames(w.box), names, "after success: \(backupFolderNames(w.box))")
+        try expectEqual(adminInstaller(w.box, admin: nil).backups().count, 1)
+    }
+
     check("admin: a replacement that fails or is declined without touching the target is refused cleanly") {
         for act in [FakeReplacer.Act.failUntouched, .denyUntouched] {
             let w = try world()

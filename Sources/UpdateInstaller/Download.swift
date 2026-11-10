@@ -28,6 +28,10 @@ public final class ArtifactSink: @unchecked Sendable {
     private var sha512 = SHA512()
     public private(set) var byteCount: Int64 = 0
     private var closed = false
+    /// The size to expect, when known: the feed's length, or the server's Content-Length once it has answered.
+    public var expectedTotal: Int64?
+    /// Told after every chunk with the bytes so far and `expectedTotal`. Called on the downloader's queue.
+    public var onProgress: (@Sendable (_ received: Int64, _ total: Int64?) -> Void)?
 
     public init(path: String, maxBytes: Int64) throws {
         self.path = path
@@ -51,6 +55,7 @@ public final class ArtifactSink: @unchecked Sendable {
                 offset += written
             }
         }
+        onProgress?(byteCount, expectedTotal)
     }
 
     public func finish() throws -> DownloadedArtifact {
@@ -200,6 +205,7 @@ private final class StreamingDelegate: NSObject, URLSessionDataDelegate, @unchec
             fail(InstallRefusal.lengthMismatch("feed says \(expectedLength) bytes, server announces \(announced)"), dataTask)
             completionHandler(.cancel); return
         }
+        if announced > 0 { sink.expectedTotal = announced }
         completionHandler(.allow)
     }
 

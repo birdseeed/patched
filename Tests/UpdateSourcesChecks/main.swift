@@ -70,6 +70,20 @@ check("version comparator table") {
     }
 }
 
+check("fetch errors: only a missing connection is offline; HTTP errors and other failures are not") {
+    for code in [URLError.Code.notConnectedToInternet, .networkConnectionLost, .timedOut, .cannotFindHost, .cannotConnectToHost, .dnsLookupFailed] {
+        guard case .offline = FetchError.classify(URLError(code)) else { throw CheckFailure(description: "\(code.rawValue) not offline") }
+        let ns = NSError(domain: NSURLErrorDomain, code: code.rawValue)
+        guard case .offline = FetchError.classify(ns) else { throw CheckFailure(description: "NSError \(code.rawValue) not offline") }
+    }
+    for code in [URLError.Code.badServerResponse, .secureConnectionFailed, .serverCertificateUntrusted, .cancelled] {
+        guard case .transport = FetchError.classify(URLError(code)) else { throw CheckFailure(description: "\(code.rawValue) counted as offline") }
+    }
+    guard case .network = FetchError.http(404).refusal else { throw CheckFailure(description: "HTTP 404 is not a network refusal") }
+    guard case .offline = FetchError.offline("x").refusal else { throw CheckFailure(description: "offline lost its meaning") }
+    try expect(RefusalReason.offline("x").code == "offline" && RefusalReason.network("x").code == "network", "codes")
+}
+
 check("version decoration is stripped for display-version comparison") {
     try expectEqual(VersionComparator.stripDecoration("Build 4215"), "4215")
     try expectEqual(VersionComparator.stripDecoration("v1.2.3"), "1.2.3")

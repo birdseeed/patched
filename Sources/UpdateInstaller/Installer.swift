@@ -8,6 +8,32 @@ public struct UpdateOptions: Sendable, Equatable {
     public init(quitIfRunning: Bool = false, dryRun: Bool = false) { self.quitIfRunning = quitIfRunning; self.dryRun = dryRun }
 }
 
+/// Where one update has got to, for a row to show. Sent from whatever thread the installer is running on.
+public enum UpdateProgress: Sendable, Equatable {
+    /// Bytes received so far and the size when it is known (the feed's length or the server's Content-Length).
+    case downloading(received: Int64, expected: Int64?)
+    /// The download is complete: checking its digests and signature, unpacking and verifying the new app.
+    case verifying
+    /// The commit point: from here the swap is under way and the update can no longer be cancelled.
+    case installing
+}
+public typealias UpdateProgressHandler = @Sendable (UpdateProgress) -> Void
+
+/// Limits how often a progress handler hears about byte counts, always letting the final count through.
+final class ProgressThrottle: @unchecked Sendable {
+    private let lock = NSLock()
+    private var last = Date.distantPast
+    private let interval: TimeInterval
+    init(interval: TimeInterval = 0.1) { self.interval = interval }
+    func shouldEmit(complete: Bool) -> Bool {
+        lock.withLock {
+            let now = Date()
+            if complete || now.timeIntervalSince(last) >= interval { last = now; return true }
+            return false
+        }
+    }
+}
+
 public struct InstallReport: Sendable, Equatable {
     public enum Status: String, Sendable { case installed, dryRunPassed = "dry_run_passed", rolledBack = "rolled_back" }
     public let status: Status
@@ -58,7 +84,8 @@ public struct InstallTarget: Sendable, Equatable {
     public var parent: String { (path as NSString).deletingLastPathComponent }
     public var name: String { (path as NSString).lastPathComponent }
     public var versionText: String { Self.versionText(facts.shortVersion, facts.build) }
-    static func versionText(_ short: String?, _ build: String?) -> String {
+    /// "1.0 (100)", "1.0" or the build alone; "?" when neither is known. The one wording used everywhere.
+    public static func versionText(_ short: String?, _ build: String?) -> String {
         switch (short, build) {
         case let (s?, b?) where s != b: return "\(s) (\(b))"
         case let (s?, _): return s
@@ -124,11 +151,22 @@ public struct UpdateInstaller: Sendable {
                                   if !pids.isEmpty {
                                       throw InstallRefusal.appRunning("\((path as NSString).lastPathComponent) is running from \(path) (pid \(pids.map(String.init).joined(separator: ", ")))")
                                   }
+                                  // Helpers inside the bundle (login items, XPC services, tools) are not app instances.
+                                  let helpers = apps.bundleProcesses(path: path)
+                                  if !helpers.isEmpty { throw Self.helperRefusal(name: (path as NSString).lastPathComponent, path: path, helpers) }
                               }
                           },
                           detach: diskImageDetacher, installerRunning: installerRunning)
     }
     var store: JournalStore { JournalStore(directory: locations.transactions) }
+
+    /// A process running from inside the bundle that cannot be asked to quit (it is not an app instance).
+    /// Patched refuses and names it; it never kills anything.
+    static func helperRefusal(name: String, path: String, _ helpers: [BundleProcess]) -> InstallRefusal {
+        .helperRunning("\(name) has a helper process running from inside it that Patched can't ask to quit: "
+                    + helpers.map { $0.description(inBundle: path) }.joined(separator: "; ")
+                    + ". Quit it yourself, then try again")
+    }
 
     // MARK: Step 1: preconditions
 
@@ -194,7 +232,7 @@ public struct UpdateInstaller: Sendable {
 
     // MARK: Step 2: download
 
-    public func download(_ offer: UpdateOffer, into directory: String) async throws -> DownloadedArtifact {
+    public func download(_ offer: UpdateOffer, into directory: String, progress: UpdateProgressHandler? = nil) async throws -> DownloadedArtifact {
         guard offer.downloadURL.scheme?.lowercased() == "https" else {
             throw InstallRefusal.insecureDownload(offer.downloadURL.absoluteString)
         }
@@ -204,11 +242,26 @@ public struct UpdateInstaller: Sendable {
         }
         let path = directory + "/artifact." + offer.format.rawValue
         let sink = try ArtifactSink(path: path, maxBytes: expected ?? DownloadLimits.maxBytes)
+        sink.expectedTotal = expected
+        if let progress {
+            let throttle = ProgressThrottle()
+            sink.onProgress = { received, total in
+                if throttle.shouldEmit(complete: total.map { received >= $0 } ?? false) {
+                    progress(.downloading(received: received, expected: total))
+                }
+            }
+            progress(.downloading(received: 0, expected: expected))
+        }
         do {
             try await downloader.download(offer.downloadURL, into: sink, expectedLength: expected)
         } catch InstallRefusal.tooLarge(let detail) where expected != nil {
             throw InstallRefusal.lengthMismatch("feed says \(expected!) bytes but the server sent more (\(detail))")
+        } catch {
+            // A cancelled download surfaces as a network error; report it as the cancellation it is.
+            try Task.checkCancellation()
+            throw error
         }
+        try Task.checkCancellation()
         let artifact = try sink.finish()
         try DigestCheck.verify(artifact, against: offer)
         return artifact
@@ -332,12 +385,34 @@ public struct UpdateInstaller: Sendable {
     /// Returns whether the app was running (and has now quit).
     func ensureNotRunning(_ target: InstallTarget, quit: Bool) async throws -> Bool {
         let running = runningApps.runningInstances(bundleID: target.facts.bundleID, path: target.path)
-        guard !running.isEmpty else { return false }
-        guard quit else { throw InstallRefusal.appRunning("\(target.name) (pid \(running.map(String.init).joined(separator: ", ")))") }
-        guard await runningApps.quit(bundleID: target.facts.bundleID, path: target.path, timeout: quitTimeout) else {
-            throw InstallRefusal.appWouldNotQuit("\(target.name) is still running after \(Int(quitTimeout)) s")
+        if !running.isEmpty {
+            guard quit else { throw InstallRefusal.appRunning("\(target.name) (pid \(running.map(String.init).joined(separator: ", ")))") }
+            guard await runningApps.quit(bundleID: target.facts.bundleID, path: target.path, timeout: quitTimeout) else {
+                throw InstallRefusal.appWouldNotQuit("\(target.name) is still running after \(Int(quitTimeout)) s")
+            }
         }
-        return true
+        do {
+            try await ensureNoHelpers(name: target.name, path: target.path, grace: running.isEmpty ? 0 : min(quitTimeout, 3))
+        } catch {
+            // The app was quit for this update, but a helper (a login item, say) is still running from inside the
+            // bundle, so nothing will be installed: reopen the app rather than leave it closed. The bundle has not
+            // been touched yet.
+            if !running.isEmpty { await runningApps.relaunch(path: target.path) }
+            throw error
+        }
+        return !running.isEmpty
+    }
+
+    /// Refuses while any process runs from inside the bundle. After the app itself was asked to quit, its helpers
+    /// get `grace` seconds to follow it out before they count.
+    func ensureNoHelpers(name: String, path: String, grace: TimeInterval) async throws {
+        var helpers = runningApps.bundleProcesses(path: path)
+        let deadline = Date().addingTimeInterval(grace)
+        while !helpers.isEmpty, Date() < deadline {
+            try? await Task.sleep(nanoseconds: 100_000_000)
+            helpers = runningApps.bundleProcesses(path: path)
+        }
+        if !helpers.isEmpty { throw Self.helperRefusal(name: name, path: path, helpers) }
     }
 
     // MARK: Guards shared by update and rollback
@@ -388,20 +463,25 @@ public struct UpdateInstaller: Sendable {
     /// `admin` is the consent for the experimental admin path: pass one only for an explicit user action.
     /// It is ignored (and admin-only updates are refused as before) unless this installer has an `AdminUpdatePath`.
     public func update(_ outcome: AppCheckOutcome, options: UpdateOptions = UpdateOptions(),
-                       admin: AdminInteraction? = nil) async throws -> InstallReport {
+                       admin: AdminInteraction? = nil, progress: UpdateProgressHandler? = nil) async throws -> InstallReport {
         guard case .updateAvailable(let offer) = outcome.result else {
             throw InstallRefusal.notInstallable("\(outcome.app.name) has no available update")
         }
         if outcome.app.isWrappedIOSApp {
             throw InstallRefusal.appStoreManaged("\(outcome.app.path) is an iPhone or iPad app from the App Store")
         }
-        return try await update(appAt: outcome.app.path, offer: offer, installable: outcome.installable, options: options, admin: admin)
+        return try await update(appAt: outcome.app.path, offer: offer, installable: outcome.installable, options: options, admin: admin,
+                                progress: progress)
     }
 
     /// Lower-level entry point; the caller must say whether the offer is installable (no default, so it
-    /// cannot be skipped by accident).
+    /// cannot be skipped by accident). `progress` hears about the download, then verifying, then the commit point;
+    /// the task running this may be cancelled until `.installing`, and cancelling leaves the app and the state
+    /// folders as they were. Only the ordinary zip and dmg path reports progress or can be cancelled.
     public func update(appAt appPath: String, offer: UpdateOffer, installable: Bool,
-                       options: UpdateOptions = UpdateOptions(), admin: AdminInteraction? = nil) async throws -> InstallReport {
+                       options: UpdateOptions = UpdateOptions(), admin: AdminInteraction? = nil,
+                       progress: UpdateProgressHandler? = nil) async throws -> InstallReport {
+        try Task.checkCancellation()
         // Before anything is downloaded: an App Store app is never replaced by Patched, whatever source offered an update.
         if FileManager.default.fileExists(atPath: appPath + "/Contents/_MASReceipt") {
             throw InstallRefusal.appStoreManaged("\(appPath) has a Mac App Store receipt")
@@ -427,6 +507,10 @@ public struct UpdateInstaller: Sendable {
         if !options.dryRun && !options.quitIfRunning {
             // Fail fast before downloading anything; checked again just before the swap.
             _ = try await ensureNotRunning(target, quit: false)
+        } else if !options.dryRun && runningApps.runningInstances(bundleID: target.facts.bundleID, path: target.path).isEmpty {
+            // Quitting is allowed, but the app is not open: a helper running now won't go away when the app
+            // quits, so refuse before downloading anything.
+            try await ensureNoHelpers(name: target.name, path: target.path, grace: 0)
         }
 
         let id = UUID().uuidString
@@ -445,11 +529,14 @@ public struct UpdateInstaller: Sendable {
             guard FileSafety.directoryIdentity(journal.stagingDir)?.device == target.identity.device else {
                 throw InstallRefusal.unsafePath("staging folder is not on the same volume as \(target.path)")
             }
-            let artifact = try await download(offer, into: journal.downloadDir!)
+            let artifact = try await download(offer, into: journal.downloadDir!, progress: progress)
+            progress?(.verifying)
             try SparkleSignature.check(publicKey: target.facts.sparklePublicEDKey, signature: offer.edSignature,
                                        archivePath: artifact.path)
+            try Task.checkCancellation()
             let staged = try stageAndVerify(artifact: artifact.path, format: offer.format, target: target, offer: offer,
                                             stagingDir: journal.stagingDir, mountPoint: journal.mountPoint)
+            try Task.checkCancellation()
             if options.dryRun {
                 let left = try engine.settle(&journal, then: nil)
                 if !left.isEmpty {
@@ -466,9 +553,25 @@ public struct UpdateInstaller: Sendable {
             journal.newBuild = staged.build
             // The download is no longer needed once staged; free the space before the swap.
             try FileSafety.removeTree(journal.downloadDir!, within: locations.downloads)
-            return try await commitAndRelaunch(&journal, target: target, staged: staged, status: .installed,
-                                               quit: options.quitIfRunning)
+            // The commit point. A cancellation that arrives from here on is not acted on: the quit, the swap and
+            // the checks after it run in their own task, so they finish (or roll back) as they would uncancelled.
+            progress?(.installing)
+            let (after, outcome) = await commitOutsideCancellation(journal, target: target, staged: staged, quit: options.quitIfRunning)
+            journal = after
+            return try outcome.get()
         }
+    }
+
+    /// Runs `commitAndRelaunch` in a task of its own, which a cancellation of the caller does not reach.
+    private func commitOutsideCancellation(_ journal: TransactionJournal, target: InstallTarget, staged: BundleFacts,
+                                           quit: Bool) async -> (TransactionJournal, Result<InstallReport, Error>) {
+        await Task {
+            var journal = journal
+            let result: Result<InstallReport, Error>
+            do { result = .success(try await commitAndRelaunch(&journal, target: target, staged: staged, status: .installed, quit: quit)) }
+            catch { result = .failure(error) }
+            return (journal, result)
+        }.value
     }
 
     // MARK: Rollback
@@ -522,6 +625,8 @@ public struct UpdateInstaller: Sendable {
                 if !running.isEmpty {
                     throw InstallRefusal.appRunning("\(target.name) was started again (pid \(running.map(String.init).joined(separator: ", ")))")
                 }
+                let helpers = runningApps.bundleProcesses(path: target.path)
+                if !helpers.isEmpty { throw Self.helperRefusal(name: target.name, path: target.path, helpers) }
             }
         } catch let crash as SimulatedCrash {
             throw crash
@@ -545,6 +650,7 @@ public struct UpdateInstaller: Sendable {
         }
     }
 
+    /// `backupFolder(for:)` under a name that a local `backupFolder` in the callers cannot shadow.
     func backupFolderPath(for target: InstallTarget) -> String { backupFolder(for: target) }
 
     /// The newest backup, provided it is for this app and team, a different version, and not the folder the
@@ -592,14 +698,16 @@ public struct UpdateInstaller: Sendable {
                 if (try? engine.validate(journal)) != nil {
                     for path in engine.pathsAtRisk(journal) {
                         let pids = runningApps.runningInstances(bundleID: journal.bundleID, path: path)
-                        guard !pids.isEmpty else { continue }
-                        guard quitIfRunning else {
-                            throw InstallRefusal.appRunning("\(journal.targetName) is running from \(path) (pid \(pids.map(String.init).joined(separator: ", "))); pass --quit")
+                        if !pids.isEmpty {
+                            guard quitIfRunning else {
+                                throw InstallRefusal.appRunning("\(journal.targetName) is running from \(path) (pid \(pids.map(String.init).joined(separator: ", "))); pass --quit")
+                            }
+                            guard await runningApps.quit(bundleID: journal.bundleID, path: path, timeout: quitTimeout) else {
+                                throw InstallRefusal.appWouldNotQuit("\(journal.targetName) is still running from \(path) after \(Int(quitTimeout)) s")
+                            }
+                            if path == journal.targetPath { quitTarget = true }
                         }
-                        guard await runningApps.quit(bundleID: journal.bundleID, path: path, timeout: quitTimeout) else {
-                            throw InstallRefusal.appWouldNotQuit("\(journal.targetName) is still running from \(path) after \(Int(quitTimeout)) s")
-                        }
-                        if path == journal.targetPath { quitTarget = true }
+                        try await ensureNoHelpers(name: journal.targetName, path: path, grace: pids.isEmpty ? 0 : min(quitTimeout, 3))
                     }
                 }
                 let recovered = try engine.recover(journal)

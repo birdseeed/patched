@@ -20,9 +20,18 @@ public protocol AppUpdateInstalling: Sendable {
     /// it is ignored unless admin updates are switched on in the installer.
     func update(_ outcome: AppCheckOutcome, quitIfRunning: Bool, admin: AdminInteraction?) async throws -> AppUpdateReport
     func rollBack(appAt path: String, quitIfRunning: Bool, admin: AdminInteraction?) async throws -> AppUpdateReport
+    /// As `update(_:quitIfRunning:admin:)`, reporting download, verification and the commit point to `progress`.
+    /// Cancelling the calling task stops the update before the commit point and leaves nothing behind.
+    func update(_ outcome: AppCheckOutcome, quitIfRunning: Bool, admin: AdminInteraction?,
+                progress: UpdateProgressHandler?) async throws -> AppUpdateReport
 }
 
 extension AppUpdateInstalling {
+    /// Installers that report no progress just install.
+    public func update(_ outcome: AppCheckOutcome, quitIfRunning: Bool, admin: AdminInteraction?,
+                       progress: UpdateProgressHandler?) async throws -> AppUpdateReport {
+        try await update(outcome, quitIfRunning: quitIfRunning, admin: admin)
+    }
     /// Installers without an admin path simply never use one.
     public func update(_ outcome: AppCheckOutcome, quitIfRunning: Bool, admin: AdminInteraction?) async throws -> AppUpdateReport {
         try await update(outcome, quitIfRunning: quitIfRunning)
@@ -77,6 +86,11 @@ extension UpdateInstaller: AppUpdateInstalling {
     public func update(_ outcome: AppCheckOutcome, quitIfRunning: Bool, admin: AdminInteraction?) async throws -> AppUpdateReport {
         // The installable-enforcing API; the installer refuses anything not installable.
         AppUpdateReport(try await update(outcome, options: UpdateOptions(quitIfRunning: quitIfRunning, dryRun: false), admin: admin))
+    }
+    public func update(_ outcome: AppCheckOutcome, quitIfRunning: Bool, admin: AdminInteraction?,
+                       progress: UpdateProgressHandler?) async throws -> AppUpdateReport {
+        AppUpdateReport(try await update(outcome, options: UpdateOptions(quitIfRunning: quitIfRunning, dryRun: false), admin: admin,
+                                         progress: progress))
     }
     public func rollBack(appAt path: String, quitIfRunning: Bool, admin: AdminInteraction?) async throws -> AppUpdateReport {
         AppUpdateReport(try await rollback(appAt: path, quitIfRunning: quitIfRunning, admin: admin))
@@ -175,6 +189,14 @@ public struct AppUpdateRow: Identifiable, Equatable, Sendable {
     public internal(set) var rollbackVersion: String?
     /// The last update came from an installer package, so there is no Roll back; the row says so instead.
     public internal(set) var rollbackUnsupported = false
+    /// Set when the last check could not reach the network for this app, so the status and offer above are the
+    /// previous check's, kept rather than replaced by an error. Cleared by the next check that gets an answer.
+    public internal(set) var recheckNote: String?
+    /// While an update runs: the download, then verification, then the commit point. nil before the download starts.
+    public internal(set) var progress: UpdateProgress?
+    /// Cancel was pressed; the update is stopping.
+    public internal(set) var cancelRequested = false
+    public static let offlineRecheckNote = "Couldn't re-check (offline)"
     public static let rollbackUnsupportedCaption = "Roll back isn't supported for installer packages."
     public internal(set) var privilege: Privilege = .standard
     /// The app needs admin rights to replace and the experimental admin path is off, so Patched cannot update
@@ -184,6 +206,33 @@ public struct AppUpdateRow: Identifiable, Equatable, Sendable {
     /// Set only on Patched's own row when a newer Patched release has been announced. Notify-only: the row
     /// stays a no-source row, so it is never installable and never part of Update All.
     public internal(set) var selfUpdateVersion: String?
+
+    /// "Downloading 12.3 of 48.0 MB", "Verifying…" or "Installing…" while an update runs; nil before it reports anything.
+    public var progressText: String? {
+        if cancelRequested { return "Cancelling…" }
+        guard let progress else { return nil }
+        switch progress {
+        case .downloading(let received, let expected): return Self.downloadText(received: received, expected: expected)
+        case .verifying: return "Verifying…"
+        case .installing: return "Installing…"
+        }
+    }
+    /// Fraction downloaded (0...1), when the total is known; nil otherwise.
+    public var downloadFraction: Double? {
+        guard case .downloading(let received, let expected?)? = progress, expected > 0 else { return nil }
+        return min(1, max(0, Double(received) / Double(expected)))
+    }
+    /// "Downloading 12.3 of 48.0 MB" with a known total, "Downloading 12.3 MB" without. Both numbers share the total's unit.
+    public static func downloadText(received: Int64, expected: Int64?, locale: Locale = .current) -> String {
+        func number(_ value: Double) -> String { value.formatted(.number.precision(.fractionLength(1)).locale(locale)) }
+        let units: [(String, Double)] = [("GB", 1e9), ("MB", 1e6), ("KB", 1e3)]
+        let basis = Double(expected ?? received)
+        let (name, size) = units.first { basis >= $0.1 } ?? ("KB", 1e3)
+        if let expected, expected > 0 {
+            return "Downloading \(number(Double(min(received, expected)) / size)) of \(number(Double(expected) / size)) \(name)"
+        }
+        return "Downloading \(number(Double(received) / size)) \(name)"
+    }
 
     public var hasUpdate: Bool { status == .updateAvailable }
     /// An App Store update: shown with Open in App Store, never installed by Patched.
@@ -473,7 +522,15 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
     private var epoch = 0
     private var deferredQuit: AppUpdateQuitConfirmation?
     private var rowsBeforeCheck: [AppUpdateRow] = []
+    /// From the last finished check: apps whose lookup failed on the network, and apps that needed the network at all
+    /// (everything except those with no source). The scheduler uses them to retry sooner after an offline check.
+    private(set) var lastCheckNetworkRefused = 0
+    private(set) var lastCheckNetworked = 0
+    /// Most of the apps that need the network could not reach it in the last check.
+    var lastCheckMostlyOffline: Bool { lastCheckNetworkRefused > 0 && lastCheckNetworkRefused * 2 >= lastCheckNetworked }
     private var stopRequested = false
+    /// The one row whose single update may be cancelled right now (see `canCancelUpdate`).
+    private var cancellablePath: String?
     /// Apps that refused with needs_admin; their rows offer "Update (admin)" from then on.
     private var needsAdminPaths: Set<String> = []
     /// The one admin action in progress, so Done can reach it.
@@ -686,8 +743,23 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
             }
             guard self.isCurrentCheck(mine) else { return }
             let icons = Dictionary(scanned.map { ($0.app.path, $0.icon) }, uniquingKeysWith: { first, _ in first })
-            self.rows = outcomes.sorted { Self.ordered($0.app.name, $1.app.name) }
-                .map { self.makeRow($0, icon: icons[$0.app.path] ?? nil) }
+            let previous = Dictionary(self.rowsBeforeCheck.map { ($0.path, $0) }, uniquingKeysWith: { first, _ in first })
+            var refusedOnNetwork = 0, networked = 0
+            self.rows = outcomes.sorted { Self.ordered($0.app.name, $1.app.name) }.map { outcome in
+                if case .noSource = outcome.result {} else { networked += 1 }
+                // Only "couldn't reach the server" counts: an HTTP error (a moved or broken feed) is shown as it is.
+                if case .refused(.offline) = outcome.result {
+                    refusedOnNetwork += 1
+                    // One offline check must not erase what an earlier check found out.
+                    if let old = previous[outcome.app.path], Self.keepsPreviousStatus(old, over: outcome) {
+                        var kept = old
+                        kept.activity = .idle; kept.recheckNote = AppUpdateRow.offlineRecheckNote
+                        return kept
+                    }
+                }
+                return self.makeRow(outcome, icon: icons[outcome.app.path] ?? nil)
+            }
+            self.lastCheckNetworkRefused = refusedOnNetwork; self.lastCheckNetworked = networked
             self.hasChecked = true
             self.lastCheckedAt = Date()
             self.phase = .idle
@@ -884,7 +956,35 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
     public func update(id: String) {
         guard let row = row(id: id), canUpdate(row) else { return }
         let admin = mayUseAdmin(row)
-        launch { await self.performUpdate(path: id, quit: false, interactive: true, admin: admin) }
+        launch { _ = await self.performUpdate(path: id, quit: false, interactive: true, admin: admin, cancellable: true) }
+    }
+
+    /// Cancel is offered on a single update while it is downloading or verifying, never once the swap has begun,
+    /// and never during Update All (which has Stop) or on the admin and installer-package paths.
+    public func canCancelUpdate(_ row: AppUpdateRow) -> Bool {
+        guard cancellablePath == row.id, row.activity == .updating, !row.cancelRequested, let progress = row.progress else { return false }
+        switch progress {
+        case .downloading, .verifying: return true
+        case .installing: return false
+        }
+    }
+
+    /// A click on a row's Cancel. The update stops before anything is swapped: the download and staging folders are
+    /// removed and the app is untouched. Does nothing once the commit point has been reached.
+    public func cancelUpdate(id: String) {
+        guard let row = row(id: id), canCancelUpdate(row) else { return }
+        mutate(id) { $0.cancelRequested = true }
+        operation?.cancel()
+    }
+
+    private func applyProgress(_ progress: UpdateProgress, to path: String) {
+        func rank(_ p: UpdateProgress) -> Int {
+            switch p { case .downloading: return 0; case .verifying: return 1; case .installing: return 2 }
+        }
+        mutate(path) { row in
+            guard row.activity == .updating, row.progress.map({ rank($0) <= rank(progress) }) ?? true else { return }
+            row.progress = progress
+        }
     }
 
     /// Sequential; a failure on one app never stops the rest. Open apps are skipped, not quit.
@@ -1101,7 +1201,7 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
         case .update:
             guard let row = row(id: pending.path), canUpdate(row), row.installedVersion == pending.installedVersion else { return }
             let admin = mayUseAdmin(row)
-            launch { _ = await self.performUpdate(path: pending.path, quit: true, interactive: false, admin: admin) }
+            launch { _ = await self.performUpdate(path: pending.path, quit: true, interactive: false, admin: admin, cancellable: true) }
         case .rollback:
             guard let row = row(id: pending.path), canRollBack(row), row.installedVersion == pending.installedVersion else { return }
             launch { await self.performRollback(path: pending.path, quit: true) }
@@ -1208,9 +1308,15 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
 
     private func endAdminInteraction() { currentAdmin = nil; adminToken = nil; installerWait = nil }
 
-    private func performUpdate(path: String, quit: Bool, interactive: Bool, admin: Bool, onlyKeys: Set<String>? = nil) async -> StepResult {
+    private func performUpdate(path: String, quit: Bool, interactive: Bool, admin: Bool, onlyKeys: Set<String>? = nil,
+                               cancellable: Bool = false) async -> StepResult {
         guard let shown = row(id: path), shown.outcome != nil else { return .failed }
-        mutate(path) { $0.activity = .updating; $0.result = nil }
+        mutate(path) { $0.activity = .updating; $0.result = nil; $0.progress = nil; $0.cancelRequested = false }
+        // Whatever way this ends, the row stops showing progress and Cancel.
+        defer {
+            if cancellablePath == path { cancellablePath = nil }
+            mutate(path) { $0.progress = nil; $0.cancelRequested = false }
+        }
         // Rescan this one app and check it afresh; install only what is still an installable update now.
         let recheck = recheckApp
         let outcome: AppCheckOutcome
@@ -1238,15 +1344,30 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
         }
         let interaction = admin ? makeAdminInteraction(path: path, name: outcome.app.name) : nil
         defer { if interaction != nil { endAdminInteraction() } }
+        // Only the ordinary path reports progress and can be cancelled, and only for a single update.
+        let reporting = interaction == nil
+        if cancellable && reporting { cancellablePath = path }
+        let report: UpdateProgressHandler = { [weak self] step in
+            Task { @MainActor in self?.applyProgress(step, to: path) }
+        }
+        let progress: UpdateProgressHandler? = reporting ? report : nil
         do {
             // The installer enforces `installable` itself as well.
-            let report = try await installer.update(outcome, quitIfRunning: quit, admin: interaction)
+            let report = try await installer.update(outcome, quitIfRunning: quit, admin: interaction, progress: progress)
             mutate(path) {
                 $0.result = .init(kind: .success, text: Self.reportText(name: outcome.app.name, report))
                 $0.installedVersion = report.toVersion; $0.installedDisplayVersion = nil; $0.status = .needsRecheck; $0.outcome = nil
+                $0.progress = nil; $0.cancelRequested = false
             }
-            await refreshRow(path)
+            // A Cancel that arrived too late to matter must not spoil the recheck of what is now installed.
+            if Task.isCancelled { await Task { @MainActor in await self.refreshRow(path) }.value } else { await refreshRow(path) }
             return .updated
+        } catch is CancellationError {
+            mutate(path) {
+                $0.activity = .idle
+                $0.result = .init(kind: .info, text: "Cancelled. \(outcome.app.name) was not changed.")
+            }
+            return .failed
         } catch let refusal as InstallRefusal {
             let name = outcome.app.name
             if case .needsAdmin = refusal, interaction == nil {
@@ -1394,14 +1515,7 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
         a.localizedCaseInsensitiveCompare(b) == .orderedAscending
     }
 
-    nonisolated static func versionText(short: String?, build: String?) -> String {
-        switch (short, build) {
-        case let (s?, b?) where s != b: return "\(s) (\(b))"
-        case let (s?, _): return s
-        case let (nil, b?): return b
-        default: return "?"
-        }
-    }
+    nonisolated static func versionText(short: String?, build: String?) -> String { InstallTarget.versionText(short, build) }
 
     nonisolated static func reportText(name: String, _ report: AppUpdateReport) -> String {
         OutcomeText.line(name: name, status: report.status, from: report.fromVersion, to: report.toVersion,
@@ -1468,6 +1582,16 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
             outcome: outcome)
         row.installedDisplayVersion = app.shortVersion ?? app.build
         return row
+    }
+
+    /// A network failure keeps the previous row when that row had settled (an answer from the source or the App Store)
+    /// and the app on disk is still the version it was checked at.
+    nonisolated static func keepsPreviousStatus(_ old: AppUpdateRow, over outcome: AppCheckOutcome) -> Bool {
+        switch old.status {
+        case .upToDate, .updateAvailable, .notInstallable, .packageUnsupported, .appStoreUpdate: break
+        case .pending, .noSource, .refused, .needsRecheck: return false
+        }
+        return old.installedVersion == versionText(short: outcome.app.shortVersion, build: outcome.app.build)
     }
 
     nonisolated static func checkSummary(_ rows: [AppUpdateRow]) -> String {
@@ -1583,6 +1707,10 @@ struct LazyInstaller: AppUpdateInstalling {
     }
     func update(_ outcome: AppCheckOutcome, quitIfRunning: Bool, admin: AdminInteraction?) async throws -> AppUpdateReport {
         try await real().update(outcome, quitIfRunning: quitIfRunning, admin: admin)
+    }
+    func update(_ outcome: AppCheckOutcome, quitIfRunning: Bool, admin: AdminInteraction?,
+                progress: UpdateProgressHandler?) async throws -> AppUpdateReport {
+        try await real().update(outcome, quitIfRunning: quitIfRunning, admin: admin, progress: progress)
     }
     func rollBack(appAt path: String, quitIfRunning: Bool, admin: AdminInteraction?) async throws -> AppUpdateReport {
         try await real().rollBack(appAt: path, quitIfRunning: quitIfRunning, admin: admin)

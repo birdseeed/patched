@@ -38,6 +38,9 @@ public enum InstallRefusal: Error, Sendable, Equatable {
     case versionMismatch(String)
     case notNewer(String)
     case appRunning(String)
+    /// A process that is not an app (login item, XPC service, command-line tool) runs from inside the bundle.
+    /// Patched cannot ask it to quit, so this is never answered with a quit prompt.
+    case helperRunning(String)
     case appWouldNotQuit(String)
     case busy(String)
     case unfinishedTransaction(String)
@@ -104,6 +107,7 @@ public enum InstallRefusal: Error, Sendable, Equatable {
         case .versionMismatch: return "version_mismatch"
         case .notNewer: return "not_newer"
         case .appRunning: return "app_running"
+        case .helperRunning: return "helper_running"
         case .appWouldNotQuit: return "app_would_not_quit"
         case .busy: return "busy"
         case .unfinishedTransaction: return "unfinished_transaction"
@@ -155,6 +159,7 @@ public enum InstallRefusal: Error, Sendable, Equatable {
         case .versionMismatch(let d): return "downloaded app version does not match the feed: \(d)"
         case .notNewer(let d): return "downloaded app is not newer than the installed one: \(d)"
         case .appRunning(let d): return "app is running (pass --quit to quit it first): \(d)"
+        case .helperRunning(let d): return "a helper is still running from inside the app; quit the app that uses it (or log out and back in), then try again: \(d)"
         case .appWouldNotQuit(let d): return "app did not quit: \(d)"
         case .busy(let d): return "another patched run holds this app: \(d)"
         case .unfinishedTransaction(let d): return "an unfinished transaction exists, run `patched recover` first: \(d)"

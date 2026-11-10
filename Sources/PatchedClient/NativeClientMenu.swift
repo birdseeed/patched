@@ -27,7 +27,7 @@ public struct NativeClientMenuUpdates: Equatable, Sendable {
     }
     public static let rowCap = 8
     public let header: String
-    /// "10:42" when a check has finished; shown beside the header as "Checked 10:42".
+    /// "10:42" (or "Yesterday 10:42", or a short date and time) once a check has finished; shown as "Checked 10:42".
     public let checkedAt: String?
     /// A second line when some apps could not be checked but updates are still listed.
     public let note: String?
@@ -43,7 +43,7 @@ public struct NativeClientMenuUpdates: Equatable, Sendable {
 extension AppUpdatesController {
     /// Ordinary updates first, then those that need admin, then App Store ones; each group by name.
     public func menuUpdates(cap: Int = NativeClientMenuUpdates.rowCap,
-                            timeFormatter: (Date) -> String = AppUpdatesController.shortTime) -> NativeClientMenuUpdates {
+                            timeFormatter: (Date) -> String = { AppUpdatesController.shortTime($0) }) -> NativeClientMenuUpdates {
         let source = displayedRows
         func group(_ row: AppUpdateRow) -> Int {
             if row.isAppStoreUpdate { return 3 }
@@ -60,6 +60,7 @@ extension AppUpdatesController {
         }.map(\.element)
         // "Up to date" only when every checked app is confirmed so (or has no source to check).
         let failed = source.filter { if case .refused = $0.status { return true }; return false }.count
+        let keptOffline = source.filter { $0.recheckNote != nil }.count
         let stale = source.filter { $0.status == .needsRecheck || $0.status == .pending }.count
         let checkedTime = lastCheckedAt.map(timeFormatter)
         let header: String
@@ -68,9 +69,11 @@ extension AppUpdatesController {
         else if !waiting.isEmpty {
             header = NativeClientMenuLabel.badgeDescription(waiting.count)
             if failed > 0 { note = "Couldn't check \(failed) \(failed == 1 ? "app" : "apps")" }
+            else if keptOffline > 0 { note = "Couldn't re-check \(keptOffline) \(keptOffline == 1 ? "app" : "apps") (offline)" }
         }
         else if failed > 0 { header = "Couldn't check \(failed) \(failed == 1 ? "app" : "apps")" }
         else if catalogueError != nil { header = "Couldn't check for updates" }
+        else if keptOffline > 0 { header = "Couldn't re-check (offline)" }
         else if stale > 0 { header = "Check again to confirm" }
         else if hasChecked { header = "Up to date" }
         else { header = "No update check yet" }
@@ -90,10 +93,26 @@ extension AppUpdatesController {
         return installed + " → " + latest
     }
 
-    nonisolated public static func shortTime(_ date: Date) -> String {
-        let formatter = DateFormatter()
-        formatter.dateStyle = .none; formatter.timeStyle = .short
-        return formatter.string(from: date)
+    /// "10:42" today, "Yesterday 10:42" the day before, otherwise a short date and the time. All formats come
+    /// from the user's locale; `now`, `calendar` and `locale` are parameters so tests can fix them.
+    nonisolated public static func shortTime(_ date: Date, now: Date = Date(), calendar: Calendar = .current,
+                                             locale: Locale = .current) -> String {
+        let time = DateFormatter()
+        time.locale = locale; time.calendar = calendar; time.timeZone = calendar.timeZone
+        time.dateStyle = .none; time.timeStyle = .short
+        let clock = time.string(from: date)
+        if calendar.isDate(date, inSameDayAs: now) { return clock }
+        if let yesterday = calendar.date(byAdding: .day, value: -1, to: now), calendar.isDate(date, inSameDayAs: yesterday) {
+            let word = RelativeDateTimeFormatter()
+            word.locale = locale; word.calendar = calendar
+            word.dateTimeStyle = .named; word.unitsStyle = .full
+            let day = word.localizedString(from: DateComponents(day: -1))
+            return day.prefix(1).uppercased() + day.dropFirst() + " " + clock
+        }
+        let day = DateFormatter()
+        day.locale = locale; day.calendar = calendar; day.timeZone = calendar.timeZone
+        day.dateStyle = .short; day.timeStyle = .short
+        return day.string(from: date)
     }
 }
 
@@ -287,7 +306,7 @@ public struct NativeClientMenuView: View {
         }
         .font(.body)
         .tint(ShellBrand.accent)
-        .padding(12)
+        .padding(EdgeInsets(top: 6, leading: 12, bottom: 12, trailing: 12))
         .frame(width: 320, alignment: .leading)
     }
 

@@ -50,6 +50,7 @@ extension SwapEngine {
             rmdir(backupDir)
             journal.backupCopyPartial = nil
             try? write(&journal)
+            restoreSuperseded(journal)
             throw error
         }
         journal.backupCopyIdentity = FileSafety.directoryIdentity(destination)
@@ -73,6 +74,8 @@ extension SwapEngine {
             try? FileSafety.removeTree(destination, within: locations.backups)
         }
         if let backupDir = journal.backupDir { rmdir(backupDir) } // only if now empty
+        // With our copy gone, a same-version backup that was set aside for it is a backup again.
+        restoreSuperseded(journal)
         journal.backupCopyPartial = nil
         journal.backupCopyIdentity = nil
     }

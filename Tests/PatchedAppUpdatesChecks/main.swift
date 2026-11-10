@@ -105,6 +105,15 @@ final class FakeInstaller: AppUpdateInstalling, @unchecked Sendable {
     func unreadableJournalPaths() -> [String] { unreadable }
     func unfinishedTransactionCount() -> Int { unfinished }
 
+    // Progress: the handler the controller gave the last update, so a test's update handler can report steps.
+    private var _progress: UpdateProgressHandler?
+    func emit(_ step: UpdateProgress) { lock.withLock { _progress }?(step) }
+    func update(_ outcome: AppCheckOutcome, quitIfRunning: Bool, admin: AdminInteraction?,
+                progress: UpdateProgressHandler?) async throws -> AppUpdateReport {
+        lock.withLock { _progress = progress }
+        return try await update(outcome, quitIfRunning: quitIfRunning, admin: admin)
+    }
+
     // Experimental admin path: records every consent token it is given.
     var adminHandler: (@Sendable (AppCheckOutcome, AdminInteraction) async throws -> AppUpdateReport)?
     func update(_ outcome: AppCheckOutcome, quitIfRunning: Bool, admin: AdminInteraction?) async throws -> AppUpdateReport {
@@ -767,6 +776,7 @@ registerMenuAndManualAdminChecks()
 registerAppsListChecks()
 registerNoSourceActionChecks()
 registerSelfUpdateChecks()
+registerProgressAndCancelChecks()
 
 var failures = 0
 for (name, action) in cases {

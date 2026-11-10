@@ -157,7 +157,7 @@ public enum FileSafety {
         return Int64(info.f_bavail) * Int64(info.f_bsize)
     }
 
-    /// Like `treeBytes`, but stops as soon as the total passes `maxBytes` or the count passes `maxEntries`,
+    /// Sums logical (or allocated, if larger) bytes under `path`, never following symlinks, but stops as soon as the total passes `maxBytes` or the count passes `maxEntries`,
     /// so a huge tree cannot make one scan take long.
     public static func boundedTreeScan(_ path: String, maxBytes: Int64, maxEntries: Int) -> (bytes: Int64, entries: Int) {
         guard let top = lstatInfo(path) else { return (0, 0) }
@@ -169,18 +169,6 @@ public enum FileSafety {
             if count > maxEntries || total > maxBytes { break }
         }
         return (total, count)
-    }
-
-    /// Sum of logical (or allocated, if larger) bytes under `path`, never following symlinks. Missing paths count as zero.
-    public static func treeBytes(_ path: String) -> Int64 {
-        guard let top = lstatInfo(path) else { return 0 }
-        var total = max(Int64(top.st_size), Int64(top.st_blocks) * 512)
-        if let enumerator = FileManager.default.enumerator(atPath: path) {
-            for case let relative as String in enumerator {
-                if let info = lstatInfo(path + "/" + relative) { total += max(Int64(info.st_size), Int64(info.st_blocks) * 512) }
-            }
-        }
-        return total
     }
 
     /// Every entry in the tree must be owned by `uid` and no directory may be immutable, otherwise moving
