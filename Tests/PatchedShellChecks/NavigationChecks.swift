@@ -59,17 +59,32 @@ import PatchedShell
 }
 
 @MainActor func registerNativeSidebarChecks() {
-    check("sidebar: native split view whose list selection is ShellNavigation, titled by the selected destination") {
+    check("sidebar: split view whose selection is drawn in the brand accent, driven by ShellNavigation, titled by the selected destination") {
         let path = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("Sources/PatchedShell/ShellView.swift").path
         let shell = try String(contentsOfFile: path, encoding: .utf8)
-        for required in ["NavigationSplitView", "List(selection: selection)", ".listStyle(.sidebar)", "Label(",
-                         "navigation.select(destination)", "get: { navigation.destination }",
-                         ".navigationTitle(", ".accessibilityIdentifier(\"destination:\" + destination.rawValue)"] {
-            try expect(shell.contains(required), "Shell sidebar is not the native list: missing \(required)")
+        for required in ["NavigationSplitView", "Label {", "BrandAccent.color", "Color.primary.opacity(0.06)", "cornerRadius: 6",
+                         ".buttonStyle(.plain)", ".focusable()", ".onMoveCommand", "navigation.select(destination)",
+                         "navigation.select(order[index - 1])", "navigation.select(order[index + 1])",
+                         "navigation.destination == destination", ".accessibilityAddTraits(isSelected ? .isSelected : [])",
+                         "Color(nsColor: .textBackgroundColor)", ".navigationTitle(",
+                         ".accessibilityIdentifier(\"destination:\" + destination.rawValue)"] {
+            try expect(shell.contains(required), "Shell sidebar is missing \(required)")
         }
-        for custom in ["ScrollView([.horizontal, .vertical])", "GeometryReader", "RoundedRectangle", ".buttonStyle(.plain)"] {
-            try expect(!shell.contains(custom), "Shell still hand-builds its sidebar or viewport: \(custom)")
+        for system in ["List(selection", ".listStyle(", "GeometryReader"] {
+            try expect(!shell.contains(system), "Shell sidebar uses the system-accent selection or hand-builds layout: \(system)")
         }
+    }
+    check("render sidebar: the brand-blue selection sits on the selected row only") {
+        var centres: [ShellDestination: Double] = [:]
+        for destination in [ShellDestination.updates, .applications, .support] {
+            let state = fixtureNavigation(destination: destination)
+            let result = try render(ShellView(navigation: state, destinationContent: { probe($0.rawValue) }))
+            let (count, centreY) = try brandBluePixels(result.image, maxX: 190)
+            try expect(count > 1500, "No brand-blue selected row for \(destination.rawValue) (\(count) px)")
+            centres[destination] = centreY
+        }
+        let u = centres[.updates] ?? 0, a = centres[.applications] ?? 0, h = centres[.support] ?? 0
+        try expect(u < a && a < h && a - u > 10, "Selection did not move with the destination: \(u) \(a) \(h)")
     }
 }

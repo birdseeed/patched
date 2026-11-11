@@ -92,7 +92,7 @@ import PatchedShell
         let app = code(try source("Sources/PatchedApp/PatchedApp.swift"))
         try expect(app.components(separatedBy: ".brandAccent()").count == 3, "Main and Settings windows do not both carry the app accent")
         let shell = code(try source("Sources/PatchedShell/ShellView.swift"))
-        try expect(shell.contains(".safeAreaInset(edge: .top, spacing: 0) { brandHeader }") && shell.contains("BrandMarkView(size: 24)"),
+        try expect(shell.contains("VStack(alignment: .leading, spacing: 2) {\n            brandHeader") && shell.contains("BrandMarkView(size: 24)"),
                    "The sidebar lost its logo")
     }
     check("interface copy is localisable from the main bundle; only names and data stay verbatim") {

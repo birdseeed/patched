@@ -470,7 +470,7 @@ struct SelfUpdateLine: View {
 
     private var label: some View {
         HStack(spacing: 8) {
-            Image(systemName: "arrow.down.circle").foregroundStyle(Color.accentColor).accessibilityHidden(true)
+            Image(systemName: "arrow.down.circle").foregroundStyle(BrandAccent.color).accessibilityHidden(true)
             Text(verbatim: text).font(.body).lineLimit(1).truncationMode(.tail)
         }
     }

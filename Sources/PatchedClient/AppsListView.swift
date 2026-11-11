@@ -255,7 +255,7 @@ private struct AppsListRowView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             Text(verbatim: row.listStatus).font(.callout)
-                .foregroundStyle(row.hasUpdateToShow || row.selfUpdateVersion != nil ? Color.accentColor : Color.secondary)
+                .foregroundStyle(row.hasUpdateToShow || row.selfUpdateVersion != nil ? BrandAccent.color : Color.secondary)
                 .lineLimit(1).truncationMode(.tail).frame(maxWidth: 220, alignment: .trailing)
             Menu { menuItems } label: { Image(systemName: "ellipsis.circle").accessibilityLabel(Text("Actions for \(row.name)")) }
                 .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()

@@ -45,7 +45,7 @@ public struct AppUpdatesView: View {
             if let own = controller.selfUpdate {
                 controller.selfUpdateLine(own)
                     .padding(.horizontal, 10).padding(.vertical, 6)
-                    .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.accentColor.opacity(0.12)))
+                    .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(BrandAccent.color.opacity(0.12)))
             }
             if let failure = controller.ignoreEditFailure {
                 IgnoreEditFailureBanner(message: failure) { controller.dismissIgnoreEditFailure() }
@@ -179,7 +179,7 @@ private struct AppUpdateRowView: View {
         }
         .padding(.vertical, 10)
         .background(RoundedRectangle(cornerRadius: 8, style: .continuous)
-            .fill(highlighted ? Color.accentColor.opacity(0.12) : Color.clear))
+            .fill(highlighted ? BrandAccent.color.opacity(0.12) : Color.clear))
         .accessibilityElement(children: .contain)
     }
 
@@ -207,7 +207,7 @@ private struct AppUpdateRowView: View {
             HStack(spacing: 6) { ProgressView().controlSize(.small); Text("Rolling back…") }.font(.callout)
         case .idle:
             Text(verbatim: row.statusText).font(.callout)
-                .foregroundStyle(row.status == .updateAvailable || row.status == .appStoreUpdate ? Color.accentColor : Color.secondary)
+                .foregroundStyle(row.status == .updateAvailable || row.status == .appStoreUpdate ? BrandAccent.color : Color.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }

@@ -150,3 +150,27 @@ func probePixelCount(_ image: CGImage) throws -> Int {
 @MainActor func retain(_ result: Rendered, name: String, output: URL) throws {
     try result.png.write(to: output.appendingPathComponent(name + ".png"), options: .withoutOverwriting)
 }
+
+/// Count and mean row (top-down) of brand-blue (#2563EB) pixels in the left `maxX` points of an 800-point-wide render.
+func brandBluePixels(_ image: CGImage, maxX: Int) throws -> (Int, Double) {
+    var bytes = [UInt8](repeating: 0, count: image.width * image.height * 4)
+    let drew = bytes.withUnsafeMutableBytes { buffer -> Bool in
+        guard let context = CGContext(data: buffer.baseAddress, width: image.width, height: image.height,
+                                      bitsPerComponent: 8, bytesPerRow: image.width * 4,
+                                      space: CGColorSpaceCreateDeviceRGB(),
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+        context.draw(image, in: CGRect(x: 0, y: 0, width: CGFloat(image.width), height: CGFloat(image.height)))
+        return true
+    }
+    guard drew else { throw Failure(description: "Pixel inspection unavailable") }
+    var count = 0, sumY = 0
+    for y in 0..<image.height {
+        for x in 0..<(image.width * maxX / 800) {
+            let i = (y * image.width + x) * 4
+            if abs(Int(bytes[i]) - 0x25) < 6 && abs(Int(bytes[i + 1]) - 0x63) < 6 && abs(Int(bytes[i + 2]) - 0xEB) < 6 {
+                count += 1; sumY += y
+            }
+        }
+    }
+    return (count, count == 0 ? 0 : Double(sumY) / Double(count))
+}
