@@ -80,7 +80,6 @@ public struct NativeClientRootView: View {
                 shell
             }
         }
-        .tint(ShellBrand.accent)
         .frame(minWidth: 680, minHeight: 520)
     }
 
@@ -99,10 +98,7 @@ public struct NativeClientRootView: View {
             AppUpdatesView(controller: session.appUpdates)
                 .frame(minHeight: 440)
         case .support:
-            supportPanel
-        case .settings:
-            SettingsView(openAtLogin: session.openAtLogin, notifications: session.notificationStatus,
-                version: NativeClientSession.appVersion, openNotificationSettings: { session.openNotificationSettings() })
+            ScrollView { supportPanel }
         }
     }
 
@@ -110,13 +106,13 @@ public struct NativeClientRootView: View {
         let content = session.supportContent
         let version = NativeClientSession.appVersion
         return VStack(alignment: .leading, spacing: 18) {
-            GroupBox(label: Text(verbatim: "About").font(.headline)) {
+            GroupBox(label: Text("About").font(.headline)) {
                 VStack(alignment: .leading, spacing: 12) {
                     HStack(spacing: 12) {
                         BrandMarkView(size: 48)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(verbatim: "Patched").font(.title2.weight(.semibold))
-                            if let version { Text(verbatim: "Version " + version).foregroundStyle(.secondary) }
+                            if let version { Text("Version \(version)").foregroundStyle(.secondary) }
                         }
                     }
                     Text(verbatim: content.about).font(.body).lineSpacing(2)
@@ -125,31 +121,34 @@ public struct NativeClientRootView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(8)
             }
-            GroupBox(label: Text(verbatim: "Support Patched").font(.headline)) {
-                VStack(alignment: .leading, spacing: 14) {
-                    Text(verbatim: "Patched is free. Donations go towards an Apple Developer ID so releases can be signed.")
+            GroupBox(label: Text("Support Patched").font(.headline)) {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Patched is free. Donations go towards an Apple Developer ID so releases can be signed.")
                         .font(.body).lineSpacing(2).fixedSize(horizontal: false, vertical: true)
-                    ForEach(content.links, id: \.url) { link in
-                        let isCoffee = link.url == PublicLinks.coffee
-                        VStack(alignment: .leading, spacing: 4) {
+                    // One prominent action per group: the donation. The other links are ordinary buttons in a row,
+                    // with their descriptions as the tooltip and VoiceOver hint.
+                    ForEach(content.links.filter { $0.url == PublicLinks.coffee }, id: \.url) { link in
+                        Button(action: { session.openSupportLink(link) }) {
+                            Label { Text(verbatim: link.title) } icon: { Image(systemName: "cup.and.saucer") }
+                        }
+                        .buttonStyle(.borderedProminent).controlSize(.large)
+                    }
+                    Divider().padding(.vertical, 4)
+                    HStack(spacing: 10) {
+                        ForEach(content.links.filter { $0.url != PublicLinks.coffee }, id: \.url) { link in
                             Button(action: { session.openSupportLink(link) }) {
-                                if isCoffee {
-                                    Label { Text(verbatim: link.title) } icon: { Image(systemName: "cup.and.saucer") }
-                                } else {
-                                    Text(verbatim: link.title)
-                                }
+                                Label { Text(verbatim: link.title) } icon: { Image(systemName: Self.symbol(for: link)) }
                             }
-                            .buttonStyle(.borderedProminent).controlSize(.large).tint(ShellBrand.accent)
-                            if !isCoffee {
-                                Text(verbatim: link.detail).font(.callout).foregroundStyle(.secondary)
-                            }
+                            .buttonStyle(.bordered).controlSize(.large)
+                            .help(Text(verbatim: link.detail))
+                            .accessibilityHint(Text(verbatim: link.detail))
                         }
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(8)
             }
-            Text(verbatim: "Patched sends no messages, analytics or diagnostic reports.")
+            Text("Patched sends no messages, analytics or diagnostic reports.")
                 .font(.callout).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.horizontal, 4)
@@ -157,5 +156,10 @@ public struct NativeClientRootView: View {
         .padding(22)
         .frame(maxWidth: 520, alignment: .leading)
         .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+
+    /// A symbol for each repository link in Help & Support.
+    private static func symbol(for link: SupportContent.Link) -> String {
+        link.url == PublicLinks.repository ? "chevron.left.forwardslash.chevron.right" : "exclamationmark.bubble"
     }
 }

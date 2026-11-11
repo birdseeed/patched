@@ -7,6 +7,8 @@ public struct LocalInstalledVendorMetadata: Sendable, Equatable {
     public let productJSONBytes: Data?
     /// `SUPublicEDKey` as the installer reads it: nil when absent, the string when a string, "" for any other type.
     public let sparklePublicEDKey: String?
+    /// `LSBackgroundOnly` truthy in Info.plist. Display hint only, never authority.
+    public let backgroundOnly: Bool
     public let sparkleDisposition: LocalInventoryMetadataDisposition
     public let electronDisposition: LocalInventoryMetadataDisposition
     public let productJSONDisposition: LocalInventoryMetadataDisposition
@@ -20,7 +22,8 @@ public struct LocalInstalledVendorMetadata: Sendable, Equatable {
                   electronDisposition: LocalInventoryMetadataDisposition,
                   productJSONBytes: Data? = nil,
                   productJSONDisposition: LocalInventoryMetadataDisposition = .unavailable,
-                  sparklePublicEDKey: String? = nil) {
+                  sparklePublicEDKey: String? = nil,
+                  backgroundOnly: Bool = false) {
         self.sparkleFeedURL = sparkleFeedURL
         self.electronConfigBytes = electronConfigBytes
         self.sparkleDisposition = sparkleDisposition
@@ -28,6 +31,7 @@ public struct LocalInstalledVendorMetadata: Sendable, Equatable {
         self.productJSONBytes = productJSONBytes
         self.productJSONDisposition = productJSONDisposition
         self.sparklePublicEDKey = sparklePublicEDKey
+        self.backgroundOnly = backgroundOnly
     }
 
     // Namespace invalidation and unavailable scans retain no vendor claims.

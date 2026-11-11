@@ -143,6 +143,26 @@ private func inventoryPhysical(_ path: String) throws -> (UInt64, UInt64) {
         let absent = try r.applications.first { $0.path.hasSuffix("/Absent.app") }.map(InstalledApp.init(observation:))
         try expect(absent?.pinsSparkleKey == false, "absent key must not pin")
     }
+    check("inventory: LSBackgroundOnly marks background-only helpers, and only a truthy value does") {
+        let f = try InventoryFixture(); defer { f.clean() }
+        let base: [String: Any] = ["CFBundleName": "B", "CFBundleIdentifier": "example.b", "CFBundleShortVersionString": "1", "CFBundleVersion": "2"]
+        func with(_ extra: [String: Any]) -> [String: Any] { base.merging(extra) { $1 } }
+        _ = try f.app("Absent.app", metadata: base)
+        _ = try f.app("BoolTrue.app", metadata: with(["LSBackgroundOnly": true]))
+        _ = try f.app("BoolFalse.app", metadata: with(["LSBackgroundOnly": false]))
+        _ = try f.app("StrYes.app", metadata: with(["LSBackgroundOnly": "YES"]))
+        _ = try f.app("StrNo.app", metadata: with(["LSBackgroundOnly": "no"]))
+        _ = try f.app("UIElement.app", metadata: with(["LSUIElement": true]))
+        let r = await f.scan()
+        func flag(_ n: String) throws -> Bool {
+            guard let a = r.applications.first(where: { $0.path.hasSuffix("/\(n).app") }) else { throw CheckFailure(description: "missing \(n)") }
+            let mapped = InstalledApp(observation: a)
+            try expect(mapped.isBackgroundOnly == a.vendorMetadata.backgroundOnly, "\(n): flag lost mapping into InstalledApp")
+            return a.vendorMetadata.backgroundOnly
+        }
+        try expect(try flag("BoolTrue") && flag("StrYes"), "truthy LSBackgroundOnly not captured")
+        try expect(try !flag("Absent") && !flag("BoolFalse") && !flag("StrNo") && !flag("UIElement"), "non-background app flagged background-only")
+    }
     check("inventory: publisher and management-looking plist keys never confer authority") {
         let f = try InventoryFixture(); defer { f.clean() }
         let claims: [String: Any] = ["CFBundleName": "Claims", "CFBundleIdentifier": "example.claims", "CFBundleShortVersionString": "1", "CFBundleVersion": "2", "Publisher": "Apple", "TeamIdentifier": "TRUST-ME", "Architecture": "arm64", "Homebrew": true, "UpdateEligible": true, "InstallationAllowed": true]
@@ -294,6 +314,26 @@ private func inventoryPhysical(_ path: String) throws -> (UInt64, UInt64) {
         let r = await LocalApplicationInventory(fixtureRoots: [f.root.path + "/" + String(repeating: "x", count: 4097)]).scan()
         try expect(r.completeness != .complete && r.applications.isEmpty && r.issues.contains { $0.kind == .pathLimit }, "Overlong path did not refuse explicitly")
         try expect(r.issues.allSatisfy { ($0.path?.utf8.count ?? 0) <= 4096 }, "Issue echoed unbounded path")
+    }
+    check("inventory: entries added to the root, its parent, the bundle or Contents mid-scan do not make the scan incomplete") {
+        let f = try InventoryFixture(); defer { f.clean() }
+        let app = try f.app("Busy.app")
+        let folders = [f.base, f.root, app, app.appendingPathComponent("Contents")]
+        let scanner = LocalApplicationInventory(fixtureRoots: [f.root.path], observer: { event in
+            guard case .beforeMetadataRead(let path) = event, path == app.path else { return }
+            // Other programs writing beside the scan: every folder on the path gains and loses an entry, so its
+            // times, size and link count change while its identity does not.
+            for folder in folders {
+                let extra = folder.appendingPathComponent("extra-entry")
+                try? FileManager.default.createDirectory(at: extra, withIntermediateDirectories: false)
+                try? FileManager.default.removeItem(at: extra)
+                try? Data("x".utf8).write(to: folder.appendingPathComponent("extra-file"))
+            }
+        })
+        let r = await scanner.scan()
+        try expect(FileManager.default.fileExists(atPath: f.base.appendingPathComponent("extra-file").path), "observer was not invoked at the metadata read")
+        try expect(r.completeness == .complete && r.issues.isEmpty, "a busy ancestor made the scan incomplete: \(r.completeness) \(r.issues)")
+        try expect(r.applications.map(\.displayName) == ["Literal App"], "apps: \(r.applications.map(\.displayName))")
     }
     check("inventory: replacing bundle, Contents or plist after identity capture refuses changed metadata") {
         for boundary in ["bundle", "contents", "plist"] {

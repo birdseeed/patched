@@ -2,12 +2,10 @@ import SwiftUI
 import AppKit
 import PatchedShell
 
-// Select the property-wrapper type explicitly when an SDK also declares a State macro.
-private typealias MenuHoverState<Value> = State<Value>
-
 public enum NativeClientMenuAction: CaseIterable, Sendable {
-    /// `applications` is no longer in the menu; the window still reaches it.
-    case updates, applications, settings
+    /// `applications` is no longer in the menu; the window still reaches it. Settings is its own window,
+    /// opened by the app (`NativeClientMenuView.openSettings`), not a route in the main window.
+    case updates, applications
     /// The menu's Check Now: a read-only update check. It never opens the window.
     case checkNow
 }
@@ -65,18 +63,24 @@ extension AppUpdatesController {
         let checkedTime = lastCheckedAt.map(timeFormatter)
         let header: String
         var note: String?
-        if phase == .checking { header = "Checking…" }
+        if phase == .checking { header = String(localized: "Checking…") }
         else if !waiting.isEmpty {
             header = NativeClientMenuLabel.badgeDescription(waiting.count)
-            if failed > 0 { note = "Couldn't check \(failed) \(failed == 1 ? "app" : "apps")" }
-            else if keptOffline > 0 { note = "Couldn't re-check \(keptOffline) \(keptOffline == 1 ? "app" : "apps") (offline)" }
+            if failed > 0 {
+                note = failed == 1 ? String(localized: "Couldn't check \(failed) app") : String(localized: "Couldn't check \(failed) apps")
+            } else if keptOffline > 0 {
+                note = keptOffline == 1 ? String(localized: "Couldn't re-check \(keptOffline) app (offline)")
+                                        : String(localized: "Couldn't re-check \(keptOffline) apps (offline)")
+            }
         }
-        else if failed > 0 { header = "Couldn't check \(failed) \(failed == 1 ? "app" : "apps")" }
-        else if catalogueError != nil { header = "Couldn't check for updates" }
-        else if keptOffline > 0 { header = "Couldn't re-check (offline)" }
-        else if stale > 0 { header = "Check again to confirm" }
-        else if hasChecked { header = "Up to date" }
-        else { header = "No update check yet" }
+        else if failed > 0 {
+            header = failed == 1 ? String(localized: "Couldn't check \(failed) app") : String(localized: "Couldn't check \(failed) apps")
+        }
+        else if catalogueError != nil { header = String(localized: "Couldn't check for updates") }
+        else if keptOffline > 0 { header = String(localized: "Couldn't re-check (offline)") }
+        else if stale > 0 { header = String(localized: "Check again to confirm") }
+        else if hasChecked { header = String(localized: "Up to date") }
+        else { header = String(localized: "No update check yet") }
         let shown = ordered.prefix(max(0, cap)).map {
             NativeClientMenuUpdates.Row(id: $0.id, name: $0.name, versions: Self.menuVersions($0), note: $0.kindNote)
         }
@@ -133,8 +137,8 @@ public struct NativeClientMenuText: Equatable, Sendable {
 extension NativeClientSession {
     public var menuText: NativeClientMenuText {
         NativeClientMenuText(backgroundStatus: backgroundChecksRunning
-                ? "Checks on open and every 3 hours. Never installs on its own."
-                : "Background checks and notifications unavailable.")
+                ? String(localized: "Checks on open and every 3 hours. Never installs on its own.")
+                : String(localized: "Background checks and notifications unavailable."))
     }
 
     /// Routes request the main window even when the destination is already selected.
@@ -145,8 +149,6 @@ extension NativeClientSession {
             navigation.select(.updates)
         case .applications:
             navigation.select(.applications)
-        case .settings:
-            navigation.select(.settings)
         case .checkNow:
             appUpdates.check()
             return false
@@ -171,7 +173,8 @@ public struct NativeClientMenuLabel: View {
     public init(updates: AppUpdatesController) { self.updates = updates }
 
     public static func badgeDescription(_ count: Int) -> String {
-        count == 0 ? "No updates available" : (count == 1 ? "1 update available" : "\(count) updates available")
+        count == 0 ? String(localized: "No updates available")
+            : (count == 1 ? String(localized: "1 update available") : String(localized: "\(count) updates available"))
     }
 
     /// Eager, bounded canonical pixels; template tint comes from the menu bar.
@@ -217,178 +220,206 @@ struct NativeClientMenuBadgedLabel: View {
     }
 }
 
+/// One item of the menu-bar menu: a disabled line of text, a command, or a separator. Pure data built from
+/// the session's state; building it starts nothing.
+public struct NativeClientMenuItem: Equatable, Identifiable, Sendable {
+    public enum Action: Equatable, Sendable {
+        /// Open Updates focused on this app. Installs nothing.
+        case showUpdate(id: String)
+        /// Open Patched, and "and N more…": the Updates screen.
+        case openUpdates
+        case updateAll, stopUpdating, cancelQueuedUpdateAll
+        case checkNow, settings, quit
+        /// "Update Patched to X…": asks first, in an alert, and installs only once that is confirmed.
+        case updatePatched
+        case downloadPatched
+        case dismissPatchedFailure
+    }
+    public enum Kind: Equatable, Sendable { case text, command(Action), separator }
+
+    public let id: String
+    public let kind: Kind
+    public let title: String
+    public var enabled = true
+    /// Command-key equivalent, shown in the menu.
+    public var shortcut: Character?
+    /// The installed app whose icon the item shows.
+    public var iconPath: String?
+
+    public var action: Action? { if case .command(let action) = kind { return action }; return nil }
+}
+
+extension NativeClientSession {
+    /// Everything the menu-bar menu lists, in order.
+    public var menuItems: [NativeClientMenuItem] {
+        let updates = appUpdates
+        let list = updates.menuUpdates()
+        var items: [NativeClientMenuItem] = []
+        func text(_ id: String, _ title: String) { items.append(NativeClientMenuItem(id: id, kind: .text, title: title)) }
+        func command(_ id: String, _ title: String, _ action: NativeClientMenuItem.Action, enabled: Bool = true,
+                     shortcut: Character? = nil, iconPath: String? = nil) {
+            items.append(NativeClientMenuItem(id: id, kind: .command(action), title: title, enabled: enabled,
+                                              shortcut: shortcut, iconPath: iconPath))
+        }
+        func separator(_ id: String) { items.append(NativeClientMenuItem(id: id, kind: .separator, title: "")) }
+
+        text("header", list.header)
+        if let checked = list.checkedAt { text("checked", String(localized: "Checked \(checked)")) }
+        if let note = list.note { text("note", note) }
+        if let available = list.selfUpdateText, let own = updates.selfUpdate {
+            let state = updates.selfInstall
+            separator("self-separator")
+            text("self", available)
+            if updates.canInstallSelfUpdate { command("self-update", String(localized: "Update Patched to \(own.version)…"), .updatePatched) }
+            command("self-download", String(localized: "Download Patched \(own.version)"), .downloadPatched, enabled: !state.isBusy)
+            // The question itself is asked in an alert; progress and failures are shown here.
+            if let status = state.text, !state.isConfirming { text("self-status", status) }
+            if state.isFailed { command("self-dismiss", String(localized: "Dismiss"), .dismissPatchedFailure) }
+        }
+        let all = updates.updateAllMenu
+        if !list.rows.isEmpty || all.visible { separator("updates-separator") }
+        for row in list.rows {
+            command("row:" + row.id, row.name + "  " + row.versions + (row.note.map { " — " + $0 } ?? ""),
+                    .showUpdate(id: row.id), iconPath: row.path)
+        }
+        if list.moreCount > 0 { command("more", String(localized: "and \(list.moreCount) more…"), .openUpdates) }
+        if all.visible {
+            if let progress = all.progressText { text("update-all-progress", progress) }
+            if all.showsCancelQueued {
+                command("update-all-cancel", String(localized: "Cancel"), .cancelQueuedUpdateAll)
+            } else if all.showsStop {
+                command("update-all-stop", String(localized: "Stop Updating"), .stopUpdating, enabled: all.stopEnabled)
+            } else {
+                command("update-all", all.title, .updateAll, enabled: all.enabled)
+                if let detail = all.detail { text("update-all-detail", detail) }
+                if let reason = all.reason { text("update-all-reason", reason) }
+            }
+        }
+        separator("actions-separator")
+        command("open", String(localized: "Open Patched"), .openUpdates)
+        command("check", String(localized: "Check Now"), .checkNow, enabled: updates.canCheck, shortcut: "r")
+        command("settings", String(localized: "Settings…"), .settings, shortcut: ",")
+        separator("quit-separator")
+        command("quit", String(localized: "Quit Patched"), .quit, shortcut: "q")
+        text("background", menuText.backgroundStatus)
+        return items
+    }
+
+    /// "Update Patched to X…" in the menu: asks with `confirm` (an alert in the app) and installs only when the
+    /// answer is yes; any other answer cancels. Returns whether the update was confirmed.
+    @discardableResult public func requestSelfUpdateFromMenu(confirm: (String) -> Bool) -> Bool {
+        appUpdates.requestSelfUpdate()
+        guard appUpdates.selfInstall.isConfirming, let question = appUpdates.selfInstall.text else { return false }
+        guard confirm(question) else { appUpdates.cancelSelfUpdate(); return false }
+        appUpdates.confirmSelfUpdate()
+        return true
+    }
+}
+
+/// The menu-bar menu's items, shown as a native menu (`.menuBarExtraStyle(.menu)`): text lines become
+/// disabled items, buttons become commands and dividers become separators.
 /// Presentation observes the retained child directly: session observation alone
 /// does not forward its update owner's publications.
 public struct NativeClientMenuView: View {
     @ObservedObject private var session: NativeClientSession
     @ObservedObject private var updates: AppUpdatesController
     private let openWindow: () -> Void
+    private let openSettings: () -> Void
+    private let confirmSelfUpdate: @MainActor (String) -> Bool
 
-    public init(session: NativeClientSession, openWindow: @escaping () -> Void) {
+    /// `openSettings` shows the standard Settings window; the app supplies it from its scene environment.
+    /// `confirmSelfUpdate` asks before Patched updates itself; by default an alert whose default button is Cancel.
+    public init(session: NativeClientSession, openWindow: @escaping () -> Void, openSettings: @escaping () -> Void = {},
+                confirmSelfUpdate: @escaping @MainActor (String) -> Bool = NativeClientMenuView.askInAlert) {
         self.session = session
         self.updates = session.appUpdates
         self.openWindow = openWindow
+        self.openSettings = openSettings
+        self.confirmSelfUpdate = confirmSelfUpdate
     }
 
     public var body: some View {
-        let list = updates.menuUpdates()
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text(verbatim: list.header).font(.headline).lineLimit(1)
-                Spacer(minLength: 8)
-                if let checked = list.checkedAt {
-                    Text(verbatim: "Checked " + checked).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                }
+        ForEach(session.menuItems) { item in
+            switch item.kind {
+            case .separator:
+                Divider()
+            case .text:
+                Text(verbatim: item.title)
+            case .command(let action):
+                Button(action: { perform(action) }) { label(item) }
+                    .disabled(!item.enabled)
+                    .keyboardShortcut(item.shortcut.map { KeyboardShortcut(KeyEquivalent($0), modifiers: .command) })
             }
-            .padding(.horizontal, 8)
-            if let note = list.note {
-                Text(verbatim: note).font(.caption).foregroundStyle(.secondary).padding(.horizontal, 8)
-            }
-            if list.selfUpdateText != nil, let own = updates.selfUpdate {
-                updates.selfUpdateLine(own, compact: true)
-                    .padding(.horizontal, 8)
-            }
-            if !list.rows.isEmpty {
-                VStack(alignment: .leading, spacing: 2) {
-                    ForEach(list.rows) { row in
-                        MenuHoverButton(action: { if session.showUpdate(id: row.id) { openWindow() } }) {
-                            HStack(spacing: 8) {
-                                AppIconView(path: row.path, fallback: nil, provider: updates.iconProvider, size: 20, revision: row.versions)
-                                VStack(alignment: .leading, spacing: 1) {
-                                    Text(verbatim: row.name).lineLimit(1).truncationMode(.tail)
-                                    Text(verbatim: row.versions).font(.caption).foregroundStyle(.secondary)
-                                        .lineLimit(1).truncationMode(.tail)
-                                }
-                                Spacer(minLength: 4)
-                                if let note = row.note {
-                                    Text(verbatim: note).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
-                                        .padding(.horizontal, 6).padding(.vertical, 2)
-                                        .background(Capsule().fill(Color.secondary.opacity(0.15)))
-                                        .fixedSize()
-                                }
-                            }
-                        }
-                        .accessibilityLabel(Text(verbatim: row.name + ", " + row.versions + (row.note.map { ", " + $0 } ?? "")))
-                        .accessibilityHint(Text(verbatim: "Shows this app in Updates"))
-                    }
-                    if list.moreCount > 0 {
-                        MenuHoverButton(action: { route(.updates) }) {
-                            Text(verbatim: "and \(list.moreCount) more…").foregroundStyle(.secondary)
-                        }
-                    }
-                }
-            }
-            updateAllSection
-            Divider().padding(.vertical, 2)
-            VStack(alignment: .leading, spacing: 0) {
-                MenuHoverButton(action: { route(.updates) }) {
-                    MenuItemLabel(title: "Open Patched", symbol: "macwindow")
-                }
-                MenuHoverButton(action: { session.performMenuAction(.checkNow) }) {
-                    MenuItemLabel(title: "Check Now", symbol: "arrow.clockwise", shortcut: "⌘R")
-                }
-                .disabled(!updates.canCheck)
-                .keyboardShortcut("r", modifiers: .command)
-                MenuHoverButton(action: { route(.settings) }) {
-                    MenuItemLabel(title: "Settings…", symbol: "gear", shortcut: "⌘,")
-                }
-                .keyboardShortcut(",", modifiers: .command)
-                Divider().padding(.vertical, 4)
-                MenuHoverButton(action: { NSApplication.shared.terminate(nil) }) {
-                    MenuItemLabel(title: "Quit Patched", symbol: "power", shortcut: "⌘Q")
-                }
-                .keyboardShortcut("q", modifiers: .command)
-            }
-            Text(verbatim: session.menuText.backgroundStatus)
-                .font(.caption).foregroundStyle(.tertiary)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.horizontal, 8).padding(.top, 2)
-        }
-        .font(.body)
-        .tint(ShellBrand.accent)
-        .padding(EdgeInsets(top: 6, leading: 12, bottom: 12, trailing: 12))
-        .frame(width: 320, alignment: .leading)
-    }
-
-    @ViewBuilder private var updateAllSection: some View {
-        let state = updates.updateAllMenu
-        if state.visible {
-            VStack(spacing: 6) {
-                if let progress = state.progressText {
-                    Text(verbatim: progress).font(.caption).foregroundStyle(.secondary)
-                }
-                if state.showsCancelQueued {
-                    Button(action: { session.updateAllEntry.requestStop() }) {
-                        Text(verbatim: "Cancel").frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.bordered).controlSize(.large)
-                } else if state.showsStop {
-                    Button(action: { session.updateAllEntry.requestStop() }) {
-                        Text(verbatim: "Stop Updating").frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.bordered).controlSize(.large)
-                    .disabled(!state.stopEnabled)
-                } else {
-                    Button(action: { session.updateAllEntry.requestUpdateAll() }) {
-                        Text(verbatim: state.title).frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.borderedProminent).controlSize(.large).tint(ShellBrand.accent)
-                    .disabled(!state.enabled)
-                    if let detail = state.detail {
-                        Text(verbatim: detail).font(.caption).foregroundStyle(.secondary)
-                    }
-                    if let reason = state.reason {
-                        Text(verbatim: reason).font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-            }
-            .frame(maxWidth: .infinity)
-            .multilineTextAlignment(.center)
-            .padding(.top, 2)
         }
     }
 
-    private func route(_ action: NativeClientMenuAction) {
-        if session.performMenuAction(action) { openWindow() }
-    }
-}
-
-/// A full-width plain button that highlights under the pointer, like a native menu item.
-struct MenuHoverButton<Label: View>: View {
-    let action: () -> Void
-    @ViewBuilder let label: () -> Label
-    @MenuHoverState private var hovering = false
-    @Environment(\.isEnabled) private var enabled
-
-    var body: some View {
-        Button(action: action) {
-            label()
-                .padding(.horizontal, 8).padding(.vertical, 5)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(hovering && enabled ? Color.primary.opacity(0.1) : Color.clear))
-                .contentShape(Rectangle())
+    @ViewBuilder private func label(_ item: NativeClientMenuItem) -> some View {
+        if let path = item.iconPath {
+            Label { Text(verbatim: item.title) } icon: { Image(nsImage: menuIcon(path)) }
+        } else {
+            Text(verbatim: item.title)
         }
-        .buttonStyle(.plain)
-        .onHover { hovering = $0 }
     }
-}
 
-/// Icon, label and an optional right-aligned shortcut, as in a native menu.
-struct MenuItemLabel: View {
-    let title: String
-    let symbol: String
-    var shortcut: String?
-    @Environment(\.isEnabled) private var enabled
-
-    var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: symbol).frame(width: 20).accessibilityHidden(true)
-            Text(verbatim: title)
-            Spacer(minLength: 8)
-            if let shortcut { Text(verbatim: shortcut).foregroundStyle(.secondary).accessibilityHidden(true) }
+    /// The app's icon at menu size: the provider's cached icon, else the inventory's own pixels, else a plain
+    /// app symbol. Memory only, so opening the menu reads no files.
+    private func menuIcon(_ path: String) -> NSImage {
+        let source: NSImage?
+        if let cached = updates.iconProvider.cachedIcon(forPath: path) {
+            source = cached
+        } else if let pixels = updates.row(id: path)?.icon?.cgImage {
+            source = NSImage(cgImage: pixels, size: NSSize(width: 32, height: 32))
+        } else {
+            source = NSImage(systemSymbolName: "app", accessibilityDescription: nil)
         }
-        .foregroundStyle(enabled ? Color.primary : Color.secondary.opacity(0.6))
+        let icon = (source?.copy() as? NSImage) ?? NSImage()
+        icon.size = NSSize(width: 16, height: 16)
+        return icon
+    }
+
+    /// One menu command. Only explicit choices reach here; nothing installs without its own confirmation.
+    public func perform(_ action: NativeClientMenuItem.Action) {
+        switch action {
+        case .showUpdate(let id): if session.showUpdate(id: id) { openWindow() }
+        case .openUpdates: if session.performMenuAction(.updates) { openWindow() }
+        case .updateAll: session.updateAllEntry.requestUpdateAll()
+        case .stopUpdating, .cancelQueuedUpdateAll: session.updateAllEntry.requestStop()
+        case .checkNow: session.performMenuAction(.checkNow)
+        case .settings: openSettings()
+        case .quit: NSApplication.shared.terminate(nil)
+        case .updatePatched: session.requestSelfUpdateFromMenu(confirm: confirmSelfUpdate)
+        case .downloadPatched: updates.downloadSelfUpdate()
+        case .dismissPatchedFailure: updates.cancelSelfUpdate()
+        }
+    }
+
+    /// "Update Patched to X?" with "Patched will quit and reopen." below. Cancel is the default button, so
+    /// Return never installs; only a click on Update and Reopen does.
+    @MainActor public static func askInAlert(_ question: String) -> Bool {
+        let alert = NSAlert()
+        if let mark = question.range(of: "? ") {
+            alert.messageText = String(question[..<mark.lowerBound]) + "?"
+            alert.informativeText = String(question[mark.upperBound...])
+        } else {
+            alert.messageText = question
+        }
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: String(localized: "Cancel"))
+        alert.addButton(withTitle: String(localized: "Update and Reopen"))
+        NSApp.activate(ignoringOtherApps: true)
+        return alert.runModal() == .alertSecondButtonReturn
+    }
+
+    /// Update All's one question about the apps it skipped because they were open. True only for "Quit and Update".
+    @MainActor public static func askToQuitOpenApps(_ question: String) -> Bool {
+        let alert = NSAlert()
+        alert.messageText = String(localized: "Apps are open")
+        alert.informativeText = question
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: String(localized: "Cancel"))
+        alert.addButton(withTitle: String(localized: "Quit and Update"))
+        NSApp.activate(ignoringOtherApps: true)
+        return alert.runModal() == .alertSecondButtonReturn
     }
 }
 
@@ -397,7 +428,6 @@ struct MenuItemLabel: View {
 /// Patched will quit and reopen." and installs only once that is confirmed. Progress and failures show below.
 struct SelfUpdateLine: View {
     let text: String
-    var compact = false
     var state: SelfInstallState = .idle
     var canInstall = false
     let download: () -> Void
@@ -410,12 +440,7 @@ struct SelfUpdateLine: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            if compact && showsUpdate {
-                HStack(spacing: 8) { label; Spacer(minLength: 0) }
-                HStack(spacing: 8) { Spacer(minLength: 0); buttons }
-            } else {
-                HStack(spacing: 8) { label; Spacer(minLength: 8); buttons }
-            }
+            HStack(spacing: 8) { label; Spacer(minLength: 8); buttons }
             if let status = state.text {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     if state.isBusy { ProgressView().controlSize(.small) }
@@ -427,16 +452,16 @@ struct SelfUpdateLine: View {
                 if state.isConfirming {
                     HStack(spacing: 8) {
                         Spacer(minLength: 0)
-                        Button(action: cancel) { Text(verbatim: "Cancel") }
-                            .buttonStyle(ClientButtonStyle(enabled: true, prominent: false))
-                        Button(action: confirm) { Text(verbatim: "Update and Reopen") }
-                            .buttonStyle(ClientButtonStyle(enabled: true, prominent: true))
-                            .accessibilityLabel(Text(verbatim: "Update Patched to \(version) and reopen it"))
+                        Button(action: cancel) { Text("Cancel") }
+                            .buttonStyle(.bordered)
+                        Button(action: confirm) { Text("Update and Reopen") }
+                            .buttonStyle(.borderedProminent)
+                            .accessibilityLabel(Text("Update Patched to \(version) and reopen it"))
                     }
                 } else if state.isFailed {
                     HStack { Spacer(minLength: 0)
-                        Button(action: cancel) { Text(verbatim: "Dismiss") }
-                            .buttonStyle(ClientButtonStyle(enabled: true, prominent: false))
+                        Button(action: cancel) { Text("Dismiss") }
+                            .buttonStyle(.bordered)
                     }
                 }
             }
@@ -445,28 +470,28 @@ struct SelfUpdateLine: View {
 
     private var label: some View {
         HStack(spacing: 8) {
-            Image(systemName: "arrow.down.circle").foregroundStyle(ShellBrand.accent).accessibilityHidden(true)
-            Text(verbatim: text).font(compact ? .callout : .body).lineLimit(1).truncationMode(.tail)
+            Image(systemName: "arrow.down.circle").foregroundStyle(Color.accentColor).accessibilityHidden(true)
+            Text(verbatim: text).font(.body).lineLimit(1).truncationMode(.tail)
         }
     }
 
     @ViewBuilder private var buttons: some View {
         if showsUpdate {
-            Button(action: update) { Text(verbatim: "Update") }
-                .buttonStyle(ClientButtonStyle(enabled: true, prominent: true))
-                .accessibilityLabel(Text(verbatim: "Update to Patched " + version))
+            Button(action: update) { Text("Update") }
+                .buttonStyle(.borderedProminent)
+                .accessibilityLabel(Text("Update to Patched \(version)"))
         }
-        Button(action: download) { Text(verbatim: "Download") }
-            .buttonStyle(ClientButtonStyle(enabled: !state.isBusy, prominent: false))
+        Button(action: download) { Text("Download") }
+            .buttonStyle(.bordered)
             .disabled(state.isBusy)
-            .accessibilityLabel(Text(verbatim: "Download " + text.replacingOccurrences(of: " is available", with: "")))
+            .accessibilityLabel(Text("Download Patched \(version)"))
     }
 }
 
 extension AppUpdatesController {
     /// The self-update line for this controller's current state.
-    func selfUpdateLine(_ own: SelfUpdate, compact: Bool = false) -> SelfUpdateLine {
-        SelfUpdateLine(text: own.text, compact: compact, state: selfInstall, canInstall: canInstallSelfUpdate,
+    func selfUpdateLine(_ own: SelfUpdate) -> SelfUpdateLine {
+        SelfUpdateLine(text: own.text, state: selfInstall, canInstall: canInstallSelfUpdate,
                        download: { [weak self] in self?.downloadSelfUpdate() },
                        update: { [weak self] in self?.requestSelfUpdate() },
                        confirm: { [weak self] in self?.confirmSelfUpdate() },

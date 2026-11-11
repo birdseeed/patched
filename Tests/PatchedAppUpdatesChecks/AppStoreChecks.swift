@@ -42,6 +42,19 @@ func storeOutcome(_ app: InstalledApp, version: String = "3.0", track: Int = 123
 @MainActor func registerAppStoreChecks() {
     let updatesPage = AppStoreLinks.updatesPageURL
 
+    check("updates screen: installable updates first, then App Store ones, then the rest, alphabetical within each") {
+        let controller = makeController(outcomes: [outcome(app("Alpha"), .upToDate), storeOutcome(storeApp("Bravo")),
+                                                   outcome(app("Charlie"), .updateAvailable(offer("2.0"))),
+                                                   outcome(app("Delta"), .upToDate),
+                                                   outcome(app("Echo"), .updateAvailable(offer("2.0")))])
+        await runCheck(controller)
+        let shown = controller.updatesRows.updatesFirst.map(\.name)
+        try expect(shown == ["Charlie", "Echo", "Bravo", "Alpha", "Delta"], "order: \(shown)")
+        try expect(controller.rows.map(\.name) == ["Alpha", "Bravo", "Charlie", "Delta", "Echo"], "rows reordered: \(controller.rows.map(\.name))")
+        let view = try String(contentsOfFile: sourcesRoot() + "/PatchedClient/AppUpdatesView.swift", encoding: .utf8)
+        try expect(view.contains("ForEach(controller.updatesRows.updatesFirst)"), "the Updates screen does not list updates first")
+    }
+
     check("app store row: badge, status text, no Update; the installer is never reached") {
         let installer = FakeInstaller()
         let controller = makeController(outcomes: [storeOutcome(storeApp("Store")), outcome(app("Plain"), .updateAvailable(offer("2.0")))], installer: installer)
@@ -432,7 +445,8 @@ func storeOutcome(_ app: InstalledApp, version: String = "3.0", track: Int = 123
         // Both views tie the icon lookup to the installed version, so an in-place update reruns it.
         let updatesSource = try String(contentsOfFile: #filePath.replacingOccurrences(of: "Tests/PatchedAppUpdatesChecks/AppStoreChecks.swift", with: "Sources/PatchedClient/AppUpdatesView.swift"), encoding: .utf8)
         let menuSource = try String(contentsOfFile: #filePath.replacingOccurrences(of: "Tests/PatchedAppUpdatesChecks/AppStoreChecks.swift", with: "Sources/PatchedClient/NativeClientMenu.swift"), encoding: .utf8)
-        try expect(updatesSource.contains("revision: row.installedVersion") && menuSource.contains("revision: row.versions"), "icon lookup not tied to the installed version")
+        try expect(updatesSource.contains("revision: row.installedVersion") && menuSource.contains("iconProvider.cachedIcon(forPath: path)"),
+                   "icon lookup not tied to the installed version (the menu reads the cache each time it is built)")
         let symlinked = await provider.loadIcon(forPath: link.path)
         try expect(symlinked == nil && provider.cachedIcon(forPath: link.path) == nil, "symlinked app produced an icon")
     }

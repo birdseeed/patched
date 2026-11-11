@@ -200,7 +200,7 @@ private struct NoIndex: CaskIndexProviding { func index() async -> Result<CaskIn
         await runCheck(none)
         try expect(none.menuUpdates().selfUpdateText == nil, "menu line without news")
         let session = NativeClientSession(navigation: ShellNavigation(destination: .updates), appUpdates: c, urlOpener: RecordingOpener())
-        let menu = try paintedText(NativeClientMenuView(session: session, openWindow: {}))
+        let menu = menuWords(session)
         try expect(menu.contains("Patched 0.2.0 is available") && menu.contains("Download"), "menu text: \(menu)")
         let updates = try paintedText(AppUpdatesView(controller: c))
         try expect(updates.contains("Patched 0.2.0 is available") && updates.contains("Download"), "updates text: \(updates)")
@@ -498,14 +498,17 @@ private struct NoIndex: CaskIndexProviding { func index() async -> Result<CaskIn
         await runCheck(c)
         try expect(c.canInstallSelfUpdate && c.menuUpdates().selfUpdateInstallable, "Update not offered")
         let session = NativeClientSession(navigation: ShellNavigation(destination: .updates), appUpdates: c, urlOpener: RecordingOpener())
-        let before = try paintedText(NativeClientMenuView(session: session, openWindow: {}))
-        try expect(before.contains("Patched 0.2.0 is available") && before.contains("Download") && !before.contains("quit and reopen"), "menu: \(before)")
+        let before = menuWords(session)
+        try expect(before.contains("Patched 0.2.0 is available") && before.contains("Download Patched 0.2.0")
+                   && before.contains("Update Patched to 0.2.0…") && !before.contains("quit and reopen"), "menu: \(before)")
+        // The menu asks in an alert; any answer but Update and Reopen leaves everything as it was.
+        var asked: [String] = []
+        NativeClientMenuView(session: session, openWindow: {}, confirmSelfUpdate: { asked.append($0); return false }).perform(.updatePatched)
+        try expect(asked == ["Update Patched to 0.2.0? Patched will quit and reopen."] && c.selfInstall == .idle,
+                   "menu alert: \(asked) \(c.selfInstall)")
         c.requestSelfUpdate()
         try expect(c.selfInstall == .confirming(version: "0.2.0"), "state: \(c.selfInstall)")
-        let asking = try paintedText(NativeClientMenuView(session: session, openWindow: {}))
         try expect(c.selfInstall.text == "Update Patched to 0.2.0? Patched will quit and reopen.", "words: \(c.selfInstall.text ?? "")")
-        try expect(asking.contains("Update Patched to 0.2.0?") && asking.contains("Update and Reopen")
-                   && asking.contains("Cancel"), "menu confirmation: \(asking)")
         let window = try paintedText(AppUpdatesView(controller: c))
         // Painted text is read back by OCR, so only short, distinctive phrases are compared.
         try expect(window.contains("Update Patched to 0.2.0?") && window.contains("Update and Reopen"), "Updates confirmation: \(window)")
@@ -582,7 +585,7 @@ private struct NoIndex: CaskIndexProviding { func index() async -> Result<CaskIn
             try expect(terminated.count == 0 && fake.relaunches.isEmpty && opener.nothingOpened, "\(name): quit, reopened or opened something")
             try expect(!c.isWorking && c.canCheck && c.canInstallSelfUpdate, "\(name): Patched is stuck after a failure")
             let session = NativeClientSession(navigation: ShellNavigation(destination: .updates), appUpdates: c, urlOpener: opener)
-            let menu = try paintedText(NativeClientMenuView(session: session, openWindow: {}))
+            let menu = menuWords(session)
             try expect(menu.contains("Couldn't update Patched") && menu.contains("Dismiss"), "\(name) menu: \(menu)")
             c.cancelSelfUpdate()
             try expect(c.selfInstall == .idle, "\(name): dismiss")
@@ -617,7 +620,7 @@ private struct NoIndex: CaskIndexProviding { func index() async -> Result<CaskIn
         while c.selfInstall != .working(version: "0.2.0", step: .installing) && waited < 200 { try await Task.sleep(nanoseconds: 10_000_000); waited += 1 }
         try expect(c.selfInstall == .working(version: "0.2.0", step: .installing), "progress: \(c.selfInstall)")
         let session = NativeClientSession(navigation: ShellNavigation(destination: .updates), appUpdates: c, urlOpener: RecordingOpener())
-        let menu = try paintedText(NativeClientMenuView(session: session, openWindow: {}))
+        let menu = menuWords(session)
         try expect(menu.contains("Installing Patched 0.2.0"), "menu progress: \(menu)")
         try expect(!c.canCheck && !c.canUpdateAll && !c.canInstallSelfUpdate, "other actions open while Patched installs itself")
         try expect(!c.updateAll(), "Update All started during a self-update")
@@ -652,6 +655,32 @@ private struct NoIndex: CaskIndexProviding { func index() async -> Result<CaskIn
             for word in words { try expect(!text.contains(word), "\(file) mentions \(word)") }
         }
     }
+
+    check("self update: the menu's alert installs only on Update and Reopen, once") {
+        let fake = FakeSelfInstaller(), quit = QuitCounter()
+        let c = controller(FakeLookup(signed("0.2.0")))
+        installable(c, fake, terminated: quit)
+        await runCheck(c)
+        let session = NativeClientSession(navigation: ShellNavigation(destination: .updates), appUpdates: c, urlOpener: RecordingOpener())
+        var asked = 0
+        let menu = NativeClientMenuView(session: session, openWindow: {}, confirmSelfUpdate: { _ in asked += 1; return true })
+        menu.perform(.updatePatched)
+        await c.waitUntilIdle()
+        try expect(asked == 1 && fake.installs.count == 1 && c.selfInstallStarts == 1, "asked \(asked), installs \(fake.installs.count)")
+        // Other menu items around it never install.
+        let other = controller(FakeLookup(signed("0.2.0")))
+        let otherFake = FakeSelfInstaller()
+        installable(other, otherFake, terminated: QuitCounter())
+        other.urlOpener = RecordingOpener()
+        await runCheck(other)
+        var askedOther = false
+        let otherSession = NativeClientSession(navigation: ShellNavigation(destination: .updates), appUpdates: other, urlOpener: RecordingOpener())
+        let quiet = NativeClientMenuView(session: otherSession, openWindow: {}, confirmSelfUpdate: { _ in
+            askedOther = true; return true })
+        for action in [NativeClientMenuItem.Action.downloadPatched, .dismissPatchedFailure, .openUpdates] { quiet.perform(action) }
+        await other.waitUntilIdle()
+        try expect(!askedOther && otherFake.installs.isEmpty && other.selfInstallStarts == 0, "a menu item other than Update Patched installed")
+    }
 }
 
 private func selfTempRoot() throws -> String {
@@ -659,4 +688,9 @@ private func selfTempRoot() throws -> String {
     let root = tmp + "/patched-selfupdate-\(UUID().uuidString)"
     try FileManager.default.createDirectory(atPath: root + "/Apps", withIntermediateDirectories: true)
     return root
+}
+
+/// The menu-bar menu's lines, in order, as the native menu shows them.
+@MainActor func menuWords(_ session: NativeClientSession) -> String {
+    session.menuItems.map(\.title).joined(separator: " | ")
 }

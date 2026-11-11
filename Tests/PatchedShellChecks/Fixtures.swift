@@ -8,15 +8,10 @@ import PatchedShell
 
 // Literal approved specification, intentionally independent of product-generated lists.
 let expectedMain: [ShellDestination] = [.updates, .applications]
-let expectedLower: [ShellDestination] = [.support, .settings]
+let expectedLower: [ShellDestination] = [.support]
 let destinationLabels: [(ShellDestination, String)] = [
     (.updates, "Updates"), (.applications, "Applications"),
-    (.support, "Help & Support"), (.settings, "Settings")
-]
-let expectedPalette: [(ShellColorRole, String, String)] = [
-    (.surface, "#FFFFFF", "#0F172A"), (.sidebar, "#F8FAFC", "#1E293B"),
-    (.text, "#0F172A", "#F8FAFC"), (.muted, "#6B7280", "#94A3B8"),
-    (.accent, "#2563EB", "#60A5FA"), (.onAccent, "#FFFFFF", "#0F172A")
+    (.support, "Help & Support")
 ]
 let longLabel = String(repeating: "Prüfung des Aktualisierungsverlaufs 日本語 ", count: 4)
 let literalLabel = "<b>**Sample app**</b> & \"Name\"\nSecond line"

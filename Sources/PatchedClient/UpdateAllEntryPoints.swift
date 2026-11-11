@@ -4,7 +4,8 @@ import Combine
 // Explicit-click entry points to Update All besides the Updates window: the menu-bar item and the
 // "Update All" button on the updates-available notification. Both end in the same
 // `AppUpdatesController.updateAll()`, which rescans and rechecks each app before installing, skips open
-// apps (never quits them), never passes admin consent and refuses while checking, working or blocked.
+// apps, never passes admin consent and refuses while checking, working or blocked. Open apps are quit only
+// after the run, when `confirmOpenApps` asks once and the user agrees; with no answer they are left alone.
 // The scheduler never reaches this file: it holds only `check()`.
 
 /// What the Patched menu shows for Update All.
@@ -29,17 +30,18 @@ public struct UpdateAllMenuState: Equatable, Sendable {
 
     static let hidden = UpdateAllMenuState(visible: false, title: "", detail: nil, enabled: false, reason: nil,
                                            progressText: nil, showsStop: false, stopEnabled: false, showsCancelQueued: false)
-    public static let queuedText = "Update All queued, waiting for the check"
+    public static let queuedText = String(localized: "Update All queued, waiting for the check")
 }
 
 extension AppUpdatesController {
     /// The menu title for an installable count and an App Store count: one total, never two competing numbers.
     static func updateAllTitle(installable: Int, appStore: Int) -> String {
-        "Update All (\(installable + appStore))"
+        String(localized: "Update All (\(installable + appStore))")
     }
     static func updateAllDetail(installable: Int, appStore: Int) -> String? {
         guard appStore > 0 else { return nil }
-        return installable > 0 ? "\(installable) here, \(appStore) via the App Store" : "\(appStore) via the App Store"
+        return installable > 0 ? String(localized: "\(installable) here, \(appStore) via the App Store")
+                               : String(localized: "\(appStore) via the App Store")
     }
 
     public var updateAllMenu: UpdateAllMenuState {
@@ -50,16 +52,16 @@ extension AppUpdatesController {
                                       stopEnabled: !progress.stopping, showsCancelQueued: false)
         }
         if updateAllQueued {
-            return UpdateAllMenuState(visible: true, title: "Update All", detail: nil, enabled: false, reason: nil,
+            return UpdateAllMenuState(visible: true, title: String(localized: "Update All"), detail: nil, enabled: false, reason: nil,
                                       progressText: UpdateAllMenuState.queuedText, showsStop: false,
                                       stopEnabled: false, showsCancelQueued: true)
         }
         let count = updateAllCount, store = appStoreUpdateCount
         guard count > 0 || store > 0 else { return .hidden }
         var reason: String?
-        if phase == .checking { reason = "Checking for updates…" }
-        else if isWorking { reason = "Another update is in progress" }
-        else if installBlocked { reason = "Updates are paused. See the Updates window." }
+        if phase == .checking { reason = String(localized: "Checking for updates…") }
+        else if isWorking { reason = String(localized: "Another update is in progress") }
+        else if installBlocked { reason = String(localized: "Updates are paused. See the Updates window.") }
         return UpdateAllMenuState(visible: true, title: Self.updateAllTitle(installable: count, appStore: store),
                                   detail: Self.updateAllDetail(installable: count, appStore: store), enabled: reason == nil, reason: reason,
                                   progressText: nil, showsStop: false, stopEnabled: false, showsCancelQueued: false)
@@ -80,6 +82,9 @@ extension AppUpdatesController {
     private let summaryNotifier: (any UpdateSummaryNotifying)?
     /// Opens the Updates window; used when a notification's Update All cannot or need not run.
     public var openUpdates: (@MainActor () -> Void)?
+    /// Asked once, after a run that skipped open apps, with the question to put to the user. True means quit those
+    /// apps, update them and reopen them. Nil means never ask: the open apps are left alone.
+    public var confirmOpenApps: (@MainActor (String) -> Bool)?
 
     public init(controller: AppUpdatesController, summaryNotifier: (any UpdateSummaryNotifying)?) {
         self.controller = controller; self.summaryNotifier = summaryNotifier
@@ -104,7 +109,23 @@ extension AppUpdatesController {
 
     private func request(only keys: Set<String>?) {
         let notifier = summaryNotifier
-        let finished: @MainActor (UpdateAllSummary) -> Void = { notifier?.notify(summary: $0) }
+        let controller = self.controller
+        let finished: @MainActor (UpdateAllSummary) -> Void = { [weak self] first in
+            guard !first.openPaths.isEmpty, self?.confirmOpenApps != nil else { notifier?.notify(summary: first); return }
+            // This runs inside the finishing operation; ask once it is over and the controller is idle again.
+            Task { @MainActor [weak self] in
+                await controller.waitUntilIdle()
+                let question = controller.openAppsQuestion(first.openPaths)
+                guard let self, let ask = self.confirmOpenApps, ask(question),
+                      controller.quitAndUpdate(paths: first.openPaths, onFinished: { second in
+                          notifier?.notify(summary: UpdateAllSummary(
+                              updated: first.updated + second.updated, failed: first.failed + second.failed,
+                              skippedOpen: second.skippedOpen, needsAdmin: first.needsAdmin + second.needsAdmin,
+                              stopped: first.stopped + second.stopped,
+                              changed: first.changed, appStore: first.appStore, appStoreFailed: first.appStoreFailed))
+                      }) else { notifier?.notify(summary: first); return }
+            }
+        }
         let open: @MainActor () -> Void = { [weak self] in self?.openUpdates?() }
         let dropped: (@MainActor () -> Void)? = keys == nil ? nil : open
         if controller.phase == .checking {
@@ -126,6 +147,7 @@ extension NativeClientSession {
     /// Sends the notification's Update All button to the entry point. Called when background checks start.
     func wireNotificationActions(openUpdates: @escaping @MainActor () -> Void) {
         updateAllEntry.openUpdates = openUpdates
+        updateAllEntry.confirmOpenApps = NativeClientMenuView.askToQuitOpenApps
         updateNotifier?.onUpdateAll = { [weak self] keys in self?.updateAllEntry.requestUpdateAll(only: keys) }
     }
 }

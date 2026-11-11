@@ -17,6 +17,15 @@ private typealias AppsListState<Value> = State<Value>
 @_spi(Testing) public enum AppsListFilter: String, CaseIterable, Identifiable, Sendable {
     case all = "All", updates = "Updates", upToDate = "Up to date", noSource = "No source"
     public var id: String { rawValue }
+    /// The segment's localisable title.
+    var title: LocalizedStringKey {
+        switch self {
+        case .all: return "All"
+        case .updates: return "Updates"
+        case .upToDate: return "Up to date"
+        case .noSource: return "No source"
+        }
+    }
 
     func matches(_ row: AppUpdateRow) -> Bool {
         switch self {
@@ -29,12 +38,22 @@ private typealias AppsListState<Value> = State<Value>
 }
 
 extension AppUpdateRow {
+    /// A background-only helper with nothing to offer: kept out of the Updates and Applications lists and counts.
+    var isHiddenBackgroundHelper: Bool { isBackgroundOnly && !hasUpdateToShow }
+
     /// An update exists, whoever installs it (Patched, the App Store, or nobody yet).
     var hasUpdateToShow: Bool {
         switch status {
         case .updateAvailable, .notInstallable, .packageUnsupported, .appStoreUpdate: return true
         default: return false
         }
+    }
+
+    /// Where the Updates screen lists this row: installable updates, then other updates (App Store, manual),
+    /// then everything else.
+    var updatesRank: Int {
+        if hasUpdate { return 0 }
+        return hasUpdateToShow ? 1 : 2
     }
 
     /// The badge text, or nil when the app has no source. "?" marks a low-confidence match.
@@ -46,15 +65,15 @@ extension AppUpdateRow {
         case "sparkle": name = "Sparkle"
         case "electron": name = "Electron"
         case "homebrew": name = "Homebrew"
-        case "App Store", "appstore": return "App Store"
+        case "App Store", "appstore": return String(localized: "App Store")
         default: return nil
         }
-        return unconfirmed ? name + " (unconfirmed)" : name
+        return unconfirmed ? String(localized: "\(name) (unconfirmed)") : name
     }
 
     /// The status on the right of the list: short, with the target version for an update.
     @_spi(Testing) public var listStatus: String {
-        if hasUpdateToShow, let latest = latestVersion { return "Update to " + latest }
+        if hasUpdateToShow, let latest = latestVersion { return String(localized: "Update to \(latest)") }
         return statusText      // Patched's own row reads "Update to X" through this when a release was announced
     }
 }
@@ -117,7 +136,7 @@ public struct AppsListView: View {
         self.actions = AppsListActions(revealer: revealer, showUpdate: showUpdate, currentRows: { controller.rows })
     }
 
-    private var visible: [AppUpdateRow] { AppsListModel.visibleRows(controller.rows, query: query, filter: filter) }
+    private var visible: [AppUpdateRow] { AppsListModel.visibleRows(controller.applicationsRows, query: query, filter: filter) }
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -136,7 +155,7 @@ public struct AppsListView: View {
             HStack(spacing: 12) {
                 TextField("Search by name or bundle ID", text: $query).textFieldStyle(.roundedBorder).frame(maxWidth: 260)
                 Picker("Show", selection: $filter) {
-                    ForEach(AppsListFilter.allCases) { Text(verbatim: $0.rawValue).tag($0) }
+                    ForEach(AppsListFilter.allCases) { Text($0.title).tag($0) }
                 }
                 .pickerStyle(.segmented).labelsHidden().fixedSize()
                 Spacer(minLength: 0)
@@ -154,8 +173,8 @@ public struct AppsListView: View {
             Spacer(minLength: 8)
             if controller.phase == .checking { ProgressView().controlSize(.small) }
             let canCheck = Self.checkNowEnabled(controller)
-            Button(action: { controller.check() }) { Text(verbatim: "Check Now") }
-                .buttonStyle(ClientButtonStyle(enabled: canCheck, prominent: !controller.hasChecked))
+            Button(action: { controller.check() }) { Text("Check Now") }
+                .borderedButton(prominent: !controller.hasChecked)
                 .disabled(!canCheck)
         }
         .frame(minHeight: 28)
@@ -166,29 +185,29 @@ public struct AppsListView: View {
     }
 
     private var subtitle: String {
-        if controller.phase == .checking { return "Checking…" }
-        guard controller.hasChecked else { return "Not checked yet" }
-        let count = controller.rows.count
-        let noun = count == 1 ? "1 app" : "\(count) apps"
+        if controller.phase == .checking { return String(localized: "Checking…") }
+        guard controller.hasChecked else { return String(localized: "Not checked yet") }
+        let count = controller.applicationsRows.count
+        let noun = count == 1 ? String(localized: "1 app") : String(localized: "\(count) apps")
         guard let at = controller.lastCheckedAt else { return noun }
-        return noun + " · checked " + at.formatted(date: .omitted, time: .shortened)
+        return String(localized: "\(noun) · checked \(at.formatted(date: .omitted, time: .shortened))")
     }
 
     @ViewBuilder private var emptyState: some View {
         VStack(spacing: 6) {
-            Text(verbatim: emptyTitle).font(.headline)
-            Text(verbatim: emptyDetail).font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center)
+            Text(emptyTitle).font(.headline)
+            Text(emptyDetail).font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center)
         }
         .frame(maxWidth: .infinity).padding(.top, 40)
     }
 
-    private var emptyTitle: String {
-        if controller.rows.isEmpty { return controller.hasChecked ? "No applications found" : "No apps to show yet" }
+    private var emptyTitle: LocalizedStringKey {
+        if controller.applicationsRows.isEmpty { return controller.hasChecked ? "No applications found" : "No apps to show yet" }
         return "No matching apps"
     }
 
-    private var emptyDetail: String {
-        if controller.rows.isEmpty {
+    private var emptyDetail: LocalizedStringKey {
+        if controller.applicationsRows.isEmpty {
             return controller.phase == .checking ? "Patched is looking through your applications."
                 : (controller.hasChecked ? "Nothing was found in the application folders." : "Choose Check Now to list your applications.")
         }
@@ -196,7 +215,7 @@ public struct AppsListView: View {
     }
 
     private func reveal(_ row: AppUpdateRow) {
-        revealNotice = actions.showInFinder(row) ? nil : "Couldn't find \(row.name). Check again."
+        revealNotice = actions.showInFinder(row) ? nil : String(localized: "Couldn't find \(row.name). Check again.")
     }
 
     private var list: some View {
@@ -230,15 +249,15 @@ private struct AppsListRowView: View {
                         Text(verbatim: badge).font(.caption).foregroundStyle(.secondary)
                             .padding(.horizontal, 6).padding(.vertical, 1)
                             .background(Capsule().fill(Color.secondary.opacity(0.15)))
-                            .accessibilityLabel(Text(verbatim: "Source " + badge))
+                            .accessibilityLabel(Text("Source \(badge)"))
                     }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             Text(verbatim: row.listStatus).font(.callout)
-                .foregroundStyle(row.hasUpdateToShow || row.selfUpdateVersion != nil ? ShellBrand.accent : Color.secondary)
+                .foregroundStyle(row.hasUpdateToShow || row.selfUpdateVersion != nil ? Color.accentColor : Color.secondary)
                 .lineLimit(1).truncationMode(.tail).frame(maxWidth: 220, alignment: .trailing)
-            Menu { menuItems } label: { Image(systemName: "ellipsis.circle").accessibilityLabel(Text(verbatim: "Actions for " + row.name)) }
+            Menu { menuItems } label: { Image(systemName: "ellipsis.circle").accessibilityLabel(Text("Actions for \(row.name)")) }
                 .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
         }
         .padding(.vertical, 8)
@@ -255,5 +274,13 @@ private struct AppsListRowView: View {
         }
         if controller.canIgnore(row) { Button("Ignore") { controller.ignore(id: row.id) } }
         if controller.canStopIgnoring(row) { Button("Stop ignoring") { controller.stopIgnoring(id: row.id) } }
+    }
+}
+
+extension Array where Element == AppUpdateRow {
+    /// Rows with updates first, keeping the existing (alphabetical) order within each group. Display only:
+    /// `rows` and the order Update All works in are unchanged.
+    @_spi(Testing) public var updatesFirst: [AppUpdateRow] {
+        enumerated().sorted { ($0.element.updatesRank, $0.offset) < ($1.element.updatesRank, $1.offset) }.map(\.element)
     }
 }

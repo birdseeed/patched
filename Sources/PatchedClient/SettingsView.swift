@@ -34,17 +34,17 @@ public enum NotificationPermission: Equatable, Sendable { case unknown, notDeter
 
     public var statusText: String {
         switch permission {
-        case .allowed: return "Notifications are on. Patched tells you when updates are available."
-        case .denied: return "Notifications are off, so Patched cannot tell you about updates. You can turn them on in System Settings."
-        case .notDetermined: return "Patched asks for permission the first time it has an update to tell you about."
-        case .unknown: return "Notification status is unavailable."
+        case .allowed: return String(localized: "Notifications are on. Patched tells you when updates are available.")
+        case .denied: return String(localized: "Notifications are off, so Patched cannot tell you about updates. You can turn them on in System Settings.")
+        case .notDetermined: return String(localized: "Patched asks for permission the first time it has an update to tell you about.")
+        case .unknown: return String(localized: "Notification status is unavailable.")
         }
     }
 }
 
-/// The whole Settings screen: Open at login, how checking works, notifications and the version.
+/// The Settings window: Open at login, how checking works, notifications and the version, as a grouped form.
 public struct SettingsView: View {
-    public static let scheduleText = "Patched checks for updates when it opens and every 3 hours. It never installs anything on its own."
+    public static let scheduleText = String(localized: "Patched checks for updates when it opens and every 3 hours. It never installs anything on its own.")
     @ObservedObject private var openAtLogin: OpenAtLoginController
     @ObservedObject private var notifications: NotificationStatusController
     private let openNotificationSettings: () -> Void
@@ -59,25 +59,41 @@ public struct SettingsView: View {
     }
 
     public var body: some View {
-        VStack(alignment: .leading, spacing: 24) {
-            OpenAtLoginView(controller: openAtLogin)
-            VStack(alignment: .leading, spacing: 8) {
-                Text(verbatim: "Checking for updates").font(.title2).accessibilityAddTraits(.isHeader)
+        Form {
+            Section(header: Text("Open at login")) {
+                OpenAtLoginView(controller: openAtLogin)
+            }
+            Section(header: Text("Checking for updates")) {
                 Text(verbatim: Self.scheduleText).fixedSize(horizontal: false, vertical: true)
             }
-            VStack(alignment: .leading, spacing: 8) {
-                Text(verbatim: "Notifications").font(.title2).accessibilityAddTraits(.isHeader)
+            Section(header: Text("Notifications")) {
                 Text(verbatim: notifications.statusText).fixedSize(horizontal: false, vertical: true)
-                Button(action: openNotificationSettings) { Text(verbatim: "Open Notification Settings") }
+                Button(action: openNotificationSettings) { Text("Open Notification Settings") }
             }
             if let version {
-                Text(verbatim: "Version " + version).font(.callout).foregroundStyle(.secondary)
+                Section {
+                    LabeledContent { Text(verbatim: version).textSelection(.enabled) } label: { Text("Version") }
+                }
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .onAppear { notifications.refresh() }
+        .formStyle(.grouped)
+        .onAppear { openAtLogin.refresh(); notifications.refresh() }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            notifications.refresh()
+            openAtLogin.refresh(); notifications.refresh()
         }
+    }
+}
+
+/// The Settings scene's content over the shared session. Showing it reads the login-item and notification
+/// status only; it starts no check.
+public struct NativeClientSettingsView: View {
+    @ObservedObject private var session: NativeClientSession
+    public init(session: NativeClientSession) { self.session = session }
+
+    public var body: some View {
+        SettingsView(openAtLogin: session.openAtLogin, notifications: session.notificationStatus,
+                     version: NativeClientSession.appVersion, openNotificationSettings: { session.openNotificationSettings() })
+            .frame(width: 460)
+            .fixedSize(horizontal: false, vertical: true)
     }
 }

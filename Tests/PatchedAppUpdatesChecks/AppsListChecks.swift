@@ -36,6 +36,24 @@ private func noSourceOutcome(_ name: String, _ reason: NoSourceReason, id: Strin
 }
 
 @MainActor func registerAppsListChecks() {
+    check("apps list: background-only helpers are hidden from both lists unless there is an update to show") {
+        func helper(_ name: String) -> InstalledApp {
+            InstalledApp(name: name, path: "/Fake/\(name).app", bundleID: "com.example.\(name.lowercased())",
+                         shortVersion: "1.0", build: "1.0", isBackgroundOnly: true)
+        }
+        let controller = makeController(outcomes: [
+            outcome(app("Plain"), .upToDate),
+            outcome(helper("QuietHelper"), .noSource, noSource: true),
+            outcome(helper("BusyHelper"), .updateAvailable(offer("2.0")))])
+        await runCheck(controller)
+        let names = controller.rows.map(\.name)
+        try expect(names == ["BusyHelper", "Plain", "QuietHelper"], "rows must still hold every checked app: \(names)")
+        try expect(controller.rows.first { $0.name == "QuietHelper" }?.isBackgroundOnly == true, "flag lost on the row")
+        try expect(controller.updatesRows.map(\.name).sorted() == ["BusyHelper", "Plain"], "Updates list: \(controller.updatesRows.map(\.name))")
+        let listed = AppsListModel.visibleRows(controller.applicationsRows, query: "", filter: .all).map(\.name)
+        try expect(listed == ["BusyHelper", "Plain"], "Applications list: \(listed)")
+        try expect(controller.summary == "2 apps checked, 1 with updates available.", "summary counts hidden rows: \(controller.summary)")
+    }
     check("apps list: rows are sorted by name") {
         let controller = await mixedController()
         let names = AppsListModel.visibleRows(Array(controller.rows.reversed()), query: "", filter: .all).map(\.name)
@@ -226,10 +244,20 @@ private func noSourceOutcome(_ name: String, _ reason: NoSourceReason, id: Strin
 /// The text recognised in a painted view, so a check can say a message really is on screen.
 @MainActor func paintedText<V: View>(_ view: V) throws -> String {
     let png = try paintView(view, width: 820, height: 560)
-    guard let image = NSImage(data: png)?.cgImage(forProposedRect: nil, context: nil, hints: nil) else { throw CheckFailure(description: "no image") }
-    let request = VNRecognizeTextRequest()
-    request.recognitionLevel = .accurate
-    request.usesLanguageCorrection = false
-    try VNImageRequestHandler(cgImage: image).perform([request])
-    return (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }.joined(separator: " | ")
+    guard let painted = NSImage(data: png)?.cgImage(forProposedRect: nil, context: nil, hints: nil) else { throw CheckFailure(description: "no image") }
+    // Text recognition misses some small native button titles at 1x and misreads some digits at 2x, so the
+    // result is what either reading of the same pixels finds.
+    guard let context = CGContext(data: nil, width: painted.width * 2, height: painted.height * 2, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+    else { throw CheckFailure(description: "no context") }
+    context.interpolationQuality = .high
+    context.draw(painted, in: CGRect(x: 0, y: 0, width: painted.width * 2, height: painted.height * 2))
+    guard let enlarged = context.makeImage() else { throw CheckFailure(description: "no enlarged image") }
+    return try [painted, enlarged].map { image in
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.usesLanguageCorrection = false
+        try VNImageRequestHandler(cgImage: image).perform([request])
+        return (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }.joined(separator: " | ")
+    }.joined(separator: " || ")
 }

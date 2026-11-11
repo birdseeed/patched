@@ -98,7 +98,12 @@ assert_key CFBundleShortVersionString "$PACKAGING_VERSION"
 assert_key CFBundleVersion "$(git rev-list --count HEAD)"
 assert_key CFBundleIconFile AppIcon
 assert_key LSMinimumSystemVersion 13.0
-assert_key LSUIElement false
+# A menu-bar app: no Dock icon until one of its windows is open (NativeClientWindowPresence).
+assert_key LSUIElement true
+# Interface text is looked up in the main bundle; English is the development and only localisation.
+assert_key CFBundleDevelopmentRegion en
+localizations=$(/usr/bin/plutil -extract CFBundleLocalizations json -o - "$plist")
+[[ "$localizations" = '["en"]' ]] || { printf 'Info.plist CFBundleLocalizations: expected ["en"], got %s\n' "$localizations" >&2; exit 1; }
 assert_key NSHumanReadableCopyright 'Copyright © 2026 Andy Bridson'
 [[ -x "$app/Contents/MacOS/Patched" && -x "$cli" ]]
 # The brand icon is part of the bundle and is a real icon file with the 1024 pixel representation.

@@ -269,7 +269,8 @@ check("update all continues past a failure and skips open apps without quitting 
     try expect(row("Alpha").status == .upToDate && row("Delta").status == .upToDate, "later apps still updated")
     try expect(row("Bravo").result?.kind == .failure && (row("Bravo").result?.text.contains("hash_mismatch") ?? false), "failure text: \(String(describing: row("Bravo").result))")
     try expect(row("Charlie").status == .updateAvailable && row("Charlie").result?.kind == .info, "open app left updatable")
-    try expect(controller.pendingQuit == nil, "update all must not raise a quit confirmation")
+    // The one question comes after the run, and nothing is quit until it is confirmed.
+    try expect(controller.pendingQuit?.action == .updateOpen && controller.pendingQuit?.paths == [c.path], "update all must ask once about the open app: \(String(describing: controller.pendingQuit))")
     try expect(controller.summary == "2 updated, 1 failed, 1 skipped.", "summary: \(controller.summary)")
 }
 

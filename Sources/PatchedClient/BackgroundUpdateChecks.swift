@@ -274,11 +274,11 @@ public enum LoginItemStatus: Equatable, Sendable { case notRegistered, enabled, 
     public var statusText: String {
         if let errorText { return errorText }
         switch status {
-        case .enabled: return "Patched opens when you log in."
-        case .notRegistered: return "Patched does not open when you log in."
+        case .enabled: return String(localized: "Patched opens when you log in.")
+        case .notRegistered: return String(localized: "Patched does not open when you log in.")
         case .requiresApproval:
-            return "Approve Patched in System Settings > General > Login Items to finish turning this on."
-        case .notFound: return "Open at login is only available from the installed Patched.app."
+            return String(localized: "Approve Patched in System Settings > General > Login Items to finish turning this on.")
+        case .notFound: return String(localized: "Open at login is only available from the installed Patched.app.")
         }
     }
 
@@ -287,7 +287,7 @@ public enum LoginItemStatus: Equatable, Sendable { case notRegistered, enabled, 
     public func setEnabled(_ on: Bool) {
         errorText = nil
         do { if on { try item.register() } else { try item.unregister() } }
-        catch { errorText = "Couldn't change Open at login: \(error.localizedDescription)" }
+        catch { errorText = String(localized: "Couldn't change Open at login: \(error.localizedDescription)") }
         refresh()
     }
 

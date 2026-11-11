@@ -21,8 +21,10 @@ public struct AppUpdatesView: View {
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 12) {
+            // The window title already says "Updates", so the summary leads the screen.
             HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text(verbatim: "Updates").font(.title2).accessibilityAddTraits(.isHeader)
+                Text(verbatim: controller.summary).font(.body.weight(.semibold))
+                    .fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 8)
                 if controller.phase == .checking {
                     ProgressView().controlSize(.small)
@@ -31,9 +33,7 @@ public struct AppUpdatesView: View {
                 button("Update All", enabled: controller.canUpdateAll, prominent: false) { controller.updateAll() }
                 button(controller.phase == .checking ? "Checking…" : (controller.hasChecked ? "Check again" : "Check for Updates"),
                        enabled: controller.canCheck, prominent: true) { controller.check() }
-                    .keyboardShortcut("r", modifiers: [.command])
             }
-            Text(verbatim: controller.summary).font(.body.weight(.semibold))
             if let notice = controller.notice {
                 Text(verbatim: notice).font(.callout).foregroundStyle(.secondary)
             }
@@ -45,7 +45,7 @@ public struct AppUpdatesView: View {
             if let own = controller.selfUpdate {
                 controller.selfUpdateLine(own)
                     .padding(.horizontal, 10).padding(.vertical, 6)
-                    .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(ShellBrand.accent.opacity(0.12)))
+                    .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.accentColor.opacity(0.12)))
             }
             if let failure = controller.ignoreEditFailure {
                 IgnoreEditFailureBanner(message: failure) { controller.dismissIgnoreEditFailure() }
@@ -59,7 +59,7 @@ public struct AppUpdatesView: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
-                        ForEach(controller.updatesRows) { row in
+                        ForEach(controller.updatesRows.updatesFirst) { row in
                             AppUpdateRowView(row: row, controller: controller,
                                              highlighted: controller.focusedRowID == row.id)
                                 .id(row.id)
@@ -81,7 +81,7 @@ public struct AppUpdatesView: View {
         .padding(20)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .task { await controller.refreshInstallerState() }
-        .alert(Text(verbatim: "App is open"),
+        .alert(Text("App is open"),
                isPresented: Binding(get: { controller.pendingQuit != nil }, set: { if !$0 { controller.cancelQuit() } }),
                presenting: controller.pendingQuit) { _ in
             Button("Cancel", role: .cancel) { controller.cancelQuit() }
@@ -98,7 +98,7 @@ public struct AppUpdatesView: View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: "exclamationmark.octagon").accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 4) {
-                Text(verbatim: "Updates are paused: a transaction record cannot be read, and it could concern any app. Choose Recover, or inspect the listed file.")
+                Text("Updates are paused: a transaction record cannot be read, and it could concern any app. Choose Recover, or inspect the listed file.")
                     .fixedSize(horizontal: false, vertical: true)
                 ForEach(controller.unreadableJournals, id: \.self) { path in
                     Text(verbatim: path).font(.footnote).textSelection(.enabled)
@@ -114,7 +114,7 @@ public struct AppUpdatesView: View {
     private var recoverBanner: some View {
         HStack(spacing: 10) {
             Image(systemName: "exclamationmark.triangle").accessibilityHidden(true)
-            Text(verbatim: "An earlier update did not finish (\(controller.unfinishedCount)). Recover to finish or undo it.")
+            Text("An earlier update did not finish (\(controller.unfinishedCount)). Recover to finish or undo it.")
                 .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 8)
             button("Recover", enabled: !controller.isWorking && controller.phase == .idle, prominent: true) { controller.recover() }
@@ -123,9 +123,9 @@ public struct AppUpdatesView: View {
         .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.orange.opacity(0.18)))
     }
 
-    private func button(_ title: String, enabled: Bool, prominent: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) { Text(verbatim: title) }
-            .buttonStyle(ClientButtonStyle(enabled: enabled, prominent: prominent))
+    private func button(_ title: LocalizedStringKey, enabled: Bool, prominent: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) { Text(title) }
+            .borderedButton(prominent: prominent)
             .disabled(!enabled)
     }
 }
@@ -136,7 +136,7 @@ private struct AppUpdateRowView: View {
     var highlighted = false
 
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
+        HStack(alignment: .center, spacing: 12) {
             icon.accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 3) {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -146,7 +146,7 @@ private struct AppUpdateRowView: View {
                         Text(verbatim: badge).font(.caption).foregroundStyle(.secondary)
                             .padding(.horizontal, 6).padding(.vertical, 1)
                             .background(Capsule().fill(Color.secondary.opacity(0.15)))
-                            .accessibilityLabel(Text(verbatim: "Source " + badge))
+                            .accessibilityLabel(Text("Source \(badge)"))
                     }
                 }
                 statusLine
@@ -173,24 +173,24 @@ private struct AppUpdateRowView: View {
             if controller.canIgnore(row) {
                 Menu {
                     Button("Ignore") { controller.ignore(id: row.id) }
-                } label: { Image(systemName: "ellipsis.circle").accessibilityLabel(Text(verbatim: "More actions for " + row.name)) }
+                } label: { Image(systemName: "ellipsis.circle").accessibilityLabel(Text("More actions for \(row.name)")) }
                     .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
             }
         }
         .padding(.vertical, 10)
         .background(RoundedRectangle(cornerRadius: 8, style: .continuous)
-            .fill(highlighted ? ShellBrand.accent.opacity(0.12) : Color.clear))
+            .fill(highlighted ? Color.accentColor.opacity(0.12) : Color.clear))
         .accessibilityElement(children: .contain)
     }
 
     private var icon: some View {
-        AppIconView(path: row.path, fallback: row.icon, provider: controller.iconProvider, size: 32, revision: row.installedVersion)
+        AppIconView(path: row.path, fallback: row.icon, provider: controller.iconProvider, size: 40, revision: row.installedVersion)
     }
 
     @ViewBuilder private var statusLine: some View {
         switch row.activity {
         case .checking:
-            HStack(spacing: 6) { ProgressView().controlSize(.small); Text(verbatim: "Checking…") }.font(.callout)
+            HStack(spacing: 6) { ProgressView().controlSize(.small); Text("Checking…") }.font(.callout)
         case .updating:
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 6) {
@@ -199,15 +199,15 @@ private struct AppUpdateRowView: View {
                     } else {
                         ProgressView().controlSize(.small)
                     }
-                    Text(verbatim: row.progressText ?? "Updating…")
-                        .accessibilityLabel(Text(verbatim: row.name + ": " + (row.progressText ?? "Updating")))
+                    Text(verbatim: row.progressText ?? String(localized: "Updating…"))
+                        .accessibilityLabel(Text(verbatim: row.name + ": " + (row.progressText ?? String(localized: "Updating"))))
                 }
             }.font(.callout)
         case .rollingBack:
-            HStack(spacing: 6) { ProgressView().controlSize(.small); Text(verbatim: "Rolling back…") }.font(.callout)
+            HStack(spacing: 6) { ProgressView().controlSize(.small); Text("Rolling back…") }.font(.callout)
         case .idle:
             Text(verbatim: row.statusText).font(.callout)
-                .foregroundStyle(row.status == .updateAvailable || row.status == .appStoreUpdate ? ShellBrand.accent : Color.secondary)
+                .foregroundStyle(row.status == .updateAvailable || row.status == .appStoreUpdate ? Color.accentColor : Color.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -218,35 +218,35 @@ private struct AppUpdateRowView: View {
                 // Patched cannot update this app. The click opens it, so its own updater can.
                 let enabled = controller.canOpenApp(row)
                 Button(action: { controller.openApp(id: row.id) }) { Text(verbatim: row.openAppActionTitle) }
-                    .buttonStyle(ClientButtonStyle(enabled: enabled, prominent: true))
+                    .buttonStyle(.borderedProminent)
                     .disabled(!enabled)
                     .accessibilityLabel(Text(verbatim: row.openAppActionTitle))
             } else if row.status == .updateAvailable || row.status == .notInstallable || row.status == .packageUnsupported {
                 let enabled = controller.canUpdate(row)
                 Button(action: { controller.update(id: row.id) }) { Text(verbatim: row.updateActionTitle) }
-                    .buttonStyle(ClientButtonStyle(enabled: enabled, prominent: true))
+                    .buttonStyle(.borderedProminent)
                     .disabled(!enabled)
-                    .accessibilityLabel(Text(verbatim: "Update " + row.name))
+                    .accessibilityLabel(Text("Update \(row.name)"))
             }
             if controller.canCancelUpdate(row) {
-                Button(action: { controller.cancelUpdate(id: row.id) }) { Text(verbatim: "Cancel") }
-                    .buttonStyle(ClientButtonStyle(enabled: true, prominent: false))
-                    .accessibilityLabel(Text(verbatim: "Cancel updating " + row.name))
+                Button(action: { controller.cancelUpdate(id: row.id) }) { Text("Cancel") }
+                    .buttonStyle(.bordered)
+                    .accessibilityLabel(Text("Cancel updating \(row.name)"))
             }
             if row.isAppStoreUpdate || row.isAppStoreUnconfirmed {
                 // The App Store installs these; Patched only opens it, on this click.
-                Button(action: { controller.openInAppStore(id: row.id) }) { Text(verbatim: "Open in App Store") }
-                    .buttonStyle(ClientButtonStyle(enabled: row.activity == .idle, prominent: row.isAppStoreUpdate))
+                Button(action: { controller.openInAppStore(id: row.id) }) { Text("Open in App Store") }
+                    .borderedButton(prominent: row.isAppStoreUpdate)
                     .disabled(row.activity != .idle)
-                    .accessibilityLabel(Text(verbatim: "Open " + row.name + " in the App Store"))
+                    .accessibilityLabel(Text("Open \(row.name) in the App Store"))
             }
             if let backup = row.rollbackVersion {
                 let enabled = controller.canRollBack(row)
-                Button(action: { controller.rollBack(id: row.id) }) { Text(verbatim: "Roll back") }
-                    .buttonStyle(ClientButtonStyle(enabled: enabled, prominent: false))
+                Button(action: { controller.rollBack(id: row.id) }) { Text("Roll back") }
+                    .buttonStyle(.bordered)
                     .disabled(!enabled)
-                    .accessibilityLabel(Text(verbatim: "Roll back " + row.name + " to " + backup))
-                    .help(Text(verbatim: "Restores version " + backup))
+                    .accessibilityLabel(Text("Roll back \(row.name) to \(backup)"))
+                    .help(Text("Restores version \(backup)"))
             }
         }
     }
@@ -260,14 +260,14 @@ private struct InstallerWaitSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(verbatim: "Finish in Apple's Installer").font(.headline).accessibilityAddTraits(.isHeader)
-            Text(verbatim: "Finish the installation of \(wait.name) in Apple's Installer, then press Done.")
+            Text("Finish in Apple's Installer").font(.headline).accessibilityAddTraits(.isHeader)
+            Text("Finish the installation of \(wait.name) in Apple's Installer, then press Done.")
                 .fixedSize(horizontal: false, vertical: true)
             Text(verbatim: wait.message).font(.footnote).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             HStack {
                 Spacer()
-                Button(action: done) { Text(verbatim: "Done") }
-                    .buttonStyle(ClientButtonStyle(enabled: true, prominent: true))
+                Button(action: done) { Text("Done") }
+                    .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.defaultAction)
             }
         }
@@ -286,8 +286,8 @@ struct IgnoreEditFailureBanner: View {
             Image(systemName: "exclamationmark.triangle").accessibilityHidden(true)
             Text(verbatim: message).fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
             Spacer(minLength: 8)
-            Button(action: dismiss) { Text(verbatim: "Dismiss") }
-                .buttonStyle(ClientButtonStyle(enabled: true, prominent: false))
+            Button(action: dismiss) { Text("Dismiss") }
+                .buttonStyle(.bordered)
         }
         .padding(10)
         .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.orange.opacity(0.16)))
@@ -302,14 +302,37 @@ struct CatalogueErrorBanner: View {
     var body: some View {
         HStack(spacing: 10) {
             Image(systemName: "exclamationmark.octagon").accessibilityHidden(true)
-            Text(verbatim: message + ". Checking and updating are paused.").fixedSize(horizontal: false, vertical: true)
+            Text("\(message). Checking and updating are paused.").fixedSize(horizontal: false, vertical: true)
                 .textSelection(.enabled)
             Spacer(minLength: 8)
-            Button(action: retry) { Text(verbatim: "Try again") }
-                .buttonStyle(ClientButtonStyle(enabled: retryEnabled, prominent: false))
+            Button(action: retry) { Text("Try again") }
+                .buttonStyle(.bordered)
                 .disabled(!retryEnabled)
         }
         .padding(10)
         .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.red.opacity(0.16)))
+    }
+}
+
+extension View {
+    /// The native bordered button style; prominent (filled with the accent colour) for the one primary action.
+    @ViewBuilder func borderedButton(prominent: Bool) -> some View {
+        if prominent { buttonStyle(.borderedProminent) } else { buttonStyle(.bordered) }
+    }
+}
+
+/// The app menu's Updates menu: Check Now (⌘R) and Update All, with the same actions and enabled rules as the
+/// Updates screen's buttons. Choosing one is the explicit click; showing the menu starts nothing.
+public struct NativeClientUpdatesCommands: View {
+    @ObservedObject private var controller: AppUpdatesController
+
+    public init(session: NativeClientSession) { controller = session.appUpdates }
+
+    public var body: some View {
+        Button("Check Now") { controller.check() }
+            .keyboardShortcut("r", modifiers: .command)
+            .disabled(!controller.canCheck)
+        Button("Update All") { controller.updateAll() }
+            .disabled(!controller.canUpdateAll)
     }
 }

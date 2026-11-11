@@ -306,24 +306,57 @@ final class FakeVerifier: CodeVerifying, @unchecked Sendable {
         try expect(!installer.recorder.events.contains { $0.hasPrefix("update") }, "Check Now installed: \(installer.recorder.events)")
     }
 
-    check("menu view: no legacy summary or Scan block; list, Update All and the four items are present") {
-        let menu = try String(contentsOfFile: sourcesRoot() + "/PatchedClient/NativeClientMenu.swift", encoding: .utf8)
-        let marker = "public struct NativeClientMenuView"
-        let view = String(menu[menu.range(of: marker)!.lowerBound...])
-        for forbidden in ["summary.title", "inventoryStatus", "scanTitle", "performMenuAction(.scan)", "Choose Scan", "route(.applications)", "route(.activity)"] {
-            try expect(!view.contains(forbidden), "legacy menu content still rendered: \(forbidden)")
+    check("menu: native items: status lines, one item per update, Update All, then Open, Check Now, Settings and Quit") {
+        let outcomes = (0..<10).map { outcome(app("App\($0)"), .updateAvailable(offer("2.0"))) }
+        let controller = makeController(outcomes: outcomes)
+        await runCheck(controller)
+        let session = NativeClientSession(navigation: ShellNavigation(destination: .support), appUpdates: controller, urlOpener: RecordingOpener())
+        let items = session.menuItems
+        try expect(items.first?.kind == .text && items.first?.title == "10 updates available", "header: \(String(describing: items.first))")
+        try expect(items.contains { $0.kind == .text && $0.title.hasPrefix("Checked ") }, "no checked time")
+        let rows = items.filter { if case .showUpdate? = $0.action { return true }; return false }
+        try expect(rows.count == NativeClientMenuUpdates.rowCap && rows[0].title == "App0  1.0 → 2.0" && rows[0].iconPath == "/Fake/App0.app"
+                   && rows[0].action == .showUpdate(id: "/Fake/App0.app"), "rows: \(rows.map(\.title))")
+        try expect(items.first { $0.title == "and 2 more…" }?.action == .openUpdates, "no 'and 2 more…'")
+        let all = try items.first { $0.action == .updateAll }.unwrap()
+        try expect(all.title == "Update All (10)" && all.enabled, "Update All: \(all)")
+        let commands = items.compactMap { item -> String? in
+            guard let action = item.action, [.openUpdates, .checkNow, .settings, .quit].contains(action), item.title != "and 2 more…" else { return nil }
+            return item.title + (item.shortcut.map { " ⌘" + String($0) } ?? "")
         }
-        for needed in ["menuUpdates()", "session.showUpdate(id: row.id)", "and \\(list.moreCount) more", "updateAllSection", "Open Patched",
-                       "Check Now", "Settings…", "Quit Patched", "backgroundStatus", "provider: updates.iconProvider"] {
-            try expect(view.contains(needed), "menu lacks \(needed)")
+        try expect(commands == ["Open Patched", "Check Now ⌘r", "Settings… ⌘,", "Quit Patched ⌘q"], "commands: \(commands)")
+        try expect(items.last?.kind == .text && items.last?.title == session.menuText.backgroundStatus, "background status last")
+        try expect(items.filter { $0.kind == .separator }.count == 3, "separators: \(items.map(\.title))")
+        // A native NSMenu, not a hand-drawn window.
+        let app = try String(contentsOfFile: sourcesRoot() + "/PatchedApp/PatchedApp.swift", encoding: .utf8)
+        try expect(app.contains(".menuBarExtraStyle(.menu)") && !app.contains(".menuBarExtraStyle(.window)"), "menu bar extra is not a menu")
+        let menu = try String(contentsOfFile: sourcesRoot() + "/PatchedClient/NativeClientMenu.swift", encoding: .utf8)
+        for custom in ["MenuHoverButton", "MenuItemLabel", ".onHover", "EdgeInsets(", ".frame(width: 320"] {
+            try expect(!menu.contains(custom), "menu still hand-draws \(custom)")
         }
     }
 
-    check("menu view: 6 pt above the first line, 12 pt at the sides and bottom") {
-        let menu = try String(contentsOfFile: sourcesRoot() + "/PatchedClient/NativeClientMenu.swift", encoding: .utf8)
-        let view = String(menu[menu.range(of: "public struct NativeClientMenuView")!.lowerBound...])
-        try expect(view.contains(".padding(EdgeInsets(top: 6, leading: 12, bottom: 12, trailing: 12))"), "menu padding")
-        try expect(!view.contains("        .padding(12)\n"), "menu still pads 12 pt all round")
+    check("menu: each command does only its own thing; Settings… opens the Settings window, not the main window") {
+        let installer = FakeInstaller()
+        let controller = makeController(outcomes: [outcome(app("Alpha"), .updateAvailable(offer("2.0")))], installer: installer)
+        let navigation = ShellNavigation(destination: .applications)
+        let session = NativeClientSession(navigation: navigation, appUpdates: controller, urlOpener: RecordingOpener())
+        await runCheck(controller)
+        var windows = 0, settings = 0, asked = 0
+        let menu = NativeClientMenuView(session: session, openWindow: { windows += 1 }, openSettings: { settings += 1 },
+                                        confirmSelfUpdate: { _ in asked += 1; return true })
+        let events = installer.recorder.events
+        menu.perform(.settings)
+        try expect(settings == 1 && windows == 0 && navigation.destination == .applications, "Settings…: \(settings) \(windows)")
+        menu.perform(.showUpdate(id: "/Fake/Alpha.app"))
+        try expect(windows == 1 && navigation.destination == .updates && controller.focusedRowID == "/Fake/Alpha.app", "row click")
+        navigation.select(.applications)
+        menu.perform(.openUpdates)
+        try expect(windows == 2 && navigation.destination == .updates, "Open Patched")
+        menu.perform(.checkNow); await controller.waitUntilIdle()
+        try expect(windows == 2 && installer.recorder.events.filter { $0 == "check" }.count == events.filter { $0 == "check" }.count + 1, "Check Now")
+        try expect(!installer.recorder.events.contains { $0.hasPrefix("update") } && asked == 0 && controller.updateAllInvocations == 0,
+                   "a menu item installed: \(installer.recorder.events)")
     }
 
     check("menu: the checked time is dated unless it is today, in the user's locale") {

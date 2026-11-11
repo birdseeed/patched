@@ -3,6 +3,8 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleName</key><string>Patched</string>
+    <key>CFBundleDevelopmentRegion</key><string>en</string>
+    <key>CFBundleLocalizations</key><array><string>en</string></array>
     <key>CFBundleDisplayName</key><string>Patched</string>
     <key>CFBundleIdentifier</key><string>im.patched.app</string>
     <key>CFBundleExecutable</key><string>Patched</string>
@@ -11,7 +13,7 @@
     <key>CFBundleShortVersionString</key><string>@VERSION@</string>
     <key>CFBundleVersion</key><string>@BUILD_NUMBER@</string>
     <key>LSMinimumSystemVersion</key><string>13.0</string>
-    <key>LSUIElement</key><false/>
+    <key>LSUIElement</key><true/>
     <key>NSHumanReadableCopyright</key><string>Copyright © 2026 Andy Bridson</string>
 </dict>
 </plist>

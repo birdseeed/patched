@@ -22,7 +22,7 @@ import UserNotifications
     /// The "updates available" category: an Update All button. It does not bring Patched to the front, and it
     /// needs the Mac unlocked. Only this one notification carries it, never the summary.
     public static func makeCategory() -> UNNotificationCategory {
-        let action = UNNotificationAction(identifier: updateAllActionIdentifier, title: "Update All",
+        let action = UNNotificationAction(identifier: updateAllActionIdentifier, title: String(localized: "Update All"),
                                           options: [.authenticationRequired])
         return UNNotificationCategory(identifier: categoryIdentifier, actions: [action],
                                       intentIdentifiers: [], options: [])
@@ -31,7 +31,7 @@ import UserNotifications
     /// The installable "Patched X is available" category: one Update… button that brings Patched to the front
     /// with the confirmation showing. Confirming is a separate click in Patched.
     public static func makeSelfUpdateCategory() -> UNNotificationCategory {
-        let action = UNNotificationAction(identifier: selfUpdateActionIdentifier, title: "Update…",
+        let action = UNNotificationAction(identifier: selfUpdateActionIdentifier, title: String(localized: "Update…"),
                                           options: [.foreground, .authenticationRequired])
         return UNNotificationCategory(identifier: selfUpdateCategoryIdentifier, actions: [action],
                                       intentIdentifiers: [], options: [])
@@ -115,7 +115,7 @@ import UserNotifications
         guard runsFromAppBundle, !updates.isEmpty else { completion(false); return }
         activate()
         let content = UNMutableNotificationContent()
-        content.title = updates.count == 1 ? "1 app update available" : "\(updates.count) app updates available"
+        content.title = updates.count == 1 ? String(localized: "1 app update available") : String(localized: "\(updates.count) app updates available")
         content.body = Self.body(updates)
         content.threadIdentifier = Self.requestIdentifier
         content.categoryIdentifier = Self.categoryIdentifier
@@ -156,15 +156,15 @@ import UserNotifications
     }
 
     nonisolated public static func selfUpdateBody(installable: Bool) -> String {
-        installable ? "Choose Update… to install it after you confirm. Nothing is installed automatically."
-                    : "Open Patched to see where to download it. Nothing is installed automatically."
+        installable ? String(localized: "Choose Update… to install it after you confirm. Nothing is installed automatically.")
+                    : String(localized: "Open Patched to see where to download it. Nothing is installed automatically.")
     }
 
     /// Posts the summary only when notifications are already authorised; never asks.
     public func notify(summary: UpdateAllSummary) {
         guard runsFromAppBundle else { return }
         let content = UNMutableNotificationContent()
-        content.title = "Update All finished"
+        content.title = String(localized: "Update All finished")
         content.body = summary.text
         content.threadIdentifier = Self.requestIdentifier
         Task { @MainActor in
@@ -180,13 +180,13 @@ import UserNotifications
     @_spi(Testing) nonisolated public static func body(_ updates: [AvailableUpdate]) -> String {
         func list(_ items: [AvailableUpdate], limit: Int) -> String {
             let names = items.prefix(limit).map { "\($0.name) \($0.version)" }
-            let more = items.count > limit ? " and \(items.count - limit) more" : ""
+            let more = items.count > limit ? String(localized: " and \(items.count - limit) more") : ""
             return names.joined(separator: ", ") + more
         }
         let own = updates.filter { !$0.appStore }, store = updates.filter(\.appStore)
         guard !store.isEmpty else { return list(own, limit: 5) }
-        let storePart = list(store, limit: own.isEmpty ? 5 : 2) + " in the App Store"
-        return own.isEmpty ? storePart : list(own, limit: 3) + ", plus " + storePart
+        let storePart = String(localized: "\(list(store, limit: own.isEmpty ? 5 : 2)) in the App Store")
+        return own.isEmpty ? storePart : String(localized: "\(list(own, limit: 3)), plus \(storePart)")
     }
 
     public func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {

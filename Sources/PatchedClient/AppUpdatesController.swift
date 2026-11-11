@@ -134,7 +134,8 @@ extension InstalledApp {
                   electronConfig: app.vendorMetadata.electronConfigBytes,
                   isAppStore: FileManager.default.fileExists(atPath: app.path + "/Contents/_MASReceipt"),
                   isWrappedIOSApp: app.isWrappedIOSApp,
-                  sparklePublicEDKey: app.vendorMetadata.sparklePublicEDKey)
+                  sparklePublicEDKey: app.vendorMetadata.sparklePublicEDKey,
+                  isBackgroundOnly: app.vendorMetadata.backgroundOnly)
     }
 }
 
@@ -174,6 +175,8 @@ public struct AppUpdateRow: Identifiable, Equatable, Sendable {
     public let name: String
     public let path: String
     public let bundleID: String?
+    /// The app is a `LSBackgroundOnly` helper. The lists hide it unless there is an update to show.
+    public internal(set) var isBackgroundOnly = false
     public let icon: LocalInstalledIcon?
     public internal(set) var installedVersion: String
     public internal(set) var latestVersion: String?
@@ -196,8 +199,8 @@ public struct AppUpdateRow: Identifiable, Equatable, Sendable {
     public internal(set) var progress: UpdateProgress?
     /// Cancel was pressed; the update is stopping.
     public internal(set) var cancelRequested = false
-    public static let offlineRecheckNote = "Couldn't re-check (offline)"
-    public static let rollbackUnsupportedCaption = "Roll back isn't supported for installer packages."
+    public static let offlineRecheckNote = String(localized: "Couldn't re-check (offline)")
+    public static let rollbackUnsupportedCaption = String(localized: "Roll back isn't supported for installer packages.")
     public internal(set) var privilege: Privilege = .standard
     /// The app needs admin rights to replace and the experimental admin path is off, so Patched cannot update
     /// it. The row offers "Open <app>" instead of Update, for the app's own updater.
@@ -207,14 +210,14 @@ public struct AppUpdateRow: Identifiable, Equatable, Sendable {
     /// stays a no-source row, so it is never installable and never part of Update All.
     public internal(set) var selfUpdateVersion: String?
 
-    /// "Downloading 12.3 of 48.0 MB", "Verifying…" or "Installing…" while an update runs; nil before it reports anything.
+    /// "Downloading 12.3 of 48.0 MB", String(localized: "Verifying…") or String(localized: "Installing…") while an update runs; nil before it reports anything.
     public var progressText: String? {
-        if cancelRequested { return "Cancelling…" }
+        if cancelRequested { return String(localized: "Cancelling…") }
         guard let progress else { return nil }
         switch progress {
         case .downloading(let received, let expected): return Self.downloadText(received: received, expected: expected)
-        case .verifying: return "Verifying…"
-        case .installing: return "Installing…"
+        case .verifying: return String(localized: "Verifying…")
+        case .installing: return String(localized: "Installing…")
         }
     }
     /// Fraction downloaded (0...1), when the total is known; nil otherwise.
@@ -229,9 +232,11 @@ public struct AppUpdateRow: Identifiable, Equatable, Sendable {
         let basis = Double(expected ?? received)
         let (name, size) = units.first { basis >= $0.1 } ?? ("KB", 1e3)
         if let expected, expected > 0 {
-            return "Downloading \(number(Double(min(received, expected)) / size)) of \(number(Double(expected) / size)) \(name)"
+            let got = number(Double(min(received, expected)) / size), total = number(Double(expected) / size)
+            return String(localized: "Downloading \(got) of \(total) \(name)")
         }
-        return "Downloading \(number(Double(received) / size)) \(name)"
+        let got = number(Double(received) / size)
+        return String(localized: "Downloading \(got) \(name)")
     }
 
     public var hasUpdate: Bool { status == .updateAvailable }
@@ -246,9 +251,9 @@ public struct AppUpdateRow: Identifiable, Equatable, Sendable {
     /// The row's Update button.
     public var updateActionTitle: String {
         switch privilege {
-        case .standard: return "Update"
-        case .admin: return "Update (admin)"
-        case .installer: return "Update (installer)"
+        case .standard: return String(localized: "Update")
+        case .admin: return String(localized: "Update (admin)")
+        case .installer: return String(localized: "Update (installer)")
         }
     }
     public var canRollBack: Bool { rollbackVersion != nil }
@@ -259,44 +264,44 @@ public struct AppUpdateRow: Identifiable, Equatable, Sendable {
     }
     /// Short note for lists where the row is not a plain installable update.
     public var kindNote: String? {
-        if isAppStoreUpdate { return "App Store" }
-        if status == .packageUnsupported { return "Installer package" }
+        if isAppStoreUpdate { return String(localized: "App Store") }
+        if status == .packageUnsupported { return String(localized: "Installer package") }
         if status == .notInstallable {
             switch outcome?.edSignatureBlock {
-            case .keyMalformed?: return "Bad key"
-            case .signatureMissing?, .signatureMalformed?: return "Unsigned"
-            case nil: return "Unconfirmed"
+            case .keyMalformed?: return String(localized: "Bad key")
+            case .signatureMissing?, .signatureMalformed?: return String(localized: "Unsigned")
+            case nil: return String(localized: "Unconfirmed")
             }
         }
-        if needsManualAdmin || privilege == .admin { return "Needs admin" }
+        if needsManualAdmin || privilege == .admin { return String(localized: "Needs admin") }
         return nil
     }
-    public var openAppActionTitle: String { "Open " + name }
-    public static let needsAdminCaption = "Needs admin rights. Open the app and use its own updater."
+    public var openAppActionTitle: String { String(localized: "Open \(name)") }
+    public static let needsAdminCaption = String(localized: "Needs admin rights. Open the app and use its own updater.")
 
     public var statusText: String {
         switch status {
-        case .pending: return "Checking…"
-        case .upToDate: return "Up to date"
+        case .pending: return String(localized: "Checking…")
+        case .upToDate: return String(localized: "Up to date")
         case .updateAvailable:
             switch privilege {
-            case .standard: return "Update available"
-            case .admin: return "Update available. Needs admin rights: macOS asks for your password for this update."
-            case .installer: return "Update available as an installer package. Apple's Installer will open and ask for your password."
+            case .standard: return String(localized: "Update available")
+            case .admin: return String(localized: "Update available. Needs admin rights: macOS asks for your password for this update.")
+            case .installer: return String(localized: "Update available as an installer package. Apple's Installer will open and ask for your password.")
             }
         case .notInstallable:
             if let block = outcome?.edSignatureBlock { return block.message }
             if case .homebrewCask? = outcome?.source, outcome?.lowConfidence == true {
-                return "Homebrew (unconfirmed) — add a catalogue entry to enable updates"
+                return String(localized: "Homebrew (unconfirmed) — add a catalogue entry to enable updates")
             }
-            return "Update found, but the source isn't confirmed. Add a catalogue entry to enable updates."
-        case .packageUnsupported: return "Installer package updates are turned off"
-        case .appStoreUpdate: return "Update in the App Store"
+            return String(localized: "Update found, but the source isn't confirmed. Add a catalogue entry to enable updates.")
+        case .packageUnsupported: return String(localized: "Installer package updates are turned off")
+        case .appStoreUpdate: return String(localized: "Update in the App Store")
         case .noSource:
-            if let selfUpdateVersion, outcome?.noSourceReason == .thisApp { return "Update to " + selfUpdateVersion }
-            return outcome?.noSourceReason?.rowLabel ?? "No update source"
-        case .refused(let message): return "Can't check: " + message
-        case .needsRecheck: return "Check again to refresh."
+            if let selfUpdateVersion, outcome?.noSourceReason == .thisApp { return String(localized: "Update to \(selfUpdateVersion)") }
+            return outcome?.noSourceReason?.rowLabel ?? String(localized: "No update source")
+        case .refused(let message): return String(localized: "Can't check: \(message)")
+        case .needsRecheck: return String(localized: "Check again to refresh.")
         }
     }
 }
@@ -305,10 +310,10 @@ extension NoSourceReason {
     /// The row's status line for an app with no update source.
     var rowLabel: String {
         switch self {
-        case .noPublicFeed: return "No public update feed"
-        case .appStoreNotListed: return "Updates through the App Store"
-        case .ignored: return "Ignored"
-        case .thisApp: return "This app"
+        case .noPublicFeed: return String(localized: "No public update feed")
+        case .appStoreNotListed: return String(localized: "Updates through the App Store")
+        case .ignored: return String(localized: "Ignored")
+        case .thisApp: return String(localized: "This app")
         }
     }
 }
@@ -324,7 +329,7 @@ public struct SelfUpdate: Equatable, Sendable {
     public init(version: String, url: URL, assets: PatchedReleaseAssets? = nil) {
         self.version = version; self.url = url; self.assets = assets
     }
-    public var text: String { "Patched \(version) is available" }
+    public var text: String { String(localized: "Patched \(version) is available") }
     /// Identity for "have I told the user about this" (one notification per new version).
     @_spi(Testing) public var key: String { "im.patched.self-update\u{1F}" + version }
 }
@@ -352,11 +357,11 @@ public enum SelfInstallState: Equatable, Sendable {
     public var text: String? {
         switch self {
         case .idle: return nil
-        case .confirming(let version): return "Update Patched to \(version)? Patched will quit and reopen."
-        case .working(let version, .downloading): return "Downloading Patched \(version)…"
-        case .working(_, .verifying): return "Checking the release signature…"
-        case .working(let version, .installing): return "Installing Patched \(version)…"
-        case .reopening(let version): return "Reopening Patched \(version)…"
+        case .confirming(let version): return String(localized: "Update Patched to \(version)? Patched will quit and reopen.")
+        case .working(let version, .downloading): return String(localized: "Downloading Patched \(version)…")
+        case .working(_, .verifying): return String(localized: "Checking the release signature…")
+        case .working(let version, .installing): return String(localized: "Installing Patched \(version)…")
+        case .reopening(let version): return String(localized: "Reopening Patched \(version)…")
         case .failed(let message): return message
         }
     }
@@ -368,13 +373,20 @@ public enum SelfInstallState: Equatable, Sendable {
 }
 
 public struct AppUpdateQuitConfirmation: Equatable, Sendable {
-    public enum Action: Equatable, Sendable { case update, rollback, recover }
+    public enum Action: Equatable, Sendable { case update, rollback, recover, updateOpen }
     public let path: String
     public let action: Action
+    /// For `.updateOpen`: the apps an Update All run skipped because they were open, in run order.
+    public let paths: [String]
     public let message: String
     /// The controller state this confirmation was raised in; any later check, action or row change voids it.
     let epoch: Int
     let installedVersion: String?
+
+    init(path: String, action: Action, paths: [String] = [], message: String, epoch: Int, installedVersion: String?) {
+        self.path = path; self.action = action; self.paths = paths; self.message = message
+        self.epoch = epoch; self.installedVersion = installedVersion
+    }
 }
 
 /// Progress of an Update All run: apps finished, apps in the run, and whether Stop was chosen.
@@ -383,7 +395,7 @@ public struct UpdateAllProgress: Equatable, Sendable {
     public let total: Int
     public var stopping: Bool
     public var text: String {
-        stopping ? "Stopping after this app…" : "Updating \(min(done + 1, total)) of \(total)…"
+        stopping ? String(localized: "Stopping after this app…") : String(localized: "Updating \(min(done + 1, total)) of \(total)…")
     }
 }
 
@@ -396,25 +408,29 @@ public struct UpdateAllSummary: Equatable, Sendable {
     public let appStoreFailed: Int
     /// Scoped runs only: apps whose offer, on recheck, was no longer the one the notification advertised.
     public let changed: Int
+    /// The paths skipped because the app was open, in run order. Not part of `text`. Empty when Stop was chosen.
+    public let openPaths: [String]
     public init(updated: Int, failed: Int, skippedOpen: Int, needsAdmin: Int, stopped: Int = 0, changed: Int = 0,
-                appStore: Int = 0, appStoreFailed: Int = 0) {
+                appStore: Int = 0, appStoreFailed: Int = 0, openPaths: [String] = []) {
+        self.openPaths = openPaths
         self.updated = updated; self.failed = failed; self.skippedOpen = skippedOpen
         self.needsAdmin = needsAdmin; self.stopped = stopped; self.changed = changed; self.appStore = appStore
         self.appStoreFailed = appStoreFailed
     }
-    private static func apps(_ n: Int) -> String { n == 1 ? "1 app" : "\(n) apps" }
+    private static func apps(_ n: Int) -> String { n == 1 ? String(localized: "1 app") : String(localized: "\(n) apps") }
     /// "Updated 3 apps; 1 skipped because it is open; 1 needs admin"
     public var text: String {
         let onlyAppStore = appStore + appStoreFailed > 0 && updated == 0 && failed == 0 && skippedOpen == 0 && needsAdmin == 0
             && stopped == 0 && changed == 0
-        var parts = onlyAppStore ? [] : ["Updated \(Self.apps(updated))"]
-        if failed > 0 { parts.append("\(failed) failed") }
-        if skippedOpen > 0 { parts.append("\(skippedOpen) skipped because \(skippedOpen == 1 ? "it is" : "they are") open") }
-        if needsAdmin > 0 { parts.append("\(needsAdmin) need\(needsAdmin == 1 ? "s" : "") admin") }
-        if changed > 0 { parts.append("\(changed) changed since the notification, not installed") }
-        if stopped > 0 { parts.append("\(stopped) not attempted after Stop") }
-        if appStore > 0 { parts.append("\(appStore) to update in the App Store") }
-        if appStoreFailed > 0 { parts.append("couldn't open the App Store for \(appStoreFailed)") }
+        var parts = onlyAppStore ? [] : [String(localized: "Updated \(Self.apps(updated))")]
+        if failed > 0 { parts.append(String(localized: "\(failed) failed")) }
+        if skippedOpen > 0 { parts.append(skippedOpen == 1 ? String(localized: "\(skippedOpen) skipped because it is open")
+                                       : String(localized: "\(skippedOpen) skipped because they are open")) }
+        if needsAdmin > 0 { parts.append(needsAdmin == 1 ? String(localized: "\(needsAdmin) needs admin") : String(localized: "\(needsAdmin) need admin")) }
+        if changed > 0 { parts.append(String(localized: "\(changed) changed since the notification, not installed")) }
+        if stopped > 0 { parts.append(String(localized: "\(stopped) not attempted after Stop")) }
+        if appStore > 0 { parts.append(String(localized: "\(appStore) to update in the App Store")) }
+        if appStoreFailed > 0 { parts.append(String(localized: "couldn't open the App Store for \(appStoreFailed)")) }
         return parts.joined(separator: "; ")
     }
 }
@@ -451,7 +467,7 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
     @Published public private(set) var rows: [AppUpdateRow] = []
     @Published public private(set) var isWorking = false
     @Published public private(set) var hasChecked = false
-    /// When the last check finished successfully (this session). For the menu's "Up to date" line.
+    /// When the last check finished successfully (this session). For the menu's String(localized: "Up to date") line.
     @Published public private(set) var lastCheckedAt: Date?
     /// Where rows and the menu get app icons. Tests replace it with a fake.
     public var iconProvider: AppIconProviding = WorkspaceAppIconProvider.shared
@@ -460,7 +476,7 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
     /// Bumped on every menu selection, so picking the same app again still scrolls back to it.
     @Published public private(set) var focusRequest = 0
     public func focus(rowID: String) { focusedRowID = rowID; focusRequest &+= 1 }
-    @Published public private(set) var summary: String = "Choose Check for Updates to look for newer versions."
+    @Published public private(set) var summary: String = String(localized: "Choose Check for Updates to look for newer versions.")
     @Published public private(set) var notice: String?
     @Published public private(set) var catalogueError: String?
     /// The last Ignore or Stop ignoring failure, shown on both Updates and Applications (the row it belongs to
@@ -531,7 +547,7 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
     private var stopRequested = false
     /// The one row whose single update may be cancelled right now (see `canCancelUpdate`).
     private var cancellablePath: String?
-    /// Apps that refused with needs_admin; their rows offer "Update (admin)" from then on.
+    /// Apps that refused with needs_admin; their rows offer String(localized: "Update (admin)") from then on.
     private var needsAdminPaths: Set<String> = []
     /// The one admin action in progress, so Done can reach it.
     private var currentAdmin: AdminInteraction?
@@ -736,7 +752,7 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
                 self.phase = .idle; self.checkTask = nil
                 self.stopSelfLookup()
                 self.catalogueError = Self.catalogueMessage(error)
-                self.summary = "Check stopped: \(self.catalogueError ?? "\(error)")"
+                self.summary = String(localized: "Check stopped: \(self.catalogueError ?? "\(error)")")
                 self.onCheckFinished?(.failed)
                 self.dropQueuedUpdateAll()
                 return
@@ -793,7 +809,7 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
 
     private func releaseQueuedUpdateAll() {
         guard let queued = takeQueuedUpdateAll() else { return }
-        if !updateAll(only: queued.keys, onFinished: queued.onFinished) { queued.onDropped?() }
+        if !updateAll(only: queued.keys, askInWindow: false, onFinished: queued.onFinished) { queued.onDropped?() }
     }
 
     /// Cancels an in-flight check and puts back the rows shown before it began.
@@ -804,7 +820,7 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
         generation += 1; epoch += 1; pendingQuit = nil
         rows = rowsBeforeCheck
         phase = .idle
-        summary = hasChecked ? Self.checkSummary(rows) : "Check cancelled."
+        summary = hasChecked ? Self.checkSummary(rows) : String(localized: "Check cancelled.")
         onCheckFinished?(.cancelled)
         dropQueuedUpdateAll()
     }
@@ -893,7 +909,7 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
             selfInstall = .idle; return
         }
         guard phase == .idle, !isWorking else {
-            selfInstall = .failed("Patched can't update itself while a check or another update is running. Try again when it has finished.")
+            selfInstall = .failed(String(localized: "Patched can't update itself while a check or another update is running. Try again when it has finished."))
             return
         }
         isWorking = true
@@ -918,7 +934,7 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
                 self.selfInstall = .reopening(version: version)
                 do { try installer.relaunch(report) } catch {
                     self.isWorking = false
-                    self.selfInstall = .failed("Patched \(version) is installed. Quit Patched and open it again to use it.")
+                    self.selfInstall = .failed(String(localized: "Patched \(version) is installed. Quit Patched and open it again to use it."))
                     return
                 }
                 self.selfTerminate()
@@ -927,7 +943,7 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
                 let refusal = error as? InstallRefusal
                 if refusal?.code == "needs_admin" {
                     _ = self.urlOpener.open(own.url)
-                    self.selfInstall = .failed("Patched can't replace itself here without admin rights, so the release page is open. Install Patched \(version) from there.")
+                    self.selfInstall = .failed(String(localized: "Patched can't replace itself here without admin rights, so the release page is open. Install Patched \(version) from there."))
                 } else {
                     self.selfInstall = .failed(Self.selfInstallFailure(refusal, error: error))
                 }
@@ -938,21 +954,21 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
     nonisolated static func selfInstallFailure(_ refusal: InstallRefusal?, error: Error) -> String {
         let reason: String
         switch refusal {
-        case .releaseSignatureInvalid?: reason = "the download isn't signed with Patched's release key"
-        case .download(let detail)?: reason = "the download failed (\(detail))"
-        case .insecureDownload?: reason = "the download went somewhere other than GitHub"
-        case .tooLarge?: reason = "the download is larger than a Patched release can be"
-        case .versionMismatch?, .notNewer?, .bundleNotFound?, .ambiguousBundle?: reason = "the download isn't the Patched release it should be"
-        case .signatureInvalid?: reason = "the new app's code signature didn't verify"
-        case .unresolved(let detail)?: return "Patched couldn't finish updating and left everything in place: \(detail)"
+        case .releaseSignatureInvalid?: reason = String(localized: "the download isn't signed with Patched's release key")
+        case .download(let detail)?: reason = String(localized: "the download failed (\(detail))")
+        case .insecureDownload?: reason = String(localized: "the download went somewhere other than GitHub")
+        case .tooLarge?: reason = String(localized: "the download is larger than a Patched release can be")
+        case .versionMismatch?, .notNewer?, .bundleNotFound?, .ambiguousBundle?: reason = String(localized: "the download isn't the Patched release it should be")
+        case .signatureInvalid?: reason = String(localized: "the new app's code signature didn't verify")
+        case .unresolved(let detail)?: return String(localized: "Patched couldn't finish updating and left everything in place: \(detail)")
         case let refusal?: reason = refusal.message
         case nil: reason = "\(error)"
         }
-        return "Couldn't update Patched: " + reason + ". Patched is unchanged."
+        return String(localized: "Couldn't update Patched: \(reason). Patched is unchanged.")
     }
 
     /// A click on one row's Update. Only here (and in its quit confirmation) can the admin path be used,
-    /// and only for a row that shows "Update (admin)" or "Update (installer)".
+    /// and only for a row that shows String(localized: "Update (admin)") or String(localized: "Update (installer)").
     public func update(id: String) {
         guard let row = row(id: id), canUpdate(row) else { return }
         let admin = mayUseAdmin(row)
@@ -996,11 +1012,13 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
     /// Returns false when nothing was started.
     @discardableResult
     public func updateAll(onFinished: (@MainActor (UpdateAllSummary) -> Void)? = nil) -> Bool {
-        updateAll(only: nil, onFinished: onFinished)
+        // The Updates window's button: it has an alert, so it asks about the open apps itself.
+        updateAll(only: nil, askInWindow: true, onFinished: onFinished)
     }
 
     @discardableResult
-    func updateAll(only keys: Set<String>?, onFinished: (@MainActor (UpdateAllSummary) -> Void)? = nil) -> Bool {
+    func updateAll(only keys: Set<String>?, askInWindow: Bool = false,
+                   onFinished: (@MainActor (UpdateAllSummary) -> Void)? = nil) -> Bool {
         updateAllInvocations += 1
         var candidates = updatableRows
         if let keys { candidates = candidates.filter { keys.contains(updateKey(of: $0)) } }
@@ -1013,7 +1031,7 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
         if paths.isEmpty {
             launch {
                 let opened = await self.urlOpener.openAppStoreUpdates()
-                self.summary = opened ? "\(storeAtStart) to update in the App Store." : Self.appStoreOpenFailure
+                self.summary = opened ? String(localized: "\(storeAtStart) to update in the App Store.") : Self.appStoreOpenFailure
                 onFinished?(UpdateAllSummary(updated: 0, failed: 0, skippedOpen: 0, needsAdmin: self.knownNeedsAdmin(keys).count,
                                              appStore: opened ? storeAtStart : 0, appStoreFailed: opened ? 0 : storeAtStart))
             }
@@ -1023,15 +1041,16 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
         launch {
             var updated = 0, failed = 0, skipped = 0, open = 0, stopped = 0, changed = 0
             var adminPaths = Set<String>()
+            var openPaths: [String] = []
             for (index, path) in paths.enumerated() {
                 if self.stopRequested { stopped = paths.count - index; skipped += stopped; break }
                 // Never with admin rights: rows that need them are not in `updatableRows`, and one that turns
-                // out to need them is skipped (and marked "Update (admin)" when admin updates are on).
+                // out to need them is skipped (and marked String(localized: "Update (admin)") when admin updates are on).
                 switch await self.performUpdate(path: path, quit: false, interactive: false, admin: false, onlyKeys: keys) {
                 case .updated: updated += 1
                 case .failed: failed += 1
                 case .changed: changed += 1
-                case .skippedRunning: skipped += 1; open += 1
+                case .skippedRunning: skipped += 1; open += 1; openPaths.append(path)
                 case .needsAdmin: skipped += 1; adminPaths.insert(path)
                 }
                 self.updateAllProgress?.done = index + 1
@@ -1043,21 +1062,73 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
             if storeNow > 0 {
                 if await self.urlOpener.openAppStoreUpdates() { store = storeNow } else { storeFailed = storeNow }
             }
-            self.summary = "\(updated) updated" + (failed > 0 ? ", \(failed) failed" : "")
-                + (skipped > 0 ? ", \(skipped) skipped" : "") + (store > 0 ? ", \(store) to update in the App Store" : "")
+            self.summary = String(localized: "\(updated) updated") + (failed > 0 ? String(localized: ", \(failed) failed") : "")
+                + (skipped > 0 ? String(localized: ", \(skipped) skipped") : "")
+                + (store > 0 ? String(localized: ", \(store) to update in the App Store") : "")
                 + (storeFailed > 0 ? ". " + Self.appStoreOpenFailure : ".")
             // Admin and installer rows are never installed here, whether known up front or found out, and
             // whether or not experimental admin updates are switched on. Installer-only updates count too.
             // Rows outside a notification's scope are not part of this run's report.
             let known = self.knownNeedsAdmin(keys)
+            if self.stopRequested { openPaths = [] }
+            // The Updates window asks once, after the run, about the apps that were open; `launch` offers it
+            // as soon as the run is over. The epoch is the one `launch` set for this run.
+            if askInWindow, !openPaths.isEmpty {
+                self.deferredQuit = .init(path: "", action: .updateOpen, paths: openPaths,
+                                          message: self.openAppsQuestion(openPaths), epoch: self.epoch, installedVersion: nil)
+            }
             onFinished?(UpdateAllSummary(updated: updated, failed: failed, skippedOpen: open,
                                          needsAdmin: adminPaths.union(known).count, stopped: stopped, changed: changed,
-                                         appStore: store, appStoreFailed: storeFailed))
+                                         appStore: store, appStoreFailed: storeFailed, openPaths: openPaths))
         }
         return true
     }
 
-    static let appStoreOpenFailure = "Couldn't open the App Store. Open it and choose Updates."
+    /// "Claude is open. Quit it, update and reopen it?" / "Claude and Slack are open. Quit them, ..."
+    @_spi(Testing) public static func openAppsQuestion(names: [String]) -> String {
+        let list: String
+        switch names.count {
+        case 0, 1: list = names.first ?? String(localized: "The app")
+        case 2: list = String(localized: "\(names[0]) and \(names[1])")
+        default: list = String(localized: "\(names.dropLast().joined(separator: ", ")) and \(names[names.count - 1])")
+        }
+        return names.count <= 1 ? String(localized: "\(list) is open. Quit it, update and reopen it?")
+                                : String(localized: "\(list) are open. Quit them, update and reopen them?")
+    }
+    /// The question for these rows, named as listed.
+    public func openAppsQuestion(_ paths: [String]) -> String {
+        Self.openAppsQuestion(names: paths.map { row(id: $0)?.name ?? ($0 as NSString).lastPathComponent })
+    }
+
+    /// Quits, updates and reopens these apps one at a time, as confirmed by the user (never the scheduler).
+    /// Only apps whose row can still be updated are kept. Honours Stop. Returns false when nothing was started.
+    @discardableResult
+    public func quitAndUpdate(paths requested: [String], onFinished: (@MainActor (UpdateAllSummary) -> Void)? = nil) -> Bool {
+        guard !isWorking, phase == .idle, !installBlocked else { return false }
+        let paths = requested.filter { path in row(id: path).map(canUpdate) ?? false }
+        guard !paths.isEmpty else { return false }
+        stopRequested = false
+        updateAllProgress = UpdateAllProgress(done: 0, total: paths.count, stopping: false)
+        launch {
+            var updated = 0, failed = 0, stopped = 0, needsAdmin = 0
+            for (index, path) in paths.enumerated() {
+                if self.stopRequested { stopped = paths.count - index; break }
+                switch await self.performUpdate(path: path, quit: true, interactive: false, admin: false, cancellable: true) {
+                case .updated: updated += 1
+                case .needsAdmin: needsAdmin += 1
+                case .failed, .changed, .skippedRunning: failed += 1
+                }
+                self.updateAllProgress?.done = index + 1
+            }
+            self.updateAllProgress = nil
+            self.summary = String(localized: "\(updated) updated") + (failed > 0 ? String(localized: ", \(failed) failed") : "")
+                + (stopped > 0 ? String(localized: ", \(stopped) skipped") : "") + "."
+            onFinished?(UpdateAllSummary(updated: updated, failed: failed, skippedOpen: 0, needsAdmin: needsAdmin, stopped: stopped))
+        }
+        return true
+    }
+
+    static let appStoreOpenFailure = String(localized: "Couldn't open the App Store. Open it and choose Updates.")
 
     /// Paths of in-scope rows Update All never installs: admin and installer rows, and unsupported packages.
     private func knownNeedsAdmin(_ keys: Set<String>?) -> [String] {
@@ -1100,7 +1171,9 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
         phase == .idle && !isWorking && catalogueError == nil && row.activity == .idle
     }
     /// Rows the Updates screen lists: everything except apps the user ignores.
-    public var updatesRows: [AppUpdateRow] { rows.filter { !$0.isIgnored } }
+    public var updatesRows: [AppUpdateRow] { rows.filter { !$0.isIgnored && !$0.isHiddenBackgroundHelper } }
+    /// Rows the Applications screen lists: everything except background-only helpers with no update to show.
+    public var applicationsRows: [AppUpdateRow] { rows.filter { !$0.isHiddenBackgroundHelper } }
 
     /// A click on Ignore: writes an ignore entry for the app's bundle ID to the user catalogue, then checks that app again.
     public func ignore(id: String) {
@@ -1125,7 +1198,7 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
             let copies = self.rows.filter { $0.bundleID == bundleID }.map(\.id)
             for copy in (copies.contains(path) ? copies : copies + [path]) { await self.refreshRow(copy) }
             if let failure {
-                let text = (ignored ? "Couldn't ignore " : "Couldn't stop ignoring ") + row.name + ". " + failure
+                let text = (ignored ? String(localized: "Couldn't ignore \(row.name). ") : String(localized: "Couldn't stop ignoring \(row.name). ")) + failure
                 self.mutate(path) { $0.result = .init(kind: .failure, text: text) }
                 self.ignoreEditFailure = text
             } else {
@@ -1142,15 +1215,15 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
         let opener = urlOpener, path = row.path, name = row.name, team = row.outcome?.teamID
         // The bundle ID seen when the row was built is what must still be at the path.
         guard let bundleID = row.bundleID else {
-            staleForOpen(id, "\(name) can't be verified before opening. Check again.")
+            staleForOpen(id, String(localized: "\(name) can't be verified before opening. Check again."))
             return
         }
         mutate(id) { $0.result = nil }
         openTask = Task { [weak self] in
             switch await opener.openApplication(atPath: path, expectedBundleID: bundleID, expectedTeamID: team) {
             case .opened: return
-            case .changed: self?.staleForOpen(id, "\(name) has changed since the last check, so it was not opened. Check again.")
-            case .failed: self?.mutate(id) { $0.result = .init(kind: .failure, text: "Couldn't open \(name). Open it from your Applications folder.") }
+            case .changed: self?.staleForOpen(id, String(localized: "\(name) has changed since the last check, so it was not opened. Check again."))
+            case .failed: self?.mutate(id) { $0.result = .init(kind: .failure, text: String(localized: "Couldn't open \(name). Open it from your Applications folder.")) }
             }
         }
     }
@@ -1207,6 +1280,8 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
             launch { await self.performRollback(path: pending.path, quit: true) }
         case .recover:
             launch { await self.performRecover(quit: true) }
+        case .updateOpen:
+            quitAndUpdate(paths: pending.paths)
         }
     }
     public func cancelQuit() { pendingQuit = nil }
@@ -1257,7 +1332,7 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
         do {
             let fresh = try await Self.background { try await recheck(path) }
             guard let old = row(id: path) else { return }
-            guard let fresh else { markStale(path, "The app is no longer at this location."); return }
+            guard let fresh else { markStale(path, String(localized: "The app is no longer at this location.")); return }
             var row = makeRow(fresh, icon: old.icon)
             row.result = old.result
             row.rollbackVersion = old.rollbackVersion
@@ -1322,7 +1397,7 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
         let outcome: AppCheckOutcome
         do {
             guard let fresh = try await Self.background({ try await recheck(path) }) else {
-                markStale(path, "\(shown.name) is no longer at this location. Check again.")
+                markStale(path, String(localized: "\(shown.name) is no longer at this location. Check again."))
                 return .failed
             }
             // A notification-scoped run installs only the very offer that was advertised.
@@ -1331,7 +1406,7 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
                 var row = makeRow(fresh, icon: shown.icon)
                 row.rollbackVersion = shown.rollbackVersion
                 row.rollbackUnsupported = shown.rollbackUnsupported
-                row.result = .init(kind: .info, text: "\(shown.name) changed since the last check, so nothing was installed.")
+                row.result = .init(kind: .info, text: String(localized: "\(shown.name) changed since the last check, so nothing was installed."))
                 replace(row)
                 return onlyKeys == nil ? .failed : .changed
             }
@@ -1339,7 +1414,7 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
             mutate(path) { $0.outcome = fresh }
         } catch {
             catalogueError = Self.catalogueMessage(error)
-            markStale(path, "\(shown.name): the catalogue could not be read, so nothing was installed.")
+            markStale(path, String(localized: "\(shown.name): the catalogue could not be read, so nothing was installed."))
             return .failed
         }
         let interaction = admin ? makeAdminInteraction(path: path, name: outcome.app.name) : nil
@@ -1365,19 +1440,19 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
         } catch is CancellationError {
             mutate(path) {
                 $0.activity = .idle
-                $0.result = .init(kind: .info, text: "Cancelled. \(outcome.app.name) was not changed.")
+                $0.result = .init(kind: .info, text: String(localized: "Cancelled. \(outcome.app.name) was not changed."))
             }
             return .failed
         } catch let refusal as InstallRefusal {
             let name = outcome.app.name
             if case .needsAdmin = refusal, interaction == nil {
                 // Needs admin rights whether or not the experimental admin path is on; only with it on does
-                // the row offer "Update (admin)".
+                // the row offer String(localized: "Update (admin)").
                 if adminUpdatesEnabled {
                     needsAdminPaths.insert(path)
                     mutate(path) {
                         $0.activity = .idle; $0.privilege = .admin
-                        $0.result = .init(kind: .info, text: "\(name) needs admin rights. Choose Update (admin); macOS asks for your password for this one update.")
+                        $0.result = .init(kind: .info, text: String(localized: "\(name) needs admin rights. Choose Update (admin); macOS asks for your password for this one update."))
                     }
                 } else {
                     // Patched cannot do this one. Remember it, so the row offers Open <app> from now on.
@@ -1390,12 +1465,12 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
             }
             if case .appRunning = refusal, !quit {
                 if interactive {
-                    deferredQuit = .init(path: path, action: .update, message: "\(name) is open. Quit it, update, and reopen it?",
+                    deferredQuit = .init(path: path, action: .update, message: String(localized: "\(name) is open. Quit it, update, and reopen it?"),
                                          epoch: epoch, installedVersion: shown.installedVersion)
                 }
                 mutate(path) {
                     $0.activity = .idle
-                    $0.result = .init(kind: .info, text: "\(name) is open. Choose Update to quit it, update and reopen it.")
+                    $0.result = .init(kind: .info, text: String(localized: "\(name) is open. Choose Update to quit it, update and reopen it."))
                 }
                 return .skippedRunning
             }
@@ -1429,7 +1504,7 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
             mutate(path) { $0.activity = .idle }
         } catch let refusal as InstallRefusal {
             if case .appRunning = refusal, !quit {
-                deferredQuit = .init(path: path, action: .rollback, message: "\(row.name) is open. Quit it, roll it back, and reopen it?",
+                deferredQuit = .init(path: path, action: .rollback, message: String(localized: "\(row.name) is open. Quit it, roll it back, and reopen it?"),
                                      epoch: epoch, installedVersion: row.installedVersion)
                 mutate(path) { $0.activity = .idle }
                 return
@@ -1447,7 +1522,7 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
 
     private func performRecover(quit: Bool) async {
         let result = await installer.recoverUnfinished(quitIfRunning: quit)
-        var lines: [String] = result.unreadable.map { "journal \($0): unreadable, left in place for inspection" }
+        var lines: [String] = result.unreadable.map { String(localized: "journal \($0): unreadable, left in place for inspection") }
         var running = false
         var touched: [String] = []
         for report in result.entries {
@@ -1456,19 +1531,19 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
             case .success(let outcome):
                 let text: String
                 switch outcome {
-                case .discarded: text = "interrupted before any change; leftovers removed"
-                case .completed: text = "finished; new version installed, old version backed up"
-                case .reverted: text = "undone; old version is back in place"
-                case .cleanedUp: text = "leftover temporary files removed"
+                case .discarded: text = String(localized: "interrupted before any change; leftovers removed")
+                case .completed: text = String(localized: "finished; new version installed, old version backed up")
+                case .reverted: text = String(localized: "undone; old version is back in place")
+                case .cleanedUp: text = String(localized: "leftover temporary files removed")
                 }
                 lines.append("\((report.targetPath as NSString).lastPathComponent): \(text)")
-                if !report.leftovers.isEmpty { lines.append("  could not remove: " + report.leftovers.joined(separator: ", ")) }
+                if !report.leftovers.isEmpty { lines.append(String(localized: "  could not remove: \(report.leftovers.joined(separator: ", "))")) }
             case .failure(let refusal):
                 if case .appRunning = refusal { running = true }
-                lines.append("\((report.targetPath as NSString).lastPathComponent): refused [\(refusal.code)] \(refusal.message)")
+                lines.append(String(localized: "\((report.targetPath as NSString).lastPathComponent): refused [\(refusal.code)] \(refusal.message)"))
             }
         }
-        if lines.isEmpty { lines = ["Nothing to recover."] }
+        if lines.isEmpty { lines = [String(localized: "Nothing to recover.")] }
         recoveryMessage = lines.joined(separator: "\n")
         // Recovery can change which version is installed, so what was checked no longer holds.
         for path in Set(touched) where row(id: path) != nil {
@@ -1477,7 +1552,7 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
         }
         if running && !quit {
             deferredQuit = .init(path: "", action: .recover,
-                                 message: "An app affected by an interrupted update is open. Quit it and finish recovery?",
+                                 message: String(localized: "An app affected by an interrupted update is open. Quit it and finish recovery?"),
                                  epoch: epoch, installedVersion: nil)
         }
     }
@@ -1508,7 +1583,7 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
         return catalogueBanner(reason)
     }
     nonisolated static func catalogueBanner(_ reason: String) -> String {
-        "catalogue.json can't be read: \(reason) — fix or remove it"
+        String(localized: "catalogue.json can't be read: \(reason) — fix or remove it")
     }
 
     nonisolated static func ordered(_ a: String, _ b: String) -> Bool {
@@ -1527,12 +1602,12 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
     nonisolated static func refusalResult(name: String, _ refusal: InstallRefusal, format: ArtifactFormat?) -> AppUpdateRow.Result {
         switch refusal {
         case .needsAdmin:
-            return .init(kind: .info, text: "\(name): " + AppUpdateRow.needsAdminCaption)
+            return .init(kind: .info, text: String(localized: "\(name): \(AppUpdateRow.needsAdminCaption)"))
         case .adminReplaceUnavailable:
-            return .init(kind: .info, text: "\(name): macOS refused the privileged replacement for this build. Update this app manually.")
+            return .init(kind: .info, text: String(localized: "\(name): macOS refused the privileged replacement for this build. Update this app manually."))
         case .unsupportedFormat:
-            return .init(kind: .info, text: format == .pkg ? "\(name): Installer package updates are turned off"
-                                                        : "\(name): This download format is not supported yet")
+            return .init(kind: .info, text: format == .pkg ? String(localized: "\(name): Installer package updates are turned off")
+                                                        : String(localized: "\(name): This download format is not supported yet"))
         default:
             return .init(kind: .failure, text: OutcomeText.line(name: name, status: "refused", from: nil, to: nil,
                 backupFolder: nil, reason: refusal.code, detail: refusal.message))
@@ -1541,9 +1616,11 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
 
     nonisolated static func pendingRow(_ scanned: AppUpdateScannedApp) -> AppUpdateRow {
         let app = scanned.app
-        return AppUpdateRow(name: app.name, path: app.path, bundleID: app.bundleID, icon: scanned.icon,
+        var row = AppUpdateRow(name: app.name, path: app.path, bundleID: app.bundleID, icon: scanned.icon,
             installedVersion: versionText(short: app.shortVersion, build: app.build), latestVersion: nil,
             source: "—", status: .pending, activity: .checking, result: nil, rollbackVersion: nil, outcome: nil)
+        row.isBackgroundOnly = app.isBackgroundOnly
+        return row
     }
 
     /// `makeRow` with this controller's admin setting and the apps already known to need admin rights.
@@ -1581,6 +1658,7 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
             activity: .idle, result: nil, rollbackVersion: nil, privilege: privilege, needsManualAdmin: manualAdmin,
             outcome: outcome)
         row.installedDisplayVersion = app.shortVersion ?? app.build
+        row.isBackgroundOnly = app.isBackgroundOnly
         return row
     }
 
@@ -1595,11 +1673,11 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
     }
 
     nonisolated static func checkSummary(_ rows: [AppUpdateRow]) -> String {
-        let rows = rows.filter { !$0.isIgnored }
-        if rows.isEmpty { return "No applications found." }
+        let rows = rows.filter { !$0.isIgnored && !$0.isHiddenBackgroundHelper }
+        if rows.isEmpty { return String(localized: "No applications found.") }
         let updates = rows.filter { $0.status == .updateAvailable || $0.status == .packageUnsupported || $0.status == .notInstallable
             || $0.status == .appStoreUpdate }.count
-        return "\(rows.count) apps checked, \(updates) with updates available."
+        return String(localized: "\(rows.count) apps checked, \(updates) with updates available.")
     }
 
     /// Throwing variant of `background`.
@@ -1675,7 +1753,7 @@ final class LazyState: @unchecked Sendable {
     var problem: String? {
         lock.lock(); let known = resolved; lock.unlock()
         guard case .failure? = known else { return nil }
-        return "Update state folders are unavailable, so updates are disabled."
+        return String(localized: "Update state folders are unavailable, so updates are disabled.")
     }
 }
 

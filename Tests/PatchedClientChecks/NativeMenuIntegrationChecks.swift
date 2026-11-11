@@ -68,8 +68,7 @@ import PatchedShell
     check("all menu route actions retain the exact injected owners") {
         let session = menuSession()
         let navigation = session.navigation, updates = session.appUpdates
-        let routes: [(NativeClientMenuAction, ShellDestination)] = [(.updates, .updates), (.applications, .applications),
-            (.settings, .settings)]
+        let routes: [(NativeClientMenuAction, ShellDestination)] = [(.updates, .updates), (.applications, .applications)]
         for (action, destination) in routes {
             navigation.select(.support)
             try expect(session.performMenuAction(action), "Route did not request main-window reopening")
@@ -116,7 +115,9 @@ import PatchedShell
     check("app composes actual MenuBarExtra and shared view over its sole stable session/window") {
         let app = code(try source("Sources/PatchedApp/PatchedApp.swift"))
         for binding in ["MenuBarExtra(", "NativeClientMenuView(session: session", "NativeClientRootView(session: session)",
-                        "id: NativeClientMenuWindow.id", "openWindow(id: NativeClientMenuWindow.id)"] {
+                        "id: NativeClientMenuWindow.id", "openWindow(id: NativeClientMenuWindow.id)",
+                        "Settings {", "NativeClientSettingsView(session: session)", "@Environment(\\.openSettings)",
+                        "openSettings()", "Selector((\"showSettingsWindow:\"))", "openSettings: {"] {
             try expect(app.contains(binding), "App lacks the real native scene binding: \(binding)")
         }
         try expect(app.components(separatedBy: "NativeClientSession()").count == 2,
@@ -126,9 +127,10 @@ import PatchedShell
     check("shared menu view exposes only the five explicit shared-owner actions") {
         let menu = code(try source("Sources/PatchedClient/NativeClientMenu.swift"))
         try expect(menu.contains("Button(") && menu.contains("session.performMenuAction("), "Menu has no real explicit action wiring")
-        for action in [".checkNow", ".updates", ".settings"] {
+        for action in [".checkNow", ".updates", "openSettings()"] {
             try expect(menu.contains(action), "Menu lacks explicit action \(action)")
         }
+        try expect(!menu.contains("navigation.select(.settings)"), "Settings is still a route in the main window")
         try expect(menu.contains("openWindow()"), "Route buttons cannot reopen the stable window")
     }
     check("user-session close-window policy is explicit and adopted by the native app delegate") {

@@ -14,7 +14,7 @@ private typealias IconState<Value> = State<Value>
 
 /// Asks `NSWorkspace`, which understands asset catalogues (`Assets.car`) as well as plain `.icns` files.
 /// Loading runs off the main thread: the path must be an absolute, non-symlinked `.app` directory, and the
-/// result is rasterised once at 64 px. The cache is memory only, limited in count, and refreshed when the
+/// result is rasterised once at 128 px. The cache is memory only, limited in count, and refreshed when the
 /// bundle's modification date changes, so an updated app shows its new icon.
 @MainActor public final class WorkspaceAppIconProvider: AppIconProviding {
     public static let shared = WorkspaceAppIconProvider()
@@ -60,16 +60,20 @@ private typealias IconState<Value> = State<Value>
         return Double(info.st_mtimespec.tv_sec) + Double(info.st_mtimespec.tv_nsec) / 1e9
     }
 
-    nonisolated static func rasterise(_ source: NSImage) -> NSImage? {
-        let size = NSSize(width: 32, height: 32)
-        guard let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 64, pixelsHigh: 64, bitsPerSample: 8,
+    /// Draws the icon across the whole bitmap: 128 px, shown as 64 points, so it stays sharp up to 64 pt on a
+    /// Retina display. The context's coordinates are the bitmap's pixels, so the icon is drawn at the pixel
+    /// size and the point size is set afterwards (drawing at the point size filled only the bottom-left quarter).
+    @_spi(Testing) nonisolated public static func rasterise(_ source: NSImage) -> NSImage? {
+        let pixels = 128
+        guard let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: pixels, pixelsHigh: pixels, bitsPerSample: 8,
             samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0),
               let context = NSGraphicsContext(bitmapImageRep: bitmap) else { return nil }
-        bitmap.size = size
         NSGraphicsContext.saveGraphicsState()
         NSGraphicsContext.current = context
-        source.draw(in: NSRect(origin: .zero, size: size), from: .zero, operation: .copy, fraction: 1)
+        source.draw(in: NSRect(x: 0, y: 0, width: pixels, height: pixels), from: .zero, operation: .copy, fraction: 1)
         NSGraphicsContext.restoreGraphicsState()
+        let size = NSSize(width: pixels / 2, height: pixels / 2)
+        bitmap.size = size
         let image = NSImage(size: size)
         image.addRepresentation(bitmap)
         return image

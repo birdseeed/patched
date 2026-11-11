@@ -1,40 +1,6 @@
 import SwiftUI
 import AppKit
 
-public enum ShellAppearance: CaseIterable, Sendable { case light, dark }
-public enum ShellColorRole: CaseIterable, Sendable {
-    case surface, sidebar, text, muted, accent, onAccent
-}
-
-/// Semantic values from Brand Kit v3; native text always uses system type.
-public enum ShellBrand {
-    public static func hex(_ role: ShellColorRole, appearance: ShellAppearance) -> String? {
-        switch (role, appearance) {
-        case (.surface, .light): return "#FFFFFF"
-        case (.surface, .dark): return "#0F172A"
-        case (.sidebar, .light): return "#F8FAFC"
-        case (.sidebar, .dark): return "#1E293B"
-        case (.text, .light): return "#0F172A"
-        case (.text, .dark): return "#F8FAFC"
-        case (.muted, .light): return "#6B7280"
-        case (.muted, .dark): return "#94A3B8"
-        case (.accent, .light): return "#2563EB"
-        case (.accent, .dark): return "#60A5FA"
-        case (.onAccent, .light): return "#FFFFFF"
-        case (.onAccent, .dark): return "#0F172A"
-        }
-    }
-
-    static func color(_ role: ShellColorRole, appearance: ShellAppearance) -> Color {
-        // Only the compile-time palette above is parsed, never caller input.
-        guard let hex = hex(role, appearance: appearance), let value = UInt32(hex.dropFirst(), radix: 16) else {
-            return .primary
-        }
-        return Color(.sRGB, red: Double((value >> 16) & 255) / 255,
-                     green: Double((value >> 8) & 255) / 255, blue: Double(value & 255) / 255, opacity: 1)
-    }
-}
-
 /// Exact endpoint arcs from the canonical 64-unit SVG, uniformly fitted to the rect.
 /// M23 60.618A30 30 0 1 0 16 57.377L16 32A16 16 0 1 1 23 45.229Z
 public struct ShellBrandMark: Shape {
@@ -73,23 +39,6 @@ public struct ShellBrandMark: Shape {
     }
 }
 
-extension ShellBrand {
-    /// Brand blue for tint and accents everywhere: #2563EB in light, #60A5FA in dark. It replaces the
-    /// system accent colour so the app looks the same on every Mac.
-    public static var accent: Color {
-        Color(nsColor: NSColor(name: nil) { appearance in
-            let dark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-            return nsColor(hex(.accent, appearance: dark ? .dark : .light))
-        })
-    }
-
-    private static func nsColor(_ hex: String?) -> NSColor {
-        guard let hex, let value = UInt32(hex.dropFirst(), radix: 16) else { return .controlAccentColor }
-        return NSColor(srgbRed: CGFloat((value >> 16) & 255) / 255, green: CGFloat((value >> 8) & 255) / 255,
-                       blue: CGFloat(value & 255) / 255, alpha: 1)
-    }
-}
-
 /// The Patched mark in the brand gradient, for window headers and the welcome screen.
 /// The menu bar uses the same shape as a single-colour template image instead.
 public struct BrandMarkView: View {
@@ -106,4 +55,21 @@ public struct BrandMarkView: View {
             .frame(width: size, height: size)
             .accessibilityHidden(true)
     }
+}
+
+/// The app's own accent: brand blue (#2563EB light, #60A5FA dark) whatever the system accent, so Patched
+/// stays recognisable (owner's choice, 10 November 2026). Controls themselves stay native.
+public enum BrandAccent {
+    public static var color: Color {
+        Color(nsColor: NSColor(name: nil) { appearance in
+            appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                ? NSColor(srgbRed: 0x60 / 255, green: 0xA5 / 255, blue: 0xFA / 255, alpha: 1)
+                : NSColor(srgbRed: 0x25 / 255, green: 0x63 / 255, blue: 0xEB / 255, alpha: 1)
+        })
+    }
+}
+
+extension View {
+    /// Applies the app accent to a whole window's content. Use once per window root.
+    public func brandAccent() -> some View { tint(BrandAccent.color) }
 }

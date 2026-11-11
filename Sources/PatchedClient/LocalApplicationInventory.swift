@@ -70,8 +70,15 @@ private enum InventoryIO {
         guard !parts.isEmpty, parts.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." && $0.utf8.count <= Int(NAME_MAX) }) else { throw InventoryFailure.unsafe }
         return parts.map(String.init)
     }
+    /// Whether two stats describe the same, unchanged object. A directory is compared by identity only (device,
+    /// inode, type and permissions, owner): its times, size and link count change whenever any entry is added
+    /// or removed, and its ancestors (/, the home folder, the shared temporary folder) are written by other
+    /// programs all the time, which made whole roots unavailable. A directory swapped, renamed over or replaced
+    /// by a link still fails, and files keep the full comparison, times included.
     static func stable(_ a: stat, _ b: stat) -> Bool {
-        a.st_dev == b.st_dev && a.st_ino == b.st_ino && a.st_mode == b.st_mode && a.st_uid == b.st_uid &&
+        let identity = a.st_dev == b.st_dev && a.st_ino == b.st_ino && a.st_mode == b.st_mode && a.st_uid == b.st_uid
+        if identity && a.st_mode & S_IFMT == S_IFDIR { return true }
+        return identity &&
             a.st_nlink == b.st_nlink && a.st_size == b.st_size &&
             a.st_ctimespec.tv_sec == b.st_ctimespec.tv_sec && a.st_ctimespec.tv_nsec == b.st_ctimespec.tv_nsec &&
             a.st_mtimespec.tv_sec == b.st_mtimespec.tv_sec && a.st_mtimespec.tv_nsec == b.st_mtimespec.tv_nsec
@@ -342,6 +349,7 @@ private struct InventoryScan {
         var disposition: LocalInventoryMetadataDisposition = .unavailable
         var feed: String?, config: Data?, product: Data?
         var edKey: String?
+        var backgroundOnly = false
         var installedIcon: LocalInstalledIcon?
         var feedDisposition: LocalInventoryMetadataDisposition = .unavailable
         var configDisposition: LocalInventoryMetadataDisposition = .unavailable
@@ -394,6 +402,11 @@ private struct InventoryScan {
             identifier = field("CFBundleIdentifier"); version = field("CFBundleShortVersionString"); build = field("CFBundleVersion")
             display = preferred ?? name ?? display
             edKey = dictionary["SUPublicEDKey"] == nil ? nil : (dictionary["SUPublicEDKey"] as? String ?? "")
+            switch dictionary["LSBackgroundOnly"] {
+            case let number as NSNumber: backgroundOnly = number.boolValue
+            case let text as String: backgroundOnly = ["1", "yes", "true"].contains(text.lowercased())
+            default: backgroundOnly = false
+            }
             if let raw = dictionary["SUFeedURL"] {
                 if let text = raw as? String, InventoryIO.safeFeed(text) {
                     feed = text; feedDisposition = .observed
@@ -433,7 +446,7 @@ private struct InventoryScan {
                 vendorMetadata: LocalInstalledVendorMetadata(sparkleFeedURL: feed, electronConfigBytes: config,
                     sparkleDisposition: feedDisposition, electronDisposition: configDisposition,
                     productJSONBytes: product, productJSONDisposition: productDisposition,
-                    sparklePublicEDKey: edKey), installedIcon: installedIcon))
+                    sparklePublicEDKey: edKey, backgroundOnly: backgroundOnly), installedIcon: installedIcon))
             if rows.count == LocalInventoryLimits.applications { issue(.applicationLimit, bundle.path) }
         }
     }

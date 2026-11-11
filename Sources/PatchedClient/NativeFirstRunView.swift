@@ -12,7 +12,7 @@ public struct NativeFirstRunView: View {
                 BrandMarkView(size: 24)
                 Text(verbatim: "Patched").font(.headline)
                 Spacer()
-                Text(verbatim: stepLabel)
+                Text(stepLabel)
                     .font(.callout).foregroundStyle(.secondary)
             }
             .padding(20)
@@ -30,11 +30,10 @@ public struct NativeFirstRunView: View {
                 .padding(20)
         }
         .font(.body)
-        .tint(ShellBrand.accent)
         .frame(minWidth: 680, minHeight: 520)
     }
 
-    private var stepLabel: String {
+    private var stepLabel: LocalizedStringKey {
         switch controller.step {
         case .welcome: return "1 of 3"
         case .review: return "2 of 3"
@@ -62,9 +61,9 @@ public struct NativeFirstRunView: View {
         }
     }
 
-    private func point(_ title: String, _ text: String) -> some View {
+    private func point(_ title: LocalizedStringKey, _ text: LocalizedStringKey) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(verbatim: title).font(.headline)
+            Text(title).font(.headline)
             detail(text)
         }
     }
@@ -72,19 +71,19 @@ public struct NativeFirstRunView: View {
     private var actions: some View {
         HStack {
             if controller.step != .welcome {
-                Button(action: { controller.back() }) { Text(verbatim: "Back") }
-                    .buttonStyle(ClientButtonStyle(enabled: true, prominent: false))
+                Button(action: { controller.back() }) { Text("Back") }
+                    .buttonStyle(.bordered).controlSize(.large)
                     .accessibilityLabel("Back")
             }
             Spacer()
-            Button(action: { primaryAction() }) { Text(verbatim: primaryTitle) }
-                .buttonStyle(ClientButtonStyle(enabled: true, prominent: true))
+            Button(action: { primaryAction() }) { Text(primaryTitle) }
+                .buttonStyle(.borderedProminent).controlSize(.large)
                 .keyboardShortcut(.defaultAction)
                 .accessibilityLabel(primaryTitle)
         }
     }
 
-    private var primaryTitle: String {
+    private var primaryTitle: LocalizedStringKey {
         switch controller.step {
         case .welcome, .review: return "Continue"
         case .findApps: return "Open Updates"
@@ -95,13 +94,13 @@ public struct NativeFirstRunView: View {
         if controller.step == .findApps { controller.openUpdates() } else { controller.advance() }
     }
 
-    private func heading(_ value: String) -> some View {
-        Text(verbatim: value).font(.largeTitle.weight(.semibold))
+    private func heading(_ value: LocalizedStringKey) -> some View {
+        Text(value).font(.largeTitle.weight(.semibold))
             .fixedSize(horizontal: false, vertical: true).accessibilityAddTraits(.isHeader)
     }
 
-    private func detail(_ value: String) -> some View {
-        Text(verbatim: value).font(.callout).foregroundStyle(.secondary)
+    private func detail(_ value: LocalizedStringKey) -> some View {
+        Text(value).font(.callout).foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
     }
 }

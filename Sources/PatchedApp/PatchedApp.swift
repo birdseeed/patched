@@ -55,9 +55,24 @@ struct PatchedApp: App {
     @MenuInsertionState private var menuInserted = true
 
     var body: some Scene {
+        // The label's .task below may not run in a .menu-style menu-bar item, so the delegate also starts the
+        // schedule once launching has finished. Starting is idempotent: whichever runs first wins.
+        let _ = appDelegate.attach(session, showMainWindow: { [appDelegate] in
+            appDelegate.reopen.open()
+            NSApp.activate(ignoringOtherApps: true)
+        })
         WindowGroup("Patched", id: NativeClientMenuWindow.id) {
             NativeClientRootView(session: session)
+                .brandAccent()
                 .background(PatchedMainWindowMarker(owner: mainWindow, reopen: appDelegate.reopen))
+                .background(PatchedWindowPresenceMarker(presence: appDelegate.windowPresence))
+        }
+        .commands {
+            // One main window: no File > New Window.
+            CommandGroup(replacing: .newItem) {}
+            CommandMenu("Updates") {
+                NativeClientUpdatesCommands(session: session)
+            }
         }
         MenuBarExtra(isInserted: $menuInserted, content: {
             PatchedMenuContent(session: session, mainWindow: mainWindow)
@@ -69,7 +84,14 @@ struct PatchedApp: App {
                     NSApp.activate(ignoringOtherApps: true)
                 })
         })
-        .menuBarExtraStyle(.window)
+        // A real NSMenu: native highlighting, keyboard navigation and VoiceOver menu semantics.
+        .menuBarExtraStyle(.menu)
+        // The standard Settings window: the app menu's Settings… (⌘,) and the menu bar's Settings… open it.
+        Settings {
+            NativeClientSettingsView(session: session)
+                .brandAccent()
+                .background(PatchedWindowPresenceMarker(presence: appDelegate.windowPresence))
+        }
     }
 }
 
@@ -79,11 +101,39 @@ private struct PatchedMenuContent: View {
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        NativeClientMenuView(session: session, openWindow: {
-            mainWindow.reopen {
-                openWindow(id: NativeClientMenuWindow.id)
-            }
+        if #available(macOS 14.0, *) {
+            PatchedMenuContentOpeningSettings(session: session, openMain: openMain)
+        } else {
+            NativeClientMenuView(session: session, openWindow: openMain, openSettings: {
+                // macOS 13 has no openSettings action. Its Settings scene answers showPreferencesWindow:
+                // (showSettingsWindow: only exists from macOS 14), so send whichever the app responds to.
+                NSApp.activate(ignoringOtherApps: true)
+                let settings = Selector(("showSettingsWindow:")), preferences = Selector(("showPreferencesWindow:"))
+                if !NSApp.sendAction(settings, to: nil, from: nil) {
+                    NSApp.sendAction(preferences, to: nil, from: nil)
+                }
+            })
+        }
+    }
+
+    private func openMain() {
+        mainWindow.reopen {
+            openWindow(id: NativeClientMenuWindow.id)
+        }
+        NSApp.activate(ignoringOtherApps: true)
+    }
+}
+
+@available(macOS 14.0, *)
+private struct PatchedMenuContentOpeningSettings: View {
+    let session: NativeClientSession
+    let openMain: () -> Void
+    @Environment(\.openSettings) private var openSettings
+
+    var body: some View {
+        NativeClientMenuView(session: session, openWindow: openMain, openSettings: {
             NSApp.activate(ignoringOtherApps: true)
+            openSettings()
         })
     }
 }
@@ -153,12 +203,65 @@ private final class PatchedMainWindowMarkerView: NSView {
     }
 }
 
+/// Reports the window it is in (main or Settings) to the app's window presence, which shows the Dock icon and
+/// app menu while such a window is open.
+private struct PatchedWindowPresenceMarker: NSViewRepresentable {
+    let presence: NativeClientWindowPresence
+
+    func makeNSView(context: Context) -> PatchedWindowPresenceMarkerView {
+        PatchedWindowPresenceMarkerView(presence: presence)
+    }
+
+    func updateNSView(_ nsView: PatchedWindowPresenceMarkerView, context: Context) {}
+}
+
+private final class PatchedWindowPresenceMarkerView: NSView {
+    private let windowPresence: NativeClientWindowPresence
+
+    init(presence: NativeClientWindowPresence) {
+        windowPresence = presence
+        super.init(frame: .zero)
+    }
+
+    required init?(coder: NSCoder) { return nil }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if let window { windowPresence.track(window) }
+    }
+}
+
 @MainActor private final class PatchedApplicationDelegate: NSObject, NSApplicationDelegate {
     let reopen = NativeClientReopenCoordinator()
+    /// Patched is a menu-bar app (LSUIElement); this makes it a regular app while one of its windows is open.
+    let windowPresence = NativeClientWindowPresence()
+
+    private weak var session: NativeClientSession?
+    private var showMainWindow: (@MainActor () -> Void)?
+    private var launched = false
 
     // Registered while launching, so a click on a notification that launched the app is delivered.
     func applicationWillFinishLaunching(_ notification: Notification) {
         SystemUpdateNotifier.shared.activate()
+    }
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        launched = true
+        startBackgroundChecksIfReady()
+    }
+
+    /// Called from the scene body with the app's one session. Cheap and idempotent.
+    func attach(_ session: NativeClientSession, showMainWindow: @escaping @MainActor () -> Void) {
+        guard self.session !== session else { return }
+        self.session = session
+        self.showMainWindow = showMainWindow
+        startBackgroundChecksIfReady()
+    }
+
+    private func startBackgroundChecksIfReady() {
+        guard launched, let session, let showMainWindow else { return }
+        // After the current turn, so it never runs inside a scene body evaluation.
+        DispatchQueue.main.async { session.startBackgroundChecks(showMainWindow: showMainWindow) }
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {

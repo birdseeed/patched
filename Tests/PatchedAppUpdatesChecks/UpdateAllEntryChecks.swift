@@ -22,7 +22,115 @@ func advertised(_ apps: [InstalledApp], version: String = "2.0") -> Set<String> 
 @MainActor final class Opens { var n = 0 }
 @MainActor func yieldAFewTimes() async { for _ in 0..<20 { await Task.yield() } }
 
+/// Waits for a run and for the follow-up pass the entry point may start after it.
+@MainActor func settleFollowUp(_ controller: AppUpdatesController) async {
+    for _ in 0..<3 { await controller.waitUntilIdle(); await yieldAFewTimes() }
+    await controller.waitUntilIdle()
+}
+/// Two updatable apps, "Open" being open until it is quit.
+@MainActor func openAppRig() -> (rig: Rig, open: InstalledApp, closed: InstalledApp) {
+    let open = app("Claude"), closed = app("Zed")
+    let installer = FakeInstaller()
+    installer.updateHandler = { outcome, quit in
+        if outcome.app.name == "Claude", !quit { throw InstallRefusal.appRunning("open") }
+        return AppUpdateReport(status: "installed", fromVersion: "1.0", toVersion: "2.0", backupFolder: "/b")
+    }
+    let rig = Rig([outcome(open, .updateAvailable(offer("2.0"))), outcome(closed, .updateAvailable(offer("2.0")))], installer: installer)
+    return (rig, open, closed)
+}
+@MainActor final class Asked { var questions: [String] = []; var answer = true }
+
 @MainActor func registerUpdateAllEntryChecks() {
+    check("update-all open apps: yes quits, updates and reopens the open app after the others; one merged summary") {
+        let (rig, _, _) = openAppRig()
+        let notifier = FakeSummaryNotifier(), asked = Asked()
+        let entry = UpdateAllEntryPoint(controller: rig.controller, summaryNotifier: notifier)
+        entry.confirmOpenApps = { asked.questions.append($0); return asked.answer }
+        rig.controller.check(); await rig.settle()
+        entry.requestUpdateAll(); await settleFollowUp(rig.controller)
+        try expect(asked.questions == ["Claude is open. Quit it, update and reopen it?"], "asked: \(asked.questions)")
+        try expect(updateEvents(rig.installer) == ["update Claude quit=false", "update Zed quit=false", "update Claude quit=true"],
+                   "events: \(updateEvents(rig.installer))")
+        try expect(notifier.posted.count == 1 && notifier.posted[0].updated == 2 && notifier.posted[0].skippedOpen == 0
+                   && notifier.posted[0].failed == 0 && notifier.posted[0].openPaths.isEmpty, "summary: \(notifier.posted)")
+    }
+
+    check("update-all open apps: no leaves the open app alone and reports it skipped") {
+        let (rig, _, _) = openAppRig()
+        let notifier = FakeSummaryNotifier(), asked = Asked()
+        asked.answer = false
+        let entry = UpdateAllEntryPoint(controller: rig.controller, summaryNotifier: notifier)
+        entry.confirmOpenApps = { asked.questions.append($0); return asked.answer }
+        rig.controller.check(); await rig.settle()
+        entry.requestUpdateAll(); await settleFollowUp(rig.controller)
+        try expect(asked.questions.count == 1, "asked \(asked.questions.count) times")
+        try expect(updateEvents(rig.installer) == ["update Claude quit=false", "update Zed quit=false"], "events: \(updateEvents(rig.installer))")
+        try expect(notifier.posted.count == 1 && notifier.posted[0].updated == 1 && notifier.posted[0].skippedOpen == 1, "summary: \(notifier.posted)")
+    }
+
+    check("update-all open apps: with no confirm hook nothing is asked or quit") {
+        let (rig, _, _) = openAppRig()
+        let notifier = FakeSummaryNotifier()
+        let entry = UpdateAllEntryPoint(controller: rig.controller, summaryNotifier: notifier)
+        rig.controller.check(); await rig.settle()
+        entry.requestUpdateAll(); await settleFollowUp(rig.controller)
+        try expect(!rig.installer.recorder.events.contains { $0.hasSuffix("quit=true") }, "quit: \(rig.installer.recorder.events)")
+        try expect(notifier.posted.count == 1 && notifier.posted[0].skippedOpen == 1 && notifier.posted[0].updated == 1, "summary: \(notifier.posted)")
+        try expect(rig.controller.pendingQuit == nil, "entry-point run raised a window alert")
+    }
+
+    check("update-all open apps: nothing open means nothing asked") {
+        let rig = Rig([outcome(app("Alpha"), .updateAvailable(offer("2.0")))])
+        let asked = Asked()
+        let entry = UpdateAllEntryPoint(controller: rig.controller, summaryNotifier: FakeSummaryNotifier())
+        entry.confirmOpenApps = { asked.questions.append($0); return true }
+        rig.controller.check(); await rig.settle()
+        entry.requestUpdateAll(); await settleFollowUp(rig.controller)
+        try expect(asked.questions.isEmpty, "asked: \(asked.questions)")
+    }
+
+    check("update-all open apps: Stop during the run means no question") {
+        let open = app("Claude"), a = app("Alpha"), b = app("Bravo")
+        let installer = FakeInstaller()
+        let gate = Gate()
+        installer.updateHandler = { outcome, quit in
+            if outcome.app.name == "Claude", !quit { throw InstallRefusal.appRunning("open") }
+            if outcome.app.name == "Bravo" { await gate.wait() }
+            return AppUpdateReport(status: "installed", fromVersion: "1.0", toVersion: "2.0", backupFolder: "/b")
+        }
+        let controller = makeController(outcomes: [open, a, b].map { outcome($0, .updateAvailable(offer("2.0"))) }, installer: installer)
+        let asked = Asked()
+        let entry = UpdateAllEntryPoint(controller: controller, summaryNotifier: FakeSummaryNotifier())
+        entry.confirmOpenApps = { asked.questions.append($0); return true }
+        await runCheck(controller)
+        entry.requestUpdateAll()
+        for _ in 0..<200 where !updateEvents(installer).contains("update Bravo quit=false") { try await Task.sleep(nanoseconds: 5_000_000) }
+        entry.requestStop()
+        gate.open(); await settleFollowUp(controller)
+        try expect(asked.questions.isEmpty, "asked after Stop: \(asked.questions)")
+        try expect(!installer.recorder.events.contains { $0.hasSuffix("quit=true") }, "quit after Stop: \(installer.recorder.events)")
+    }
+
+    check("update-all open apps: the Updates window raises one alert after the run, and confirming updates with quit") {
+        let (rig, open, _) = openAppRig()
+        rig.controller.check(); await rig.settle()
+        await runOperation(rig.controller) { rig.controller.updateAll() }
+        let pending = rig.controller.pendingQuit
+        try expect(pending?.action == .updateOpen && pending?.paths == [open.path], "pending: \(String(describing: pending))")
+        try expect(pending?.message == "Claude is open. Quit it, update and reopen it?", "message: \(pending?.message ?? "nil")")
+        try expect(!updateEvents(rig.installer).contains("update Claude quit=true"), "quit before confirming")
+        await runOperation(rig.controller) { rig.controller.confirmQuit() }
+        try expect(updateEvents(rig.installer).last == "update Claude quit=true", "events: \(updateEvents(rig.installer))")
+        try expect(rig.controller.pendingQuit == nil, "alert left behind")
+    }
+
+    check("update-all open apps: the question names one, two or three apps") {
+        try expect(AppUpdatesController.openAppsQuestion(names: ["Claude"]) == "Claude is open. Quit it, update and reopen it?", "one")
+        try expect(AppUpdatesController.openAppsQuestion(names: ["Claude", "Slack"]) == "Claude and Slack are open. Quit them, update and reopen them?", "two")
+        try expect(AppUpdatesController.openAppsQuestion(names: ["Claude", "Slack", "Zoom"])
+                   == "Claude, Slack and Zoom are open. Quit them, update and reopen them?", "three")
+    }
+
     check("update-all menu: hidden with nothing waiting, otherwise 'Update All (N)' and enabled") {
         let rig = Rig([outcome(app("Alpha"), .upToDate)])
         let entry = UpdateAllEntryPoint(controller: rig.controller, summaryNotifier: nil)
@@ -153,7 +261,7 @@ func advertised(_ apps: [InstalledApp], version: String = "2.0") -> Set<String> 
         let installerRows = controller.rows.first { $0.name == "Pkgy" }
         try expect(installerRows?.privilege == .installer && !installer.recorder.events.contains { $0.contains("Pkgy") && $0.hasPrefix("update") }, "pkg row was installed")
         try expect(controller.rows.first { $0.name == "Open" }?.result?.text.contains("is open") == true, "open app not reported")
-        try expect(notifier.posted == [UpdateAllSummary(updated: 1, failed: 1, skippedOpen: 1, needsAdmin: 2)], "summary: \(notifier.posted)")
+        try expect(notifier.posted == [UpdateAllSummary(updated: 1, failed: 1, skippedOpen: 1, needsAdmin: 2, openPaths: [open.path])], "summary: \(notifier.posted)")
     }
 
     check("update-all summary text, and one summary notification per run, only from these entry points") {

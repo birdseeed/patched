@@ -1,7 +1,7 @@
 import SwiftUI
 
 public enum ShellDestination: String, CaseIterable, Hashable, Sendable {
-    case updates, applications, support, settings
+    case updates, applications, support
 }
 
 /// Main-actor display selection only. Callbacks convey no operational authority.
@@ -14,17 +14,16 @@ public enum ShellDestination: String, CaseIterable, Hashable, Sendable {
         self.onSelection = onSelection
     }
     public var mainDestinations: [ShellDestination] { [.updates, .applications] }
-    public var lowerDestinations: [ShellDestination] { [.support, .settings] }
+    public var lowerDestinations: [ShellDestination] { [.support] }
     /// Declared traversal, not evidence of native focus or VoiceOver routing.
     public var focusOrder: [String] {
         (mainDestinations + lowerDestinations).map { "destination:" + $0.rawValue }
     }
     public func label(for destination: ShellDestination) -> String {
         switch destination {
-        case .updates: return "Updates"
-        case .applications: return "Applications"
-        case .support: return "Help & Support"
-        case .settings: return "Settings"
+        case .updates: return String(localized: "Updates")
+        case .applications: return String(localized: "Applications")
+        case .support: return String(localized: "Help & Support")
         }
     }
     @discardableResult public func select(_ destination: ShellDestination) -> Bool {

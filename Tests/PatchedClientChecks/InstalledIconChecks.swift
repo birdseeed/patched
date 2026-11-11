@@ -170,6 +170,19 @@ private final class IconReadHold: @unchecked Sendable {
     }
 }
 @MainActor func registerInstalledIconChecks() {
+    check("app icon: the rasterised icon fills the whole bitmap, corner to corner, at 128 px") {
+        let source = NSImage(size: NSSize(width: 512, height: 512), flipped: false) { rect in
+            NSColor.red.setFill(); rect.fill(); return true
+        }
+        guard let image = WorkspaceAppIconProvider.rasterise(source),
+              let rep = image.representations.first as? NSBitmapImageRep else { try expect(false, "no bitmap"); return }
+        try expect(rep.pixelsWide == 128 && rep.pixelsHigh == 128 && image.size == NSSize(width: 64, height: 64),
+                   "size: \(rep.pixelsWide)x\(rep.pixelsHigh) px, \(image.size) pt")
+        for (x, y) in [(2, 2), (125, 2), (2, 125), (125, 125), (64, 64)] {
+            let alpha = rep.colorAt(x: x, y: y)?.alphaComponent ?? 0
+            try expect(alpha > 0.9, "pixel (\(x), \(y)) is empty: the icon does not fill the bitmap")
+        }
+    }
     for format in ["png", "icns"] {
         check("installed icon: real inert \(format) becomes eager per-copy pixels") {
             let f = try IconFixture(); defer { f.clean() }

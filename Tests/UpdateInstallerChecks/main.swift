@@ -715,6 +715,16 @@ check("running helper: a real child process from inside a temporary bundle is fo
     // Real files rather than a symlink to /bin/sleep: the process path is the vnode's path.
     try FileManager.default.copyItem(atPath: "/bin/sleep", toPath: bundle + "/Contents/MacOS/sleeper")
     try FileManager.default.copyItem(atPath: "/bin/sleep", toPath: sibling + "/Contents/MacOS/sleeper")
+    // A copied Apple platform binary run from outside the system is SIGKILLed about a second after launch,
+    // which made this check flaky. An ad-hoc signature makes the copies ordinary binaries that keep running.
+    for copy in [bundle, sibling] {
+        let sign = Process()
+        sign.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
+        sign.arguments = ["--force", "--sign", "-", copy + "/Contents/MacOS/sleeper"]
+        sign.standardError = FileHandle.nullDevice
+        try sign.run(); sign.waitUntilExit()
+        try expect(sign.terminationStatus == 0, "could not ad-hoc sign the test helper")
+    }
     let link = base + "/linked-sleeper"
     try FileManager.default.createSymbolicLink(atPath: link, withDestinationPath: bundle + "/Contents/MacOS/sleeper")
     func spawn(_ path: String) throws -> Process {

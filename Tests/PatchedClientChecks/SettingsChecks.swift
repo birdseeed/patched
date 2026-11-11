@@ -15,7 +15,7 @@ import PatchedShell
 @MainActor private func settingsPaint(_ session: NativeClientSession) throws -> Data {
     let app = NSApplication.shared
     if app.activationPolicy() != .prohibited { _ = app.setActivationPolicy(.prohibited) }
-    let host = NSHostingView(rootView: NativeClientRootView(session: session).frame(width: 900, height: 700))
+    let host = NSHostingView(rootView: NativeClientSettingsView(session: session).frame(width: 900, height: 700))
     host.frame = NSRect(x: 0, y: 0, width: 900, height: 700)
     let window = NSWindow(contentRect: host.frame, styleMask: .borderless, backing: .buffered, defer: false)
     window.isReleasedWhenClosed = false; window.contentView = host
@@ -48,17 +48,17 @@ import PatchedShell
     }
     check("settings: Open Notification Settings opens exactly the macOS Notifications pane") {
         let opener = SettingsOpener()
-        let session = NativeClientSession(navigation: ShellNavigation(destination: .settings), urlOpener: opener)
+        let session = NativeClientSession(navigation: ShellNavigation(destination: .updates), urlOpener: opener)
         try expect(session.openNotificationSettings(), "Notification Settings did not open")
         try expect(opener.opened == [URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension")!],
                    "Opened the wrong place: \(opener.opened)")
-        let inert = NativeClientSession(navigation: ShellNavigation(destination: .settings))
+        let inert = NativeClientSession(navigation: ShellNavigation(destination: .updates))
         try expect(!inert.openNotificationSettings(), "The inert opener opened something")
     }
     check("settings: the screen paints with each notification state and starts no check") {
         let answer = PermissionAnswer(.allowed)
         let status = NotificationStatusController(reader: { $0(answer.value) })
-        let session = NativeClientSession(navigation: ShellNavigation(destination: .settings), notificationStatus: status)
+        let session = NativeClientSession(navigation: ShellNavigation(destination: .updates), notificationStatus: status)
         let allowed = try settingsPaint(session)
         answer.value = .denied; status.refresh()
         let denied = try settingsPaint(session)
@@ -68,7 +68,7 @@ import PatchedShell
     check("settings: the screen holds only Open at login, the schedule line, notifications and the version") {
         let view = code(try source("Sources/PatchedClient/SettingsView.swift"))
         for token in ["OpenAtLoginView(controller: openAtLogin)", "Self.scheduleText", "notifications.statusText",
-                      "Open Notification Settings", "\"Version \" + version"] {
+                      "Open Notification Settings", "Text(\"Version\")", "Form {", ".formStyle(.grouped)", "Section("] {
             try expect(view.contains(token), "Settings lacks \(token)")
         }
         try expect(SettingsView.scheduleText == "Patched checks for updates when it opens and every 3 hours. It never installs anything on its own.",
@@ -77,7 +77,9 @@ import PatchedShell
             try expect(!view.contains(stale), "Settings still has \(stale)")
         }
         let root = code(try source("Sources/PatchedClient/NativeClientSession.swift"))
-        try expect(root.contains("case .settings:") && root.contains("SettingsView(") && !root.contains("NativeScheduleSettingsView")
-                   && !root.contains("NativeNetworkSettingsView") && !root.contains("unavailable in this preview"), "Root still routes legacy settings")
+        try expect(!root.contains("case .settings") && !root.contains("SettingsView(") && !root.contains("NativeScheduleSettingsView")
+                   && !root.contains("NativeNetworkSettingsView") && !root.contains("unavailable in this preview"), "Root still routes settings inside the main window")
+        let app = code(try source("Sources/PatchedApp/PatchedApp.swift"))
+        try expect(app.contains("Settings {") && app.contains("NativeClientSettingsView(session: session)"), "No standard Settings scene")
     }
 }

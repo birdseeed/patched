@@ -68,10 +68,67 @@ import PatchedShell
         }
         try expect(!session.appUpdates.hasChecked && session.appUpdates.phase != .checking, "A lifecycle event checked")
     }
+    check("chrome follows the user's system accent: no custom tint or brand palette in any view") {
+        var files: [(String, String)] = []
+        for directory in ["Sources/PatchedShell", "Sources/PatchedClient", "Sources/PatchedApp"] {
+            files += try swiftSources(directory).map { (directory + "/" + $0.0, code($0.1)) }
+        }
+        for (name, text) in files {
+            // The one app accent lives in ShellBrand.swift; nothing else tints.
+            if name == "Sources/PatchedShell/ShellBrand.swift" { continue }
+            for forbidden in [".tint(", "ShellBrand.", "ShellColorRole", "ShellAppearance", "NSColor(srgbRed"] {
+                try expect(!text.contains(forbidden), "\(name) overrides system colours with \(forbidden)")
+            }
+            // Only the brand mark itself (the logo, not chrome) may carry fixed colours.
+            if name != "Sources/PatchedShell/ShellBrand.swift" {
+                try expect(!text.contains("Color(.sRGB"), "\(name) paints chrome with a fixed colour")
+            }
+        }
+    }
+    check("brand: blue accent on every window whatever the system accent; logo above the sidebar") {
+        let accent = NSColor(BrandAccent.color).usingColorSpace(.sRGB)
+        try expect(accent.map { abs($0.blueComponent - 0xEB / 255.0) < 0.01 && abs($0.redComponent - 0x25 / 255.0) < 0.01 } ?? false,
+                   "The app accent is not brand blue")
+        let app = code(try source("Sources/PatchedApp/PatchedApp.swift"))
+        try expect(app.components(separatedBy: ".brandAccent()").count == 3, "Main and Settings windows do not both carry the app accent")
+        let shell = code(try source("Sources/PatchedShell/ShellView.swift"))
+        try expect(shell.contains(".safeAreaInset(edge: .top, spacing: 0) { brandHeader }") && shell.contains("BrandMarkView(size: 24)"),
+                   "The sidebar lost its logo")
+    }
+    check("interface copy is localisable from the main bundle; only names and data stay verbatim") {
+        var files: [(String, String)] = []
+        for directory in ["Sources/PatchedShell", "Sources/PatchedClient", "Sources/PatchedApp"] {
+            files += try swiftSources(directory).map { (directory + "/" + $0.0, code($0.1)) }
+        }
+        let verbatimLiteral = try NSRegularExpression(pattern: #"Text\(verbatim: "([^"]*)""#)
+        for (name, text) in files {
+            for match in verbatimLiteral.matches(in: text, range: NSRange(text.startIndex..., in: text)) {
+                let literal = String(text[Range(match.range(at: 1), in: text)!])
+                try expect(literal == "Patched", "\(name) shows fixed copy verbatim, so it cannot be localised: \(literal)")
+            }
+            // A hand-assembled .app has no SwiftPM resource bundle beside it; Bundle.module would look in the wrong place.
+            try expect(!text.contains("Bundle.module"), "\(name) looks up text in Bundle.module")
+        }
+        try expect(!code(try source("Package.swift")).contains("resources:"), "Package.swift declares SwiftPM resources")
+    }
+    check("row status and result text in AppUpdatesController is built with String(localized:), not bare literals") {
+        let text = code(try source("Sources/PatchedClient/AppUpdatesController.swift"))
+        let literalResult = try NSRegularExpression(pattern: #"\btext:\s*""#)
+        try expect(literalResult.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) == nil,
+                   "AppUpdatesController passes a bare string literal as result text; use String(localized:)")
+        guard let start = text.range(of: "public var statusText: String {"),
+              let end = text.range(of: "\n    }\n", range: start.upperBound..<text.endIndex) else {
+            throw CheckFailure(description: "AppUpdateRow.statusText not found")
+        }
+        let body = String(text[start.upperBound..<end.lowerBound])
+        let bareReturn = try NSRegularExpression(pattern: #"return\s*""#)
+        try expect(bareReturn.firstMatch(in: body, range: NSRange(body.startIndex..., in: body)) == nil,
+                   "AppUpdateRow.statusText returns a bare string literal; use String(localized:)")
+    }
     check("actual root uses shared shell and real children, with no local disk image inspection") {
         let root = code(try source("Sources/PatchedClient/NativeClientSession.swift"))
-        for required in ["ShellView(", "AppsListView(", "SettingsView(", "supportPanel", "session.navigation",
-                         "case .applications", "case .updates", "case .support", "case .settings", "AppUpdatesView(controller: session.appUpdates)"] {
+        for required in ["ShellView(", "AppsListView(", "supportPanel", "session.navigation",
+                         "case .applications", "case .updates", "case .support", "AppUpdatesView(controller: session.appUpdates)"] {
             try expect(root.contains(required), "Root lacks real composition binding: \(required)")
         }
         for forbidden in [".onAppear", ".task", "Timer", "URLSession", "ArtifactInspector", "UpdateView(", "onUpdate", "Fixture", "Task {",

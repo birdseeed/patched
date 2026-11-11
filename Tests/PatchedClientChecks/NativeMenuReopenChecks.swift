@@ -45,7 +45,7 @@ import PatchedClient
     check("reopen: repeated registration replaces callback and leaves shared session inert") {
         let route = NativeClientReopenCoordinator(), session = NativeClientSession()
         let updates = session.appUpdates, navigation = session.navigation
-        navigation.select(.settings)
+        navigation.select(.applications)
         let destination = navigation.destination
         var oldCalls = 0, latestCalls = 0
         weak var released: ReopenProbe?
