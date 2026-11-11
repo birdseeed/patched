@@ -122,7 +122,7 @@ public struct SupportContent: Equatable, Sendable {
 
     public static func make(repository: URL? = PublicLinks.repository, coffee: URL = PublicLinks.coffee) -> SupportContent {
         var links = [Link(title: String(localized: "Buy me a coffee"),
-                          detail: String(localized: "Donations pay for an Apple Developer ID, so releases can be signed."), url: coffee)]
+                          detail: String(localized: "Donations help pay for the Apple Developer membership that signs and notarises each release."), url: coffee)]
         if let repository {
             links.append(Link(title: String(localized: "Report a problem"), detail: String(localized: "Opens the issue tracker."),
                               url: repository.appendingPathComponent("issues")))

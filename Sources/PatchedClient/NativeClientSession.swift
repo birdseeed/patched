@@ -123,7 +123,7 @@ public struct NativeClientRootView: View {
             }
             GroupBox(label: Text("Support Patched").font(.headline)) {
                 VStack(alignment: .leading, spacing: 12) {
-                    Text("Patched is free. Donations go towards an Apple Developer ID so releases can be signed.")
+                    Text("Patched is free. Donations help pay for the Apple Developer membership that signs and notarises each release.")
                         .font(.body).lineSpacing(2).fixedSize(horizontal: false, vertical: true)
                     // One prominent action per group: the donation. The other links are ordinary buttons in a row,
                     // with their descriptions as the tooltip and VoiceOver hint.

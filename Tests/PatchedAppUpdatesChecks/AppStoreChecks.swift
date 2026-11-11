@@ -355,7 +355,7 @@ func storeOutcome(_ app: InstalledApp, version: String = "3.0", track: Int = 123
         let content = session.supportContent
         try expect(PublicLinks.repository?.absoluteString == "https://github.com/birdseeed/patched", "repository link: \(String(describing: PublicLinks.repository))")
         try expect(content.links.map(\.title) == ["Buy me a coffee", "Report a problem", "Source code"], "links: \(content.links.map(\.title))")
-        try expect(content.links[0].url.absoluteString == "https://buymeacoffee.com/andybridson" && content.links[0].detail.contains("Apple Developer ID"), "coffee link")
+        try expect(content.links[0].url.absoluteString == "https://buymeacoffee.com/andybridson" && content.links[0].detail.contains("Apple Developer membership"), "coffee link")
         try expect(content.links[1].url.absoluteString == "https://github.com/birdseeed/patched/issues", "issues link: \(content.links[1].url)")
         try expect(content.links[2].url.absoluteString == "https://github.com/birdseeed/patched", "source link: \(content.links[2].url)")
         try expect(content.about.contains("free, open source community project") && content.about.contains("no company"), "about: \(content.about)")

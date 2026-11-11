@@ -53,11 +53,30 @@ Create a local release archive, checksum and signature with:
 
 ```sh
 /bin/bash scripts/release.sh
-(cd dist && shasum -a 256 -c Patched-0.1.7.zip.sha256)
+(cd dist && shasum -a 256 -c Patched-0.1.8.zip.sha256)
+(cd dist && shasum -a 256 -c Patched-0.1.8.dmg.sha256)
 ```
 
-This produces `dist/Patched-<version>.zip`, `.zip.sha256` and `.zip.sig`. It does
-not publish anything. The archive keeps the outer `Patched.app` directory.
+This produces `dist/Patched-<version>.zip`, `.zip.sha256` and `.zip.sig`, and a
+disk image `dist/Patched-<version>.dmg` with `.dmg.sha256`. It does not publish
+anything. The archive keeps the outer `Patched.app` directory.
+
+The disk image is for first installs and Homebrew: a compressed read-only (UDZO)
+image, volume name "Patched", holding the same final `Patched.app` as the zip (the
+stapled app, when notarised) and an `Applications` link to `/Applications`, so the
+app can be dragged across. There is no background image or window layout. It is
+made with `hdiutil` from a folder in the release stage under `.build`. With
+`SIGNING_IDENTITY` the image itself is signed with that identity and a timestamp,
+its certificate team must equal `RELEASE_TEAM_ID` and its Authority must be
+Developer ID Application, and with `NOTARY_PROFILE` it is notarised (status
+`Accepted` required, as for the zip), stapled and validated. Every image is then
+attached read-only in the stage: the app on it must verify strictly, be version
+`VERSION` and, when a Team ID is pinned, satisfy the same release requirement as
+the zip's app. It is always detached again, also when a step fails. An ad-hoc
+build gets an unsigned, unnotarised image. Self-update never uses the disk image;
+it accepts only the Ed25519-signed zip. Every step happens in the stage before
+anything is moved into the output folder, and a `.sig`, `.dmg` or `.dmg.sha256`
+left by an earlier build is removed before the new files are moved in.
 
 The `.sig` is Patched's self-update anchor: an Ed25519 signature over the final zip
 bytes, as one line of base64 (64 bytes). The private key is a generic password in
@@ -72,13 +91,15 @@ public key built into Patched (`PatchedReleaseKey.publicKeyBase64` in
 against that key stops the release. macOS may ask to allow `security` to read the
 item.
 
-`--unsigned-for-testing` builds the zip and checksum without the Keychain and
-without a `.sig`; Patched never installs such a zip. For the packaging checks only,
+`--unsigned-for-testing` builds the zip, the disk image and their checksums without
+the Keychain, without a `.sig` and with an unsigned image; Patched never installs
+such a zip. For the packaging checks only,
 `PATCHED_RELEASE_KEY_SERVICE` and `PATCHED_RELEASE_KEYCHAIN` point at a throwaway key
 in a throwaway keychain, and `PATCHED_RELEASE_PUBLIC_KEY_OVERRIDE` names its public
-key; the override is refused for the real service. Upload all three files to the
+key; the override is refused for the real service. Upload all five files to the
 GitHub release: the app accepts only assets named exactly `Patched-<version>.zip`
-and `Patched-<version>.zip.sig` on that release. Later, with an
+and `Patched-<version>.zip.sig` on that release, and the disk image is for people
+installing by hand or through Homebrew. Later, with an
 existing Developer ID Application identity and an existing notarytool keychain
 profile, use exactly these environment variables:
 
@@ -161,6 +182,11 @@ throwaway key in a throwaway keychain: a missing key is refused before building,
 key that is not the one built into Patched is refused after signing with no zip
 left behind, the public-key override is refused for the real service, a signed
 release's `.sig` verifies with the throwaway key and not with the real one or over
-a changed zip, and `--unsigned-for-testing` produces no `.sig`. The owner's real
+a changed zip, and `--unsigned-for-testing` produces no `.sig`. For both the
+throwaway-key and unsigned releases they check the disk image: its checksum, UDZO
+format, volume name, exactly `Patched.app` and an `Applications` link to
+`/Applications` when mounted, the app's version and `codesign --verify --strict
+--deep`; a stale image and a checksum symlink from an earlier build are replaced,
+and a refused release leaves no image behind. The owner's real
 Keychain item is never read. Verification never uses notarisation
 credentials or installs the app or a real LaunchAgent.

@@ -48,7 +48,7 @@ if [[ -n "${PATCHED_RELEASE_PUBLIC_KEY_OVERRIDE:-}" ]]; then
     expected_key=$PATCHED_RELEASE_PUBLIC_KEY_OVERRIDE
 fi
 if "$unsigned"; then
-    printf 'Unsigned test archive (--unsigned-for-testing): no .sig is written, and Patched will not install it.\n'
+    printf 'Unsigned test archive and disk image (--unsigned-for-testing): no .sig is written, the .dmg is not signed or notarised, and Patched will not install either.\n'
 elif ! /usr/bin/security find-generic-password -s "$key_service" -a ed25519 \
         ${keychain_args[@]+"${keychain_args[@]}"} > /dev/null 2>&1; then
     # Checked before building, so nothing is produced. Only the item's presence is read here.
@@ -81,14 +81,29 @@ if [[ -n "${NOTARY_PROFILE:-}" ]]; then
     fi
 fi
 archive="Patched-$PACKAGING_VERSION.zip"
+dmg="Patched-$PACKAGING_VERSION.dmg"
 stage=$(mktemp -d "$PACKAGING_ROOT/.build/packaging-release.XXXXXX")
-trap 'rm -rf "$stage"' EXIT
-zip_app() { /usr/bin/ditto -c -k --keepParent "$app" "$stage/$archive"; }
-zip_app
-if [[ -n "${NOTARY_PROFILE:-}" ]]; then
-    /usr/bin/xcrun notarytool submit "$stage/$archive" --keychain-profile "$NOTARY_PROFILE" --wait \
-        --output-format json > "$stage/notary-result.json"
-    if ! notary_status=$(/usr/bin/plutil -extract status raw -o - "$stage/notary-result.json"); then
+dmg_mount=""
+# A disk image is attached only while it is checked. The stage is removed only once nothing is mounted inside
+# it, so a failure at any step detaches the image first and never deletes through a mounted volume.
+dmg_is_mounted() { [[ -n "$dmg_mount" && -d "$dmg_mount" && "$(/usr/bin/stat -f %d "$dmg_mount")" != "$(/usr/bin/stat -f %d "$dmg_mount/..")" ]]; }
+cleanup() {
+    if dmg_is_mounted; then
+        /usr/bin/hdiutil detach -quiet "$dmg_mount" || /usr/bin/hdiutil detach -quiet -force "$dmg_mount" || true
+    fi
+    if dmg_is_mounted; then
+        printf 'Could not detach the disk image mounted at %s; leaving %s in place.\n' "$dmg_mount" "$stage" >&2
+        return
+    fi
+    rm -rf "$stage"
+}
+trap cleanup EXIT
+# Notarise <file>, requiring a parsed status of Accepted. Usage: notarise <file> <result json>
+notarise() {
+    local file=$1 result=$2 notary_status
+    /usr/bin/xcrun notarytool submit "$file" --keychain-profile "$NOTARY_PROFILE" --wait \
+        --output-format json > "$result"
+    if ! notary_status=$(/usr/bin/plutil -extract status raw -o - "$result"); then
         printf 'Could not read notarisation status; refusing to publish release artifacts.\n' >&2
         exit 1
     fi
@@ -96,6 +111,11 @@ if [[ -n "${NOTARY_PROFILE:-}" ]]; then
         printf 'Notarisation status is %s, expected Accepted; refusing to publish release artifacts.\n' "$notary_status" >&2
         exit 1
     fi
+}
+zip_app() { /usr/bin/ditto -c -k --keepParent "$app" "$stage/$archive"; }
+zip_app
+if [[ -n "${NOTARY_PROFILE:-}" ]]; then
+    notarise "$stage/$archive" "$stage/notary-result.json"
     /usr/bin/xcrun stapler staple "$app"
     /usr/bin/xcrun stapler validate "$app"
     # The stapled app must satisfy exactly the requirement pinned copies of Patched will check it against.
@@ -105,6 +125,46 @@ if [[ -n "${NOTARY_PROFILE:-}" ]]; then
 else
     printf 'Created local archive without notarisation (NOTARY_PROFILE was not supplied).\n'
 fi
+# The disk image is for first installs and Homebrew: the same final (stapled, when notarised) app beside an
+# Applications link, to drag across. Self-update never uses it; it still needs the Ed25519-signed zip.
+dmg_root="$stage/dmg-root"
+mkdir "$dmg_root"
+/usr/bin/ditto "$app" "$dmg_root/Patched.app"
+ln -s /Applications "$dmg_root/Applications"
+/usr/bin/hdiutil create -quiet -volname Patched -srcfolder "$dmg_root" -fs HFS+ -format UDZO "$stage/$dmg"
+if [[ -n "${SIGNING_IDENTITY:-}" ]]; then
+    /usr/bin/codesign --sign "$SIGNING_IDENTITY" --timestamp "$stage/$dmg"
+    /usr/bin/codesign --verify --strict "$stage/$dmg"
+    packaging_require_signing_team "$stage/$dmg" "$release_team_id" || exit 1
+    dmg_authority=$(/usr/bin/codesign -d --verbose=2 "$stage/$dmg" 2>&1)
+    if ! /usr/bin/grep -q '^Authority=Developer ID Application:' <<< "$dmg_authority"; then
+        printf 'The disk image does not have a Developer ID Application signature; refusing to publish release artifacts.\n' >&2
+        exit 1
+    fi
+    if [[ -n "${NOTARY_PROFILE:-}" ]]; then
+        notarise "$stage/$dmg" "$stage/dmg-notary-result.json"
+        /usr/bin/xcrun stapler staple "$stage/$dmg"
+        /usr/bin/xcrun stapler validate "$stage/$dmg"
+    fi
+else
+    printf 'Created disk image without a signature or notarisation (SIGNING_IDENTITY was not supplied).\n'
+fi
+# Check what a user will actually drag out: the app on the mounted image, read-only.
+dmg_mount="$stage/dmg-mount"
+mkdir "$dmg_mount"
+/usr/bin/hdiutil attach -quiet -nobrowse -readonly -noautoopen -mountpoint "$dmg_mount" "$stage/$dmg"
+dmg_app="$dmg_mount/Patched.app"
+/usr/bin/codesign --verify --strict --deep "$dmg_app" || {
+    printf 'The app in the disk image does not verify; refusing to publish release artifacts.\n' >&2; exit 1; }
+if [[ -n "$release_team_id" ]]; then
+    packaging_require_release_requirement "$dmg_app" "$release_team_id" || exit 1
+fi
+dmg_version=$(/usr/bin/plutil -extract CFBundleShortVersionString raw -o - "$dmg_app/Contents/Info.plist") || dmg_version=""
+if [[ "$dmg_version" != "$PACKAGING_VERSION" ]]; then
+    printf 'The app in the disk image is version "%s", not %s; refusing to publish release artifacts.\n' "$dmg_version" "$PACKAGING_VERSION" >&2
+    exit 1
+fi
+/usr/bin/hdiutil detach -quiet "$dmg_mount" || /usr/bin/hdiutil detach -quiet -force "$dmg_mount"
 if ! "$unsigned"; then
     # Sign the final zip bytes. The key goes from the Keychain straight into the signer's stdin: it is never
     # in a variable, an argument, a file or the log.
@@ -122,15 +182,19 @@ if ! "$unsigned"; then
         exit 1
     fi
 fi
-# A .sig from an earlier build of this version must never sit beside the new zip, even if a later step fails.
-rm -f "$PACKAGING_OUTPUT/$archive.sig"
+# Nothing from an earlier build of this version (a .sig, a disk image or its checksum) may ever sit beside the
+# new files, even if a later step fails. Every failure above happens in the stage, before this point.
+rm -f "$PACKAGING_OUTPUT/$archive.sig" "$PACKAGING_OUTPUT/$dmg" "$PACKAGING_OUTPUT/$dmg.sha256"
 /bin/mv -fh "$stage/$archive" "$PACKAGING_OUTPUT/$archive"
 (cd "$PACKAGING_OUTPUT" && /usr/bin/shasum -a 256 "$archive" > "$stage/$archive.sha256")
 /bin/mv -fh "$stage/$archive.sha256" "$PACKAGING_OUTPUT/$archive.sha256"
+/bin/mv -fh "$stage/$dmg" "$PACKAGING_OUTPUT/$dmg"
+(cd "$PACKAGING_OUTPUT" && /usr/bin/shasum -a 256 "$dmg" > "$stage/$dmg.sha256")
+/bin/mv -fh "$stage/$dmg.sha256" "$PACKAGING_OUTPUT/$dmg.sha256"
 if "$unsigned"; then
     rm -f "$PACKAGING_OUTPUT/$archive.sig"
-    printf 'Release artifacts: %s/%s and .sha256 (unsigned, for testing only)\n' "$PACKAGING_OUTPUT" "$archive"
+    printf 'Release artifacts: %s/%s and .sha256, %s and .sha256 (unsigned, for testing only)\n' "$PACKAGING_OUTPUT" "$archive" "$dmg"
 else
     /bin/mv -fh "$stage/$archive.sig" "$PACKAGING_OUTPUT/$archive.sig"
-    printf 'Release artifacts: %s/%s, .sha256 and .sig\n' "$PACKAGING_OUTPUT" "$archive"
+    printf 'Release artifacts: %s/%s, .sha256 and .sig; %s and .sha256\n' "$PACKAGING_OUTPUT" "$archive" "$dmg"
 fi

@@ -116,6 +116,13 @@ then verifies the `.sig` against the public key built into Patched
 produce release files if the key is missing or the signature does not verify. The
 packaging checks use a throwaway key in a throwaway keychain.
 
+**The disk image.** Each release also has `Patched-<version>.dmg`, for first installs
+and Homebrew. It holds the same stapled app as the zip, and the image itself is
+signed with the Developer ID Application certificate, notarised and stapled;
+`release.sh` checks the image's team and the app on it against the same requirement
+before publishing. Self-update never uses it: it still requires the Ed25519-signed
+zip and, when pinned, the release Team ID.
+
 **When it runs.** Only from a click on Update beside "Patched X is available" (menu
 or Updates screen) or on the self-update notification's Update… button, and then
 only after a second click on the confirmation ("Update Patched to X? Patched will

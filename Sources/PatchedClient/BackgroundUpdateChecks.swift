@@ -6,6 +6,7 @@ import UserNotifications
 import ServiceManagement
 import Security
 import UpdateSources
+import UpdateInstaller
 
 // Scheduled checks. Patched checks for updates when the app opens, every 3 hours while it runs, and on
 // demand. Scheduled and launch checks only notify (a notification and a menu-bar count). Nothing here
@@ -104,6 +105,9 @@ public enum LoginItemStatus: Equatable, Sendable {
     private var ownCheckInFlight = false
     /// Set after a successful check until Patched's own release has been judged: whether to notify.
     private var pendingSelfSettle: Bool?
+    /// Set when Patched was reopened by its own self-update: the first check runs even if the previous copy
+    /// checked minutes ago, so the new version's list is never empty. Cleared once that check starts.
+    private var checkDespiteRecentCheck = false
     public private(set) var started = false
 
     public init(controller: AppUpdatesController, now: @escaping () -> Date, timer: any CheckTimerScheduling,
@@ -112,10 +116,12 @@ public enum LoginItemStatus: Equatable, Sendable {
         self.notifier = notifier; self.wake = wake; self.store = store
     }
 
-    /// Begins the schedule: one check now (unless one ran in the last 10 minutes), then every 3 hours.
-    public func start() {
+    /// Begins the schedule: one check now (unless one ran in the last 10 minutes, or always after a
+    /// self-update relaunch), then every 3 hours.
+    public func start(afterSelfUpdate: Bool = false) {
         guard !started else { return }
         started = true
+        checkDespiteRecentCheck = afterSelfUpdate
         controller.onCheckFinished = { [weak self] outcome in self?.finished(outcome) }
         controller.onSelfLookupFinished = { [weak self] in self?.settleSelfUpdateWhenReady() }
         wakeToken = wake.observe { [weak self] in self?.woke() }
@@ -161,7 +167,7 @@ public enum LoginItemStatus: Equatable, Sendable {
 
     private func attempt(_ origin: Origin) {
         guard started else { return }
-        if origin != .interval, let age = age(), age < Self.launchSkipWindow { arm(); return }
+        if origin != .interval, !checkDespiteRecentCheck, let age = age(), age < Self.launchSkipWindow { arm(); return }
         // One check at a time: a check already running (ours or the user's) will re-arm the timer when it ends.
         guard !ownCheckInFlight, controller.phase == .idle else { return }
         // Never overlap an install, rollback or recovery; look again shortly.
@@ -172,6 +178,7 @@ public enum LoginItemStatus: Equatable, Sendable {
         }
         store.lastCheck = now()
         ownCheckInFlight = true
+        checkDespiteRecentCheck = false
         controller.check()
         if controller.phase != .checking {
             // The controller refused (for example a broken catalogue). Retry at the next interval.
@@ -495,8 +502,8 @@ extension OpenAtLoginController {
 extension NativeClientSession {
     public var backgroundChecksRunning: Bool { backgroundChecks?.started == true }
 
-    /// Starts the schedule: a check now (unless one ran in the last 10 minutes), then every 3 hours.
-    /// Scheduled checks only notify. `showMainWindow` brings the window forward when a notification is
+    /// Starts the schedule: a check now (unless one ran in the last 10 minutes; always when this
+    /// copy was reopened by a self-update), then every 3 hours. Scheduled checks only notify. `showMainWindow` brings the window forward when a notification is
     /// clicked. Safe to call more than once; does nothing for a fixture session.
     public func startBackgroundChecks(showMainWindow: @escaping @MainActor () -> Void) {
         guard let backgroundChecks, !backgroundChecks.started else { return }
@@ -508,7 +515,7 @@ extension NativeClientSession {
         wireNotificationActions(openUpdates: openUpdates)
         wireSelfUpdateAction(openUpdates: openUpdates)
         updateNotifier?.activate()
-        backgroundChecks.start()
+        backgroundChecks.start(afterSelfUpdate: SelfRelaunch.pidToAwait(in: CommandLine.arguments) != nil)
     }
 }
 

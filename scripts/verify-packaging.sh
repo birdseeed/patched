@@ -14,8 +14,13 @@ cd "$PACKAGING_ROOT"
 packaging_version
 mkdir -p .build
 stage=$(mktemp -d "$PACKAGING_ROOT/.build/packaging-check.XXXXXX")
+dmg_mount=""
 cleanup() {
     local status=$?
+    # Never leave a checked disk image attached, even when a check fails while it is mounted.
+    if [[ -n "$dmg_mount" ]]; then
+        /usr/bin/hdiutil detach -quiet "$dmg_mount" || /usr/bin/hdiutil detach -quiet -force "$dmg_mount" || true
+    fi
     if [[ $status -eq 0 ]]; then rm -rf "$stage"; else printf 'Packaging check artifacts retained: %s\n' "$stage" >&2; fi
 }
 trap cleanup EXIT
@@ -52,6 +57,35 @@ expect_release_refusal() {
     /usr/bin/grep -q "$message" "$stage/$name.log" || { printf 'Missing refusal text for %s.\n' "$name" >&2; exit 1; }
     [[ ! -e "$stage/$name/Patched-$PACKAGING_VERSION.zip" && ! -e "$stage/$name/Patched-$PACKAGING_VERSION.zip.sig" ]] || {
         printf 'Refused release (%s) left a zip or signature.\n' "$name" >&2; exit 1; }
+    [[ ! -e "$stage/$name/Patched-$PACKAGING_VERSION.dmg" && ! -e "$stage/$name/Patched-$PACKAGING_VERSION.dmg.sha256" ]] || {
+        printf 'Refused release (%s) left a disk image or its checksum.\n' "$name" >&2; exit 1; }
+}
+# A release's disk image: a matching checksum, a compressed read-only image whose volume "Patched" holds exactly
+# Patched.app and an Applications link to /Applications, and an app of this version with a valid signature.
+check_release_dmg() {
+    local dir=$1 dmg entries volume
+    dmg="$dir/Patched-$PACKAGING_VERSION.dmg"
+    [[ -f "$dmg" && ! -L "$dmg" && -f "$dmg.sha256" && ! -L "$dmg.sha256" ]] || {
+        printf 'Missing disk image or checksum in %s.\n' "$dir" >&2; exit 1; }
+    (cd "$dir" && /usr/bin/shasum -a 256 -c "Patched-$PACKAGING_VERSION.dmg.sha256")
+    [[ "$(/usr/bin/hdiutil imageinfo -plist "$dmg" 2> /dev/null | /usr/bin/plutil -extract Format raw -o - -)" = UDZO ]] || {
+        printf 'The disk image is not a compressed read-only (UDZO) image: %s\n' "$dmg" >&2; exit 1; }
+    dmg_mount=$(mktemp -d "$stage/dmg-mount.XXXXXX")
+    /usr/bin/hdiutil attach -quiet -nobrowse -readonly -noautoopen -mountpoint "$dmg_mount" "$dmg"
+    volume=$(/usr/sbin/diskutil info -plist "$dmg_mount" | /usr/bin/plutil -extract VolumeName raw -o - -)
+    [[ "$volume" = Patched ]] || { printf 'Disk image volume name: expected Patched, got %s\n' "$volume" >&2; exit 1; }
+    entries=$(cd "$dmg_mount" && /bin/ls -A)
+    [[ "$entries" = $'Applications\nPatched.app' ]] || {
+        printf 'Disk image contents: expected Applications and Patched.app, got: %s\n' "$entries" >&2; exit 1; }
+    [[ -L "$dmg_mount/Applications" && "$(/usr/bin/readlink "$dmg_mount/Applications")" = /Applications ]] || {
+        printf 'The disk image Applications entry is not a link to /Applications.\n' >&2; exit 1; }
+    [[ -d "$dmg_mount/Patched.app" && ! -L "$dmg_mount/Patched.app" ]]
+    [[ "$(/usr/bin/plutil -extract CFBundleShortVersionString raw -o - "$dmg_mount/Patched.app/Contents/Info.plist")" = "$PACKAGING_VERSION" ]] || {
+        printf 'The app in the disk image is not version %s.\n' "$PACKAGING_VERSION" >&2; exit 1; }
+    /usr/bin/codesign --verify --strict --deep --verbose=2 "$dmg_mount/Patched.app"
+    /usr/bin/hdiutil detach -quiet "$dmg_mount"
+    dmg_mount=""
+    printf 'Verified disk image %s: checksum, volume, contents, version and app signature.\n' "$dmg"
 }
 # The release Team ID pin: none on an ad-hoc build, and a Developer ID build must name a well-formed team. All
 # of these are refused before building (and before the Keychain is read), so nothing is produced.
@@ -105,6 +139,9 @@ unset test_private_key
 # A key that is not the one built into Patched: signed, but the self-check refuses to publish.
 expect_release_refusal wrong-key-release 'does not verify against the release public key built into Patched' \
     "${release_env[@]}" /bin/bash scripts/release.sh "${build_options[@]}"
+# That refusal comes after the disk image was built and checked in the stage, and none reached the output.
+/usr/bin/grep -q 'Created disk image without a signature' "$stage/wrong-key-release.log" || {
+    printf 'The wrong-key release failed before building its disk image.\n' >&2; exit 1; }
 printf 'Release signing refused without a key, with the real-service override, and with a key Patched does not embed.\n'
 env -u SIGNING_IDENTITY -u NOTARY_PROFILE -u RELEASE_TEAM_ID /bin/bash scripts/build-app.sh "${build_options[@]}" --output-dir "$stage/build"
 app="$stage/build/Patched.app"
@@ -241,11 +278,15 @@ schedule="$stage/schedule/im.patched.check.plist"
 mkdir -p "$stage/release"
 printf 'Packaging checksum sentinel\n' > "$stage/checksum-sentinel"
 ln -s "$stage/checksum-sentinel" "$stage/release/Patched-$PACKAGING_VERSION.zip.sha256"
+# A disk image and checksum left by an earlier build are replaced, and the checksum link is not followed.
+printf 'Stale disk image\n' > "$stage/release/Patched-$PACKAGING_VERSION.dmg"
+ln -s "$stage/checksum-sentinel" "$stage/release/Patched-$PACKAGING_VERSION.dmg.sha256"
 "${release_env[@]}" PATCHED_RELEASE_PUBLIC_KEY_OVERRIDE="$test_public_key" \
     /bin/bash scripts/release.sh "${build_options[@]}" --output-dir "$stage/release"
 [[ "$(cat "$stage/checksum-sentinel")" = 'Packaging checksum sentinel' ]]
 [[ ! -L "$stage/release/Patched-$PACKAGING_VERSION.zip.sha256" ]]
 (cd "$stage/release" && /usr/bin/shasum -a 256 -c "Patched-$PACKAGING_VERSION.zip.sha256")
+check_release_dmg "$stage/release"
 # The .sig is one base64 line that verifies over the zip with the throwaway key, and with nothing else.
 release_zip="$stage/release/Patched-$PACKAGING_VERSION.zip"
 release_sig="$release_zip.sig"
@@ -264,9 +305,13 @@ printf 'Release signature verified with the throwaway key; the real key and a ta
 # --unsigned-for-testing still builds a zip without the Keychain, and writes no signature.
 env -u SIGNING_IDENTITY -u NOTARY_PROFILE -u RELEASE_TEAM_ID PATCHED_RELEASE_KEY_SERVICE=im.patched.release-signing.absent \
     PATCHED_RELEASE_KEYCHAIN="$stage/absent.keychain-db" \
-    /bin/bash scripts/release.sh "${build_options[@]}" --unsigned-for-testing --output-dir "$stage/unsigned-release"
+    /bin/bash scripts/release.sh "${build_options[@]}" --unsigned-for-testing --output-dir "$stage/unsigned-release" \
+    | /usr/bin/tee "$stage/unsigned-release.log"
 [[ -f "$stage/unsigned-release/Patched-$PACKAGING_VERSION.zip" && ! -e "$stage/unsigned-release/Patched-$PACKAGING_VERSION.zip.sig" ]]
 (cd "$stage/unsigned-release" && /usr/bin/shasum -a 256 -c "Patched-$PACKAGING_VERSION.zip.sha256")
+/usr/bin/grep -q 'the .dmg is not signed or notarised' "$stage/unsigned-release.log" || {
+    printf 'The --unsigned-for-testing message does not mention the disk image.\n' >&2; exit 1; }
+check_release_dmg "$stage/unsigned-release"
 /usr/bin/ditto -x -k "$stage/release/Patched-$PACKAGING_VERSION.zip" "$stage/unpacked"
 /usr/bin/codesign --verify --deep --strict --verbose=2 "$stage/unpacked/Patched.app"
 /usr/bin/codesign --verify --strict --verbose=2 "$stage/unpacked/Patched.app/Contents/Helpers/patched"

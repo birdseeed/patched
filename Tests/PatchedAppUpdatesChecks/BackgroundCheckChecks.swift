@@ -177,6 +177,20 @@ struct FakeNetworkDown: Error {}
         try expect(older.checks.count == 1, "no launch check 11 minutes after the last")
     }
 
+    check("schedule: a copy reopened by its own self-update checks at once, even minutes after the last check") {
+        let rig = Rig([outcome(app("Alpha"), .upToDate)])
+        rig.store.lastCheck = rig.clock.date.addingTimeInterval(-2 * 60)
+        rig.scheduler.start(afterSelfUpdate: true); await rig.settle()
+        try expect(rig.checks.count == 1, "no check after a self-update relaunch")
+        try expect(rig.store.lastCheck == rig.clock.date, "last check not recorded")
+        try expect(rig.timer.active.count == 1 && rig.timer.active[0].delay == interval, "timer: \(rig.timer.active.map(\.delay))")
+        // After the forced check the normal 3-hour cadence applies.
+        rig.clock.advance(60)
+        try rig.timer.fireActive(); await rig.settle()
+        try expect(rig.checks.count == 1, "timer fired early or checked twice: \(rig.checks.count)")
+        try rig.noInstallerActivity()
+    }
+
     check("schedule: 3-hour cadence follows the wall clock") {
         let rig = Rig([outcome(app("Alpha"), .upToDate)])
         rig.scheduler.start(); await rig.settle()

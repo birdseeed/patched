@@ -77,12 +77,25 @@ must be recovered before migration can finish. See
 
 ## Install a release
 
-Releases are ZIP files for Apple silicon. From 0.1.7 they are signed with my
-Developer ID Application certificate (Team ID `Y9352JY7U8`), notarised by Apple and
-stapled. Download the ZIP from [GitHub Releases](https://github.com/birdseeed/patched/releases),
-check its SHA-256 against the one in the release notes (`shasum -a 256 Patched-0.1.7.zip`),
-extract it, then move the included Patched app to your Applications folder. It opens
-without any Gatekeeper prompt beyond the usual "downloaded from the internet" question.
+Releases are for Apple silicon. From 0.1.7 they are signed with my Developer ID
+Application certificate (Team ID `Y9352JY7U8`), notarised by Apple and stapled.
+
+The easiest install is the disk image: download `Patched-<version>.dmg` from
+[GitHub Releases](https://github.com/birdseeed/patched/releases), open it and drag
+Patched to Applications. Check its SHA-256 against the one in the release notes
+first if you like (`shasum -a 256 Patched-0.1.7.dmg`).
+
+With Homebrew:
+
+```sh
+brew install --cask birdseeed/patched/patched
+```
+
+The ZIP is still there for manual installs, and it is what Patched uses to update
+itself: download it, check its SHA-256 (`shasum -a 256 Patched-0.1.7.zip`), extract
+it, then move the included Patched app to your Applications folder. Either way it
+opens without any Gatekeeper prompt beyond the usual "downloaded from the internet"
+question.
 
 Releases up to 0.1.6 were ad-hoc signed and not notarised. If you install one of
 those, macOS may block it: check that you trust the source, then use System
@@ -92,8 +105,8 @@ Gatekeeper or lower system security globally.
 Each release also has a `Patched-<version>.zip.sig` file: the Ed25519 signature
 Patched checks before it updates itself, made with my release key. From 0.1.7,
 Patched also requires its own updates to be signed by Team ID `Y9352JY7U8` and
-notarised, so a release needs both the release key and the Developer ID. Releases are source and ZIP downloads; there is no Homebrew tap at
-this stage.
+notarised, so a release needs both the release key and the Developer ID. Patched
+never updates itself from the disk image.
 
 ## Command-line interface
 
