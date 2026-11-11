@@ -250,6 +250,10 @@ public struct AppUpdateRow: Identifiable, Equatable, Sendable {
     var isPatchedItself: Bool { bundleID == NoSourceReason.patchedBundleID || outcome?.noSourceReason == .thisApp }
     /// The user's catalogue says to ignore (hide) this app: nothing is looked up for it and it is not listed under Updates.
     public var isIgnored: Bool { status == .noSource && outcome?.noSourceReason == .ignored }
+    /// The row shows an Update (or Open <App>) button, so Roll back moves into its … menu.
+    public var offersUpdateAction: Bool {
+        status == .updateAvailable || status == .notInstallable || status == .packageUnsupported
+    }
     /// The row's Update button.
     public var updateActionTitle: String {
         switch privilege {

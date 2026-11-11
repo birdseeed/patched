@@ -1804,6 +1804,11 @@ check("v3#5 rollback output keeps cleanup warnings") {
                                      reason: "cleanup_incomplete", detail: "could not remove: /x")
     try expect(installed.contains("warning: could not remove"), installed)
 }
+check("rollback output says the app's data was not rolled back") {
+    let line = OutcomeText.line(name: "Example", status: "rolled_back", from: "2.0", to: "1.0", backupFolder: "/b",
+                                reason: nil, detail: nil)
+    try expect(line == "Example: rolled back 2.0 -> 1.0; 2.0 kept as backup in /b; the app's data was not rolled back", line)
+}
 
 // MARK: Source guards
 

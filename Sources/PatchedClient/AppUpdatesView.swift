@@ -170,9 +170,13 @@ private struct AppUpdateRowView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             actions
-            if controller.canIgnore(row) {
+            if controller.canIgnore(row) || row.rollbackVersion != nil {
                 Menu {
-                    Button("Hide") { controller.ignore(id: row.id) }
+                    if let backup = row.rollbackVersion {
+                        Button(action: { controller.rollBack(id: row.id) }) { Text("Roll back to \(backup)") }
+                            .disabled(!controller.canRollBack(row))
+                    }
+                    if controller.canIgnore(row) { Button("Hide") { controller.ignore(id: row.id) } }
                 } label: { Image(systemName: "ellipsis.circle").accessibilityLabel(Text("More actions for \(row.name)")) }
                     .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
             }
@@ -240,13 +244,14 @@ private struct AppUpdateRowView: View {
                     .disabled(row.activity != .idle)
                     .accessibilityLabel(Text("Open \(row.name) in the App Store"))
             }
-            if let backup = row.rollbackVersion {
+            // One visible action per row: while an update is offered, Roll back lives only in the … menu.
+            if let backup = row.rollbackVersion, !row.offersUpdateAction {
                 let enabled = controller.canRollBack(row)
                 Button(action: { controller.rollBack(id: row.id) }) { Text("Roll back") }
                     .buttonStyle(.bordered)
                     .disabled(!enabled)
                     .accessibilityLabel(Text("Roll back \(row.name) to \(backup)"))
-                    .help(Text("Restores version \(backup)"))
+                    .help(Text("Puts version \(backup) of the app back. Its data is not rolled back, so anything the newer version changed stays changed."))
             }
         }
     }

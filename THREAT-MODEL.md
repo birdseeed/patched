@@ -31,6 +31,12 @@ is experimental and off by default. Both are described at the end.
 Rollback uses the same signature and Gatekeeper rules, so a backup that is not
 notarised is refused.
 
+Rollback restores the app bundle only. The app's data (Application Support, its
+container, preferences, caches) is never copied or restored, so data a newer version
+migrated on first launch stays migrated, and the older version may not be able to read
+it. The app, the CLI result and the README say so; Time Machine remains the way to
+restore data.
+
 ## What the tool trusts
 
 - TLS and the system's certificate store, for downloads.

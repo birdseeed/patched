@@ -126,6 +126,25 @@ private func noSourceOutcome(_ name: String, _ reason: NoSourceReason, id: Strin
         try expect(AppsListModel.visibleRows(rig.controller.applicationsRows, query: "", filter: .hidden).map(\.name) == ["Secret"], "after the check")
     }
 
+    check("updates: a row offering an update shows only Update; Roll back moves to its menu") {
+        let a = app("Alpha"), b = app("Bravo")
+        let installer = FakeInstaller()
+        installer.backups = [try backup(a, version: "0.9"), try backup(b, version: "0.8")]
+        let controller = makeController(outcomes: [outcome(a, .updateAvailable(offer("2.0"))), outcome(b, .upToDate)], installer: installer)
+        await runCheck(controller)
+        let alpha = try controller.rows.first { $0.name == "Alpha" }.unwrap()
+        let bravo = try controller.rows.first { $0.name == "Bravo" }.unwrap()
+        try expect(alpha.offersUpdateAction && alpha.rollbackVersion == "0.9" && controller.canRollBack(alpha), "Alpha: \(alpha)")
+        try expect(!bravo.offersUpdateAction && bravo.rollbackVersion == "0.8", "Bravo: \(bravo)")
+        let shown = try paintedText(AppUpdatesView(controller: controller).frame(width: 820, height: 400))
+        // paintedText joins each painted appearance with "||"; each must show exactly one Roll back (Bravo's).
+        for paint in shown.components(separatedBy: "||") {
+            let rollBacks = paint.components(separatedBy: "Roll back").count - 1
+            try expect(rollBacks == 1, "Roll back buttons on screen: \(rollBacks) in \(paint)")
+            try expect(paint.contains("Update"), "no Update button: \(paint)")
+        }
+    }
+
     check("apps list: status and source text for each kind of row") {
         let controller = await mixedController()
         @MainActor func row(_ n: String) throws -> AppUpdateRow { try controller.rows.first { $0.name == n }.unwrap() }

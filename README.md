@@ -53,7 +53,10 @@ public source tree contains everything needed for its own gate.
 ## Using the app
 
 The Updates screen provides **Update**, **Update All**, **Roll back** and
-**Recover**. Patched checks when it opens and every three hours while it runs
+**Recover**. Roll back puts the previous version of the app bundle back; it does not
+touch the app's data (Application Support, its container, preferences), so if the
+newer version migrated that data on first launch, the older one may not read it.
+Roll back is most reliable straight after an update; for data, use Time Machine. Patched checks when it opens and every three hours while it runs
 (a recent check within ten minutes suppresses the opening check). Scheduled
 checks only report available updates and notify you; they do not install them.
 Use **Open at login** in Settings to have the installed app start when you log in.
