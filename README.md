@@ -88,8 +88,11 @@ first if you like (`shasum -a 256 Patched-0.1.7.dmg`).
 With Homebrew:
 
 ```sh
+brew trust birdseeed/patched
 brew install --cask birdseeed/patched/patched
 ```
+
+Homebrew only loads casks from taps you have chosen to trust, so the first command is needed once.
 
 The ZIP is still there for manual installs, and it is what Patched uses to update
 itself: download it, check its SHA-256 (`shasum -a 256 Patched-0.1.7.zip`), extract
