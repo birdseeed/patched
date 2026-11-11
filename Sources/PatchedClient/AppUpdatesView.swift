@@ -172,7 +172,7 @@ private struct AppUpdateRowView: View {
             actions
             if controller.canIgnore(row) {
                 Menu {
-                    Button("Ignore") { controller.ignore(id: row.id) }
+                    Button("Hide") { controller.ignore(id: row.id) }
                 } label: { Image(systemName: "ellipsis.circle").accessibilityLabel(Text("More actions for \(row.name)")) }
                     .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
             }

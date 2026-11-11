@@ -61,11 +61,51 @@ notarised is refused.
 
 ## Patched updating itself
 
-Patched releases are ad-hoc signed: there is no Apple Developer ID yet, so there is
-no Team ID to pin and nothing for Gatekeeper to accept as notarised. The rules in
-"What is checked for every update" would refuse Patched itself, and still do (the
-normal installer never touches Patched). Self-update is a separate path whose trust
-anchor is Patched's own Ed25519 release key instead.
+Releases up to and including 0.1.6 are ad-hoc signed, with no Team ID to pin and
+nothing for Gatekeeper to accept as notarised; from 0.1.7 releases are signed with a
+Developer ID Application certificate and notarised. The rules in "What is checked
+for every update" would refuse Patched itself, and still do (the normal installer
+never touches Patched). Self-update is a separate path with two trust anchors:
+Patched's own Ed25519 release key, always, and the release Team ID pinned in the
+running app, when it has one.
+
+**The release Team ID pin.** `scripts/build-app.sh` writes `RELEASE_TEAM_ID` into the
+app's Info.plist as `PatchedReleaseTeamID` (empty when unset), where the app's code
+signature covers it. Self-update reads the pin from the running app's own bundle
+(`Bundle.main`), never from the download.
+
+- Empty (ad-hoc and development builds, and every release up to 0.1.6): self-update
+  relies on the release key alone, as before. This is how 0.1.6 accepts 0.1.7.
+- Ten capital letters or digits (Developer ID releases, from 0.1.7): the new app must
+  also satisfy, through the Security framework (strict, every architecture, nested
+  code, revocation checked), the requirement `identifier "im.patched.app" and anchor
+  apple generic and certificate leaf[subject.OU] = "<TEAM>" and certificate
+  1[field.1.2.840.113635.100.6.2.6] exists and certificate
+  leaf[field.1.2.840.113635.100.6.1.13] exists and notarized`, that is Apple's
+  anchor, the Developer ID intermediate, a Developer ID Application leaf for exactly
+  that team and a notarisation ticket, and its signing information must name the
+  same team and identifier. Its own Info.plist must pin the same team, so a release
+  cannot drop or change the pin. An ad-hoc, other-team, non-Developer-ID or
+  unnotarised download is refused (`release_team_mismatch`) even when its zip carries
+  a valid release signature, so from 0.1.7 the release key alone is no longer enough.
+  A revoked certificate or notarisation is refused as revoked; when the revocation
+  check cannot reach Apple (OCSP or network unavailable) the update is refused with
+  a "check your connection and try again" message. The requirement string has one
+  source, `ReleaseTeamPin.requirementTemplate`.
+- Anything else (lower case, wrong length, quotes, not text): every self-update is
+  refused (`cannot_pin_identity`) before anything is downloaded. A damaged pin is never
+  treated as "no pin", and the Team ID is validated before it is put in the requirement,
+  so nothing can be injected.
+
+`scripts/release.sh` refuses a pin on an ad-hoc build (such an app could never accept
+its own next update), and with `SIGNING_IDENTITY` requires `NOTARY_PROFILE` and
+`RELEASE_TEAM_ID` (ten capital letters or digits), the built Info.plist to carry it,
+`TeamIdentifier=` in `codesign -dv` of the built app (the certificate actually used,
+even when the identity is given by hash) to equal it, and, after stapling and before
+any zip or signature is written, `codesign --verify --strict --deep` against the same
+requirement string, read from `SelfUpdate.swift`, so a certificate of the right team
+that is not Developer ID Application (Apple Development, say) is refused. `build-app.sh` makes the same format, ad-hoc and
+certificate checks.
 
 **Signing.** `scripts/release.sh` signs the final zip bytes with the private key,
 which lives only in the owner's login Keychain (generic password, service
@@ -107,13 +147,16 @@ installed Patched exactly as it was:
    exactly and be strictly newer than the running and installed versions, so an
    older, genuinely signed zip cannot be replayed under a newer tag.
 7. `codesign --verify --strict --deep` with the requirement `identifier
-   "im.patched.app"` must pass. There is no Team ID or notarisation check: an
-   ad-hoc build has neither, and the release signature is what vouches for it.
+   "im.patched.app"` must pass. When the running app pins a release Team ID, the
+   Developer ID requirement above (which includes notarisation) must pass too, and
+   the new app must pin the same team; with no pin there is no Team ID check, and
+   the release signature is what vouches for the build. There is no `spctl`
+   Gatekeeper assessment on this path.
 8. Any quarantine flag is removed from the staged app (it has already been
-   verified), so macOS opens the new ad-hoc build.
+   verified), so macOS opens the new build.
 9. One atomic `renamex_np` swap with the running bundle. The installed app is
-   checked again (identity, bundle ID, version, codesign); if that fails, the old
-   app is swapped back. The previous version is moved to
+   checked again (identity, bundle ID, version, codesign and, when pinned, the
+   Developer ID team); if that fails, the old app is swapped back. The previous version is moved to
    `~/Library/Application Support/Patched/Updater/backups/im.patched.app` and kept
    until the next self-update.
 10. The new Patched is opened with `/usr/bin/open -n` and waits (at most 15 seconds)
@@ -124,10 +167,13 @@ There is no journal for this path: before the swap nothing is changed, the swap 
 single rename, and after it the worst case is the previous version left in a hidden
 `.patched-self-update-*` folder beside the app.
 
-**What a stolen key or GitHub account means.** The release key is the whole trust
-anchor. Someone with the private key and a way to serve a newer release (the GitHub
-account, or the repository) can make every copy of Patched that clicks Update
-install their code as the user, with the user's rights. That is the same as the
+**What a stolen key or GitHub account means.** For an unpinned Patched (0.1.6 and
+earlier) the release key is the whole trust anchor. Someone with the private key and
+a way to serve a newer release (the GitHub account, or the repository) can make every
+such copy of Patched that clicks Update install their code as the user, with the
+user's rights. A pinned Patched (0.1.7 and later) also needs the code to be signed
+with the owner's Developer ID Application certificate, so the attacker needs that
+certificate's private key (or Apple to issue one for the team) as well as the release key. That is the same as the
 compromise of any vendor's signing key, which this tool already accepts for other
 apps. A GitHub account compromise alone is not enough: without the key, a
 replaced zip fails the signature check, and the attacker can only withhold
@@ -136,8 +182,9 @@ somewhere (Download opens only the exact release page URL). If the key is lost o
 leaked, the only fix is a release with a new key built in, installed by hand.
 TLS to GitHub is relied on only for availability, not for integrity.
 
-**Later.** With a Developer ID, the same path will also pin the Team ID and require
-notarisation, as the normal installer does for every other app.
+**Later.** A full Gatekeeper (`spctl`) assessment of the new app on this path, as the
+normal installer does for every other app (the requirement already demands a
+notarisation ticket).
 
 ## Out of scope
 

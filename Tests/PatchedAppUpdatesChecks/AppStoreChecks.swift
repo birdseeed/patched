@@ -342,7 +342,7 @@ func storeOutcome(_ app: InstalledApp, version: String = "3.0", track: Int = 123
         @MainActor func text(_ name: String) throws -> String { try controller.rows.first { $0.name == name }.unwrap().statusText }
         try expect(try text("Feedless") == "No public update feed", "feedless: \(try text("Feedless"))")
         try expect(try text("Unlisted") == "Updates through the App Store", "unlisted")
-        try expect(try text("Skipped") == "Ignored", "ignored")
+        try expect(try text("Skipped") == "Hidden", "ignored")
         try expect(try text("Patched") == "This app", "this app")
         try expect(try text("Brew") == "Homebrew (unconfirmed) — add a catalogue entry to enable updates", "brew: \(try text("Brew"))")
         try expect(try text("Mystery") == "No public update feed", "default reason")

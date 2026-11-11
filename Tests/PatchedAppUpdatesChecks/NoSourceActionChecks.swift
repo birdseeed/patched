@@ -97,7 +97,7 @@ private func mode(_ path: String) -> Int {
         let view = try String(contentsOfFile: sourcesRoot() + "/PatchedClient/AppUpdatesView.swift", encoding: .utf8)
         try expect(view.contains("row.isAppStoreUpdate || row.isAppStoreUnconfirmed") && view.contains("controller.openInAppStore(id: row.id)"), "Updates view lacks the button")
         let list = try String(contentsOfFile: sourcesRoot() + "/PatchedClient/AppsListView.swift", encoding: .utf8)
-        try expect(list.contains("Button(\"Open in App Store\")") && list.contains("Button(\"Ignore\")") && list.contains("Button(\"Stop ignoring\")"), "Applications menu lacks actions")
+        try expect(list.contains("Button(\"Open in App Store\")") && list.contains("Button(\"Hide\")") && list.contains("Button(\"Unhide\")"), "Applications menu lacks actions")
     }
 
     check("Spotlight's App Store ID is used only when it is a positive whole number") {
@@ -158,9 +158,10 @@ private func mode(_ path: String) -> Int {
         controller.ignore(id: "/Fake/Helper.app"); await controller.waitUntilIdle()
         try expect(edits.paths == ["ignore com.example.helper"], "edits: \(edits.paths)")
         let ignored = try row("Helper")
-        try expect(ignored.isIgnored && ignored.statusText == "Ignored" && ignored.listStatus == "Ignored", "row: \(ignored.statusText)")
+        try expect(ignored.isIgnored && ignored.statusText == "Hidden" && ignored.listStatus == "Hidden", "row: \(ignored.statusText)")
         try expect(!controller.updatesRows.contains { $0.name == "Helper" } && controller.updatesRows.count == 2, "still listed in Updates")
-        try expect(AppsListModel.visibleRows(controller.rows, query: "", filter: .all).contains { $0.name == "Helper" }, "missing from Applications")
+        try expect(!AppsListModel.visibleRows(controller.rows, query: "", filter: .all).contains { $0.name == "Helper" }
+                   && AppsListModel.visibleRows(controller.rows, query: "", filter: .hidden).map(\.name) == ["Helper"], "hidden app in wrong Applications segment")
         try expect(controller.updateAllCount == 1 && controller.availableUpdateCount == 1, "Update All or notifications still include it")
         try expect(controller.canStopIgnoring(ignored) && !controller.canIgnore(ignored), "stop ignoring not offered")
         await runOperation(controller) { controller.updateAll() }
@@ -232,7 +233,7 @@ private func mode(_ path: String) -> Int {
         controller.ignore(id: a.path); await controller.waitUntilIdle()
         let row = try controller.rows.first.unwrap()
         try expect(!row.isIgnored && row.status == .upToDate, "row changed")
-        try expect(row.result?.kind == .failure && row.result?.text == "Couldn't ignore Alpha. /x/catalogue.json: not a JSON object, so it was not changed", "error: \(String(describing: row.result))")
+        try expect(row.result?.kind == .failure && row.result?.text == "Couldn't hide Alpha. /x/catalogue.json: not a JSON object, so it was not changed", "error: \(String(describing: row.result))")
         try expect(!controller.isWorking, "still working")
     }
 
@@ -301,6 +302,6 @@ private func mode(_ path: String) -> Int {
         let text = try paintedText(AppUpdatesView(controller: controller))
         try expect(text.contains("Open in App Store") && !text.contains("Simple Dialler") && !text.contains("Claude Code URL Handler"), "Updates text: \(text)")
         let apps = try paintedText(AppsListView(controller: controller, revealer: FakeRevealer(), showUpdate: { _ in }))
-        try expect(apps.contains("Simple Dialler") && controller.rows.filter { $0.listStatus == "Ignored" }.map(\.name) == ["Claude Code URL Handler", "Simple Dialler"], "Applications text: \(apps)")
+        try expect(!apps.contains("Simple Dialler") && apps.contains("Hidden") && controller.rows.filter { $0.listStatus == "Hidden" }.map(\.name) == ["Claude Code URL Handler", "Simple Dialler"], "Applications text: \(apps)")
     }
 }

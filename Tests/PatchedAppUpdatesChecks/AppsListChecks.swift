@@ -78,7 +78,52 @@ private func noSourceOutcome(_ name: String, _ reason: NoSourceReason, id: Strin
         try expect(names(.updates) == ["Bravo", "Brew", "Store"], "updates: \(names(.updates))")
         try expect(names(.upToDate) == ["Alpha", "Zulu"], "up to date: \(names(.upToDate))")
         try expect(names(.noSource) == ["Feedless", "Patched", "Unlisted"], "no source: \(names(.noSource))")
-        try expect(AppsListFilter.allCases.map(\.rawValue) == ["All", "Updates", "Up to date", "No source"], "segment titles")
+        try expect(AppsListFilter.allCases.map(\.rawValue) == ["All", "Updates", "Up to date", "No source", "Hidden"], "segment titles")
+        try expect(names(.hidden).isEmpty, "hidden with nothing hidden")
+        try expect(AppsListModel.availableFilters(controller.applicationsRows).map(\.rawValue) == ["All", "Updates", "Up to date", "No source"],
+                   "Hidden segment offered with nothing hidden")
+    }
+
+    check("apps list: hidden apps leave every segment but Hidden, which shows exactly them") {
+        let controller = makeController(outcomes: [
+            outcome(app("Alpha"), .upToDate), outcome(app("Bravo"), .updateAvailable(offer("2.0"))),
+            noSourceOutcome("Feedless", .noPublicFeed), noSourceOutcome("Secret", .ignored),
+            noSourceOutcome("Patched", .thisApp, id: NoSourceReason.patchedBundleID)],
+                                        editCatalogue: { _, _ in })
+        await runCheck(controller)
+        @MainActor func names(_ f: AppsListFilter, _ q: String = "") -> [String] {
+            AppsListModel.visibleRows(controller.applicationsRows, query: q, filter: f).map(\.name)
+        }
+        try expect(names(.all) == ["Alpha", "Bravo", "Feedless", "Patched"], "all: \(names(.all))")
+        try expect(names(.updates) == ["Bravo"] && names(.upToDate) == ["Alpha"], "updates / up to date")
+        try expect(names(.noSource) == ["Feedless", "Patched"], "no source: \(names(.noSource))")
+        try expect(names(.hidden) == ["Secret"] && names(.hidden, "zzz").isEmpty, "hidden: \(names(.hidden))")
+        try expect(AppsListModel.availableFilters(controller.applicationsRows).last == .hidden, "Hidden segment missing")
+        try expect(AppsListModel.effectiveFilter(.hidden, rows: controller.applicationsRows) == .hidden, "hidden kept while an app is hidden")
+        try expect(AppsListModel.countedRows(controller.applicationsRows, filter: .all) == 4
+                   && AppsListModel.countedRows(controller.applicationsRows, filter: .hidden) == 1, "counts")
+        let none = makeController(outcomes: [outcome(app("Alpha"), .upToDate)])
+        await runCheck(none)
+        try expect(AppsListModel.effectiveFilter(.hidden, rows: none.applicationsRows) == .all, "no fall back to All")
+        let secret = try controller.rows.first { $0.name == "Secret" }.unwrap()
+        try expect(secret.statusText == "Hidden" && secret.listStatus == "Hidden", "status: \(secret.statusText)")
+        try expect(!controller.canIgnore(try controller.rows.first { $0.name == "Patched" }.unwrap()), "Patched can be hidden")
+        try expect(controller.canIgnore(try controller.rows.first { $0.name == "Alpha" }.unwrap()), "Alpha cannot be hidden")
+    }
+
+    check("apps list: hidden apps stay out of All while a check runs") {
+        let rig = Rig([outcome(app("Alpha"), .upToDate), noSourceOutcome("Secret", .ignored)])
+        await runCheck(rig.controller)
+        let hold = rig.hold()
+        rig.controller.check()
+        for _ in 0..<2000 where !rig.controller.rows.contains(where: { $0.status == .pending }) { await Task.yield() }
+        try expect(rig.controller.phase == .checking && rig.controller.rows.contains { $0.status == .pending }, "check not in progress")
+        let all = AppsListModel.visibleRows(rig.controller.applicationsRows, query: "", filter: .all).map(\.name)
+        let hidden = AppsListModel.visibleRows(rig.controller.applicationsRows, query: "", filter: .hidden).map(\.name)
+        try expect(all == ["Alpha"] && hidden == ["Secret"], "during a check: all \(all) hidden \(hidden)")
+        try expect(AppsListModel.availableFilters(rig.controller.applicationsRows).contains(.hidden), "Hidden segment dropped during a check")
+        hold.open(); await rig.settle()
+        try expect(AppsListModel.visibleRows(rig.controller.applicationsRows, query: "", filter: .hidden).map(\.name) == ["Secret"], "after the check")
     }
 
     check("apps list: status and source text for each kind of row") {

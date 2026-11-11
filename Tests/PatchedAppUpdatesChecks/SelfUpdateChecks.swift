@@ -568,6 +568,10 @@ private struct NoIndex: CaskIndexProviding { func index() async -> Result<CaskIn
     check("self update: a failure says why, leaves Patched running, and needs admin opens the release page") {
         let cases: [(String, InstallRefusal, String)] = [
             ("signature", .releaseSignatureInvalid("does not match"), "isn't signed with Patched's release key"),
+            ("team", .releaseTeamMismatch("ad-hoc"), "isn't signed with Patched's Developer ID"),
+            ("damaged pin", .cannotPinIdentity("abc"), "damaged release Team ID"),
+            ("revoked", .releaseCertificateRevoked("OSStatus -67820"), "Apple has revoked the download's signing certificate"),
+            ("no revocation answer", .releaseCertificateUnchecked("OSStatus -67632"), "Patched couldn't check the download's certificate with Apple. Check your connection and try again. Patched is unchanged."),
             ("download", .download("HTTP 500"), "the download failed (HTTP 500)"),
             ("version", .versionMismatch("0.3.0"), "isn't the Patched release it should be"),
             ("codesign", .signatureInvalid("x"), "code signature didn't verify"),

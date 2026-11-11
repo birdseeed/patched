@@ -1,14 +1,23 @@
 import Foundation
 import CryptoKit
 import Darwin
+import Security
 import UpdateSources
 
 // Patched updating itself, on an explicit and confirmed click only.
 //
-// Releases are ad-hoc signed: there is no Apple Developer ID, so no Team ID to pin and no notarisation to
-// check, and the normal installer refuses Patched for exactly that reason. Here the trust anchor is Patched's
-// own Ed25519 release key instead: every release zip is signed with it (scripts/release.sh), and the public
-// half is built into the app below. A zip is only unpacked when its signature verifies against that key.
+// The first trust anchor is Patched's own Ed25519 release key: every release zip is signed with it
+// (scripts/release.sh), and the public half is built into the app below. A zip is only unpacked when its
+// signature verifies against that key. The normal installer still refuses Patched, so this is its own path.
+//
+// The second is the release Team ID, `PatchedReleaseTeamID` in the running app's own Info.plist (written by
+// scripts/build-app.sh from RELEASE_TEAM_ID, and covered by the app's code signature). It is never read from
+// the download. When it is empty (ad-hoc and development builds, up to and including 0.1.6) nothing more is
+// checked, so 0.1.6 accepts 0.1.7 on the Ed25519 key alone. When it is set (Developer ID releases, from 0.1.7
+// on), the new app must also be notarised, signed with Developer ID Application by exactly that team, and pin
+// the same team itself, so an ad-hoc or other-team download is refused even when its zip carries a valid
+// release signature. A pin that is not a
+// well-formed Team ID refuses every self-update rather than counting as "no pin".
 // See THREAT-MODEL.md, "Patched updating itself".
 
 /// The release-signing key Patched trusts for its own updates, and the bundle it may replace.
@@ -16,6 +25,52 @@ public enum PatchedReleaseKey {
     /// Raw 32-byte Curve25519 signing public key, base64. The private half never leaves the owner's Keychain.
     public static let publicKeyBase64 = "3pXCQuK7pRsCXKXhXwld3tJw+yisZpSMKef3OjEsk/k="
     public static let bundleID = "im.patched.app"
+    /// The Info.plist key holding the Developer ID Team ID that future releases must be signed by.
+    public static let teamIDInfoKey = "PatchedReleaseTeamID"
+}
+
+/// The release Team ID this copy of Patched pins its own updates to, from its own Info.plist.
+public enum ReleaseTeamPin: Sendable, Equatable {
+    /// No pin (key absent or empty): an ad-hoc or development build. Self-update relies on the release key alone.
+    case none
+    /// A well-formed Team ID: the new Patched must be Developer ID Application signed by this team.
+    case team(String)
+    /// Present but not a Team ID. Every self-update is refused; this is never treated as `none`.
+    case malformed(String)
+
+    /// The running app's pin. Read from `Bundle.main`'s unlocalised Info.plist, never from a download.
+    public static var running: ReleaseTeamPin { from(bundle: .main) }
+
+    public static func from(bundle: Bundle) -> ReleaseTeamPin {
+        from(infoValue: bundle.infoDictionary?[PatchedReleaseKey.teamIDInfoKey])
+    }
+
+    public static func from(infoValue: Any?) -> ReleaseTeamPin {
+        guard let value = infoValue else { return .none }
+        guard let text = value as? String else { return .malformed("the value is not text") }
+        if text.isEmpty { return .none }
+        return TeamIdentifier.isValid(text) ? .team(text) : .malformed(String(text.prefix(40)))
+    }
+
+    /// The one source of the release requirement. scripts/release.sh reads this exact line (with sed) and checks
+    /// every Developer ID release against it before writing anything, so keep it on one line and unchanged in form.
+    /// Patched's signing identifier, Apple's anchor, the Developer ID intermediate (1.2.840.113635.100.6.2.6), a
+    /// Developer ID Application leaf (1.2.840.113635.100.6.1.13), the leaf's team, and a notarisation ticket.
+    public static let requirementTemplate = "identifier \"@IDENTIFIER@\" and anchor apple generic and certificate leaf[subject.OU] = \"@TEAM@\" and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and notarized"
+
+    /// The code requirement a release signed by `team` satisfies (`requirementTemplate`). `team` and `identifier`
+    /// are validated first, so nothing can be injected.
+    public static func requirement(team: String, identifier: String = PatchedReleaseKey.bundleID) throws -> String {
+        guard TeamIdentifier.isValid(team) else {
+            throw InstallRefusal.cannotPinIdentity("Patched's release Team ID \"\(team.prefix(40))\" is not a valid Apple Team ID")
+        }
+        guard !identifier.isEmpty, identifier.utf8.allSatisfy({ (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0)
+                                                                || $0 == UInt8(ascii: ".") || $0 == UInt8(ascii: "-") }) else {
+            throw InstallRefusal.signatureInvalid("signing identifier \"\(identifier.prefix(80))\" cannot be put in a requirement")
+        }
+        return requirementTemplate.replacingOccurrences(of: "@IDENTIFIER@", with: identifier)
+            .replacingOccurrences(of: "@TEAM@", with: team)
+    }
 }
 
 /// Ed25519 over the exact zip bytes, as Sparkle does. The `.sig` file is the 64-byte signature in base64 on
@@ -84,8 +139,9 @@ public struct SelfUpdateReport: Sendable, Equatable {
 
 /// Replaces the running Patched with a signed release. Every step fails closed; until the one atomic swap
 /// the installed app is never touched, and a new app that fails its checks after the swap is swapped back.
-/// No Team ID or notarisation check: there is none to make for an ad-hoc build. The Ed25519 signature over
-/// the zip, against the key built into this app, is what makes the download trusted.
+/// The Ed25519 signature over the zip, against the key built into this app, is what makes the download
+/// trusted. When this app pins a release Team ID (`ReleaseTeamPin`), the new app must also be signed with
+/// Developer ID Application by that team (`teamCheck`); with no pin (an ad-hoc build) there is no Team ID to check.
 public struct SelfUpdater: Sendable {
     /// The running app's bundle (`Bundle.main.bundlePath`).
     public let appPath: String
@@ -95,23 +151,46 @@ public struct SelfUpdater: Sendable {
     public let backupsRoot: String
     let downloader: any ArtifactDownloading
     let codeCheck: @Sendable (String) throws -> Void
+    /// The running app's release Team ID pin. Only `.team` runs `teamCheck`; `.malformed` refuses everything.
+    let teamPin: ReleaseTeamPin
+    /// `(path, team)`: the bundle at `path` must be Developer ID Application signed by `team`.
+    let teamCheck: @Sendable (String, String) throws -> Void
     let publicKey: String
     let uid: uid_t
 
-    /// Production: the embedded release key, GitHub-only downloads and `codesign --verify --strict --deep`.
+    /// Production: the embedded release key, the running app's own Team ID pin, GitHub-only downloads,
+    /// `codesign --verify --strict --deep` and, when pinned, the Developer ID requirement.
     public init(appPath: String, runningVersion: String, backupsRoot: String,
                 downloader: any ArtifactDownloading = URLSessionArtifactDownloader(allowedHosts: SelfUpdateLimits.downloadHosts),
                 codeCheck: @escaping @Sendable (String) throws -> Void = SelfUpdater.verifyCodeSignature,
                 uid: uid_t = geteuid()) {
-        self.init(appPath: appPath, runningVersion: runningVersion, backupsRoot: backupsRoot, downloader: downloader,
-                  codeCheck: codeCheck, uid: uid, publicKey: PatchedReleaseKey.publicKeyBase64)
+        self.init(productionWith: .main, appPath: appPath, runningVersion: runningVersion, backupsRoot: backupsRoot,
+                  downloader: downloader, codeCheck: codeCheck, uid: uid)
     }
 
-    /// Checks only: a throwaway key, because the real private key is never used in tests.
+    /// The production wiring, with the bundle whose Info.plist holds the pin made explicit so the checks can prove
+    /// it: the pin is that bundle's own (the running app's, from the public initialiser) and the team check is the
+    /// real `verifyReleaseTeam`.
+    @_spi(Testing) public init(productionWith bundle: Bundle, appPath: String, runningVersion: String, backupsRoot: String,
+                               downloader: any ArtifactDownloading, codeCheck: @escaping @Sendable (String) throws -> Void,
+                               uid: uid_t) {
+        self.init(appPath: appPath, runningVersion: runningVersion, backupsRoot: backupsRoot, downloader: downloader,
+                  codeCheck: codeCheck, uid: uid, publicKey: PatchedReleaseKey.publicKeyBase64,
+                  teamPin: ReleaseTeamPin.from(bundle: bundle), teamCheck: { try SelfUpdater.verifyReleaseTeam($0, team: $1) })
+    }
+
+    @_spi(Testing) public var teamPinForTesting: ReleaseTeamPin { teamPin }
+    @_spi(Testing) public var teamCheckForTesting: @Sendable (String, String) throws -> Void { teamCheck }
+
+    /// Checks only: a throwaway key, because the real private key is never used in tests, and an explicit pin
+    /// and team check (no pin unless a check asks for one).
     @_spi(Testing) public init(appPath: String, runningVersion: String, backupsRoot: String, downloader: any ArtifactDownloading,
-                               codeCheck: @escaping @Sendable (String) throws -> Void, uid: uid_t = geteuid(), publicKey: String) {
+                               codeCheck: @escaping @Sendable (String) throws -> Void, uid: uid_t = geteuid(), publicKey: String,
+                               teamPin: ReleaseTeamPin = .none,
+                               teamCheck: @escaping @Sendable (String, String) throws -> Void = { try SelfUpdater.verifyReleaseTeam($0, team: $1) }) {
         self.appPath = appPath; self.runningVersion = runningVersion; self.backupsRoot = backupsRoot
         self.downloader = downloader; self.codeCheck = codeCheck; self.uid = uid; self.publicKey = publicKey
+        self.teamPin = teamPin; self.teamCheck = teamCheck
     }
 
     var parent: String { (appPath as NSString).deletingLastPathComponent }
@@ -159,6 +238,8 @@ public struct SelfUpdater: Sendable {
         guard let assets = release.assets else {
             throw InstallRefusal.notInstallable("Patched \(release.version) has no signed download; use the release page")
         }
+        // A damaged pin could never accept anything, so it is refused before anything is downloaded.
+        try Self.requireUsablePin(teamPin)
         try Self.checkAssetURL(assets.zipURL, name: PatchedReleaseChecker.zipName(version: release.version))
         try Self.checkAssetURL(assets.signatureURL, name: PatchedReleaseChecker.signatureName(version: release.version))
         guard VersionComparator.isNewer(release.version, than: runningVersion) else {
@@ -231,7 +312,8 @@ public struct SelfUpdater: Sendable {
         }
     }
 
-    /// Bundle ID, contained symlinks, exact version, strictly newer, then the code signature.
+    /// Bundle ID, contained symlinks, exact version, strictly newer, the code signature, then (when pinned) the
+    /// Developer ID team.
     func verifyStaged(_ path: String, version: String, installed: BundleFacts) throws {
         guard let info = FileSafety.lstatInfo(path), FileSafety.isDirectory(info) else {
             throw InstallRefusal.unsafePath("the new Patched is not a directory")
@@ -250,6 +332,38 @@ public struct SelfUpdater: Sendable {
             throw InstallRefusal.notNewer("\(version) is not newer than Patched \(installed.shortVersion ?? runningVersion)")
         }
         try codeCheck(path)
+        switch teamPin {
+        case .none: break
+        case .team(let team):
+            try teamCheck(path, team)
+            // A release cannot drop or change the pin: the new app must pin the same team as this one.
+            let stagedPin = Self.pin(inInfoPlistOf: path)
+            guard stagedPin == teamPin else {
+                let shown: String
+                switch stagedPin {
+                case .none: shown = "no Team ID"
+                case .team(let other): shown = "team \(other)"
+                case .malformed(let value): shown = "a malformed Team ID (\(value))"
+                }
+                throw InstallRefusal.releaseTeamMismatch("the new Patched pins \(shown) instead of team \(team)")
+            }
+        case .malformed: try Self.requireUsablePin(teamPin)
+        }
+    }
+
+    /// The pin in a bundle's Info.plist, read from the file itself (never through `Bundle`, which caches by path).
+    static func pin(inInfoPlistOf path: String) -> ReleaseTeamPin {
+        guard let data = FileSafety.readSmallFile(path + "/Contents/Info.plist", limit: 1024 * 1024),
+              let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else {
+            return .malformed("unreadable Info.plist")
+        }
+        return ReleaseTeamPin.from(infoValue: plist[PatchedReleaseKey.teamIDInfoKey])
+    }
+
+    static func requireUsablePin(_ pin: ReleaseTeamPin) throws {
+        if case .malformed(let value) = pin {
+            throw InstallRefusal.cannotPinIdentity("this Patched's release Team ID (\(value)) is not a valid Apple Team ID, so no update can be checked")
+        }
     }
 
     /// Puts the old app back after a failed post-swap check, but only if what is at `staged` is still it.
@@ -306,13 +420,85 @@ public struct SelfUpdater: Sendable {
 
     // MARK: System pieces
 
-    /// `codesign --verify --strict --deep`, with the signing identifier pinned to Patched's. No Team ID and no
-    /// Gatekeeper assessment: an ad-hoc release has neither, and the release signature has already vouched for it.
+    /// `codesign --verify --strict --deep`, with the signing identifier pinned to Patched's. This runs for every
+    /// release, ad-hoc or not; the Team ID is checked separately (`verifyReleaseTeam`) only when this app pins one.
     public static func verifyCodeSignature(_ path: String) throws {
         let result = ProcessRunner.run("/usr/bin/codesign",
                                        ["--verify", "--strict", "--deep", "-R=identifier \"\(PatchedReleaseKey.bundleID)\"", path],
                                        timeout: 120)
         guard result.succeeded else { throw InstallRefusal.signatureInvalid("codesign --verify --strict --deep: \(result.summary)") }
+    }
+
+    /// The pinned-release check: strict, every architecture, nested code and revocation, against
+    /// `ReleaseTeamPin.requirement(team:)`, then the signing information must name the same team and identifier.
+    /// An ad-hoc, other-team or non-Developer-ID signature fails the requirement and is `releaseTeamMismatch`.
+    public static func verifyReleaseTeam(_ path: String, team: String) throws {
+        try verifyDeveloperIDSignature(path, team: team, identifier: PatchedReleaseKey.bundleID, enforceRevocation: true)
+    }
+
+    /// As `verifyReleaseTeam`, for any identifier, so the checks can run it against a real Developer ID app.
+    @_spi(Testing) public static func verifyDeveloperIDSignature(_ path: String, team: String, identifier: String,
+                                                                  enforceRevocation: Bool) throws {
+        let requirementText = try ReleaseTeamPin.requirement(team: team, identifier: identifier)
+        var code: SecStaticCode?
+        let created = SecStaticCodeCreateWithPath(URL(fileURLWithPath: path) as CFURL, [], &code)
+        guard created == errSecSuccess, let code else {
+            throw InstallRefusal.signatureInvalid("cannot read the new Patched's code signature (OSStatus \(created))")
+        }
+        var requirement: SecRequirement?
+        let parsed = SecRequirementCreateWithString(requirementText as CFString, [], &requirement)
+        guard parsed == errSecSuccess, let requirement else {
+            throw InstallRefusal.signatureInvalid("cannot build the release requirement (OSStatus \(parsed))")
+        }
+        var flags = kSecCSStrictValidate | kSecCSCheckAllArchitectures | kSecCSCheckNestedCode
+        if enforceRevocation { flags |= SystemCodeVerifier.enforceRevocationChecks }
+        var error: Unmanaged<CFError>?
+        let status = SecStaticCodeCheckValidityWithErrors(code, SecCSFlags(rawValue: flags), requirement, &error)
+        let detail = error.map { CFErrorCopyDescription($0.takeRetainedValue()) as String } ?? ""
+        if let refusal = validityRefusal(status: status, team: team, detail: detail) { throw refusal }
+        var info: CFDictionary?
+        guard SecCodeCopySigningInformation(code, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess,
+              let dictionary = info as? [String: Any],
+              dictionary[kSecCodeInfoTeamIdentifier as String] as? String == team,
+              dictionary[kSecCodeInfoIdentifier as String] as? String == identifier else {
+            throw InstallRefusal.releaseTeamMismatch("the new Patched's signing information does not name team \(team) and \(identifier)")
+        }
+    }
+
+    /// Revocation answers: the certificate or the notarisation was revoked. Always a hard refusal.
+    static let revokedStatuses: Set<OSStatus> = [
+        -2147409652,   // CSSMERR_TP_CERT_REVOKED
+        -67820,        // errSecCertificateRevoked
+        -66992,        // errSecCSRevokedNotarization
+    ]
+    /// Revocation could not be checked (OCSP or network unreachable, busy, or unusable): worth trying again later.
+    static let uncheckableStatuses: Set<OSStatus> = [
+        -67630,        // errSecOCSPBadResponse
+        -67632,        // errSecOCSPUnavailable
+        -67636,        // errSecNetworkFailure
+        -67642,        // errSecOCSPResponderInternalError
+        -67643,        // errSecOCSPResponderTryLater
+        -2147408883,   // CSSMERR_APPLETP_CRL_NOT_FOUND
+        -2147408863,   // CSSMERR_APPLETP_OCSP_UNAVAILABLE
+        -2147408861,   // CSSMERR_APPLETP_INCOMPLETE_REVOCATION_CHECK
+        -2147408860,   // CSSMERR_APPLETP_NETWORK_FAILURE
+        -2147408853,   // CSSMERR_APPLETP_OCSP_RESP_TRY_LATER
+    ]
+
+    /// What a `SecStaticCodeCheckValidityWithErrors` status means for a pinned release. nil only for success.
+    @_spi(Testing) public static func validityRefusal(status: OSStatus, team: String, detail: String) -> InstallRefusal? {
+        let suffix = detail.isEmpty ? "" : " (\(detail.prefix(200)))"
+        if status == errSecSuccess { return nil }
+        if status == errSecCSReqFailed {
+            return .releaseTeamMismatch("the new Patched is not notarised Developer ID Application software from team \(team)" + suffix)
+        }
+        if revokedStatuses.contains(status) {
+            return .releaseCertificateRevoked("OSStatus \(status)" + suffix)
+        }
+        if uncheckableStatuses.contains(status) {
+            return .releaseCertificateUnchecked("OSStatus \(status)" + suffix)
+        }
+        return .signatureInvalid("the new Patched's code signature is not valid (OSStatus \(status))" + suffix)
     }
 
     /// The download is not quarantined by URLSession, but a quarantine flag copied in from anywhere would make

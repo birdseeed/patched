@@ -19,6 +19,16 @@ if [[ -n "${NOTARY_PROFILE:-}" && -z "${SIGNING_IDENTITY:-}" ]]; then
     printf 'NOTARY_PROFILE requires a nonempty SIGNING_IDENTITY for notarisation.\n' >&2
     exit 1
 fi
+# The release Team ID the app pins its own updates to (PatchedReleaseTeamID). A Developer ID release must
+# name its certificate's team, checked against the actual signature after building; an ad-hoc one must not
+# pin anything. Checked before building, so nothing is produced on a refusal.
+release_team_id=${RELEASE_TEAM_ID:-}
+packaging_check_release_team "$release_team_id" "${SIGNING_IDENTITY:-}" 1 || exit 1
+# Self-update requires a pinned release to be notarised, so a Developer ID release is always notarised.
+if [[ -n "${SIGNING_IDENTITY:-}" && -z "${NOTARY_PROFILE:-}" ]]; then
+    printf 'SIGNING_IDENTITY requires NOTARY_PROFILE: Developer ID releases must be notarised and stapled.\n' >&2
+    exit 1
+fi
 # Release signing: the zip is signed with the Ed25519 key in the owner's login Keychain (generic password,
 # account ed25519), and the signature must verify against the public key built into Patched, which is what
 # self-update checks. The service can be changed only so the packaging checks can use a throwaway key in a
@@ -50,8 +60,18 @@ packaging_version
 packaging_output_dir "$output_dir"
 build_options=(--configuration "$configuration" --output-dir "$PACKAGING_OUTPUT")
 if "$universal"; then build_options+=(--universal); fi
-/bin/bash "$PACKAGING_ROOT/scripts/build-app.sh" "${build_options[@]}"
+RELEASE_TEAM_ID="$release_team_id" /bin/bash "$PACKAGING_ROOT/scripts/build-app.sh" "${build_options[@]}"
 app="$PACKAGING_OUTPUT/Patched.app"
+built_team_id=$(/usr/bin/plutil -extract PatchedReleaseTeamID raw -o - "$app/Contents/Info.plist") || {
+    printf 'The built app has no PatchedReleaseTeamID; refusing to archive.\n' >&2; exit 1; }
+if [[ "$built_team_id" != "$release_team_id" ]]; then
+    printf 'The built app pins Team ID "%s", not RELEASE_TEAM_ID "%s"; refusing to archive.\n' "$built_team_id" "$release_team_id" >&2
+    exit 1
+fi
+if [[ -n "${SIGNING_IDENTITY:-}" ]]; then
+    # The certificate actually used, including identities supplied by hash, must be the pinned team's.
+    packaging_require_signing_team "$app" "$release_team_id" || exit 1
+fi
 if [[ -n "${NOTARY_PROFILE:-}" ]]; then
     # Check the resulting certificate, including identities supplied by hash.
     authority=$(/usr/bin/codesign -d --verbose=2 "$app" 2>&1)
@@ -78,6 +98,8 @@ if [[ -n "${NOTARY_PROFILE:-}" ]]; then
     fi
     /usr/bin/xcrun stapler staple "$app"
     /usr/bin/xcrun stapler validate "$app"
+    # The stapled app must satisfy exactly the requirement pinned copies of Patched will check it against.
+    packaging_require_release_requirement "$app" "$release_team_id" || exit 1
     rm "$stage/$archive"
     zip_app
 else

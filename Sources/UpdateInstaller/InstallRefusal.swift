@@ -79,6 +79,13 @@ public enum InstallRefusal: Error, Sendable, Equatable {
     case installedUnverified(String)
     /// Patched's own release zip is not signed by the release key built into Patched (self-update only).
     case releaseSignatureInvalid(String)
+    /// This Patched pins a release Team ID and the new Patched is not Developer ID Application signed by that
+    /// team (ad-hoc, another team, or not Developer ID). Self-update only.
+    case releaseTeamMismatch(String)
+    /// Apple reports the new Patched's signing certificate or notarisation as revoked. Self-update only.
+    case releaseCertificateRevoked(String)
+    /// The revocation check for the new Patched's certificate could not reach Apple; trying later may work.
+    case releaseCertificateUnchecked(String)
 
     public var code: String {
         switch self {
@@ -129,6 +136,9 @@ public enum InstallRefusal: Error, Sendable, Equatable {
         case .installerNotFinished: return "installer_not_finished"
         case .installedUnverified: return "installed_unverified"
         case .releaseSignatureInvalid: return "release_signature_invalid"
+        case .releaseTeamMismatch: return "release_team_mismatch"
+        case .releaseCertificateRevoked: return "release_certificate_revoked"
+        case .releaseCertificateUnchecked: return "release_certificate_unchecked"
         }
     }
 
@@ -181,6 +191,9 @@ public enum InstallRefusal: Error, Sendable, Equatable {
         case .installerNotFinished(let d): return "Apple's Installer did not install the update, so nothing was verified: \(d)"
         case .installedUnverified(let d): return "Apple's Installer changed the app, but it failed verification: \(d)"
         case .releaseSignatureInvalid(let d): return "Patched's release signature is not valid: \(d)"
+        case .releaseTeamMismatch(let d): return "the new Patched is not signed by Patched's Developer ID team: \(d)"
+        case .releaseCertificateRevoked(let d): return "the new Patched's signing certificate or notarisation has been revoked: \(d)"
+        case .releaseCertificateUnchecked(let d): return "could not check the new Patched's certificate with Apple: \(d)"
         }
     }
 }

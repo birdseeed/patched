@@ -26,9 +26,9 @@ not supported. Building from source needs Swift 6.
 ## Download
 
 Releases are on [GitHub Releases](https://github.com/birdseeed/patched/releases).
-Releases are currently ad-hoc signed and not notarised, because my Apple Developer
-Program enrolment is pending; see [Install a release](#install-a-release) for how
-to open one safely.
+From 0.1.7, releases are signed with my Developer ID (Team ID `Y9352JY7U8`) and
+notarised by Apple, so they open normally the first time; see
+[Install a release](#install-a-release).
 
 ## Build from source
 
@@ -60,7 +60,7 @@ Use **Open at login** in Settings to have the installed app start when you log i
 Settings also shows whether notifications are on, with a button to open macOS
 Notification Settings.
 
-Mac App Store apps are reported but never installed by Patched: it asks Apple's public App Store lookup for the latest version (only the bundle IDs of your App Store apps are sent, and only to Apple; ignore an app in the catalogue to stop that) and tells you to update it in the App Store.
+Mac App Store apps are reported but never installed by Patched: it asks Apple's public App Store lookup for the latest version (only the bundle IDs of your App Store apps are sent, and only to Apple; hide an app on the Applications screen, or ignore it in the catalogue, to stop that) and tells you to update it in the App Store.
 
 Patched also tells you when a newer Patched release exists. On the same schedule (when it opens, every three hours and on Check Now) it makes a single anonymous request to GitHub for the latest release of this repository (`api.github.com/repos/birdseeed/patched/releases/latest`). The request carries no identifying data beyond a plain `Patched/<version>` User-Agent. If the release is newer than the app you are running, the menu and the Updates screen show "Patched 0.2.0 is available" with a **Download** button, and you get one notification per new version. Download opens that release's page on GitHub in your browser, only when you click it.
 
@@ -77,20 +77,22 @@ must be recovered before migration can finish. See
 
 ## Install a release
 
-Releases are ad-hoc-signed ZIP files for Apple silicon. They are not signed with
-a Developer ID or notarised yet, because my Apple Developer Program enrolment is
-pending. Download the ZIP from [GitHub Releases](https://github.com/birdseeed/patched/releases),
-check its SHA-256 against the one in the release notes (`shasum -a 256 Patched-0.1.0.zip`),
-extract it, then move the included Patched app to your Applications folder.
-macOS Gatekeeper may block an app from such a ZIP. First check that you trust the
-source and release. If macOS blocks it, use System Settings → Privacy & Security
-→ Open Anyway for that specific app. Do not disable Gatekeeper or lower system
-security globally.
+Releases are ZIP files for Apple silicon. From 0.1.7 they are signed with my
+Developer ID Application certificate (Team ID `Y9352JY7U8`), notarised by Apple and
+stapled. Download the ZIP from [GitHub Releases](https://github.com/birdseeed/patched/releases),
+check its SHA-256 against the one in the release notes (`shasum -a 256 Patched-0.1.7.zip`),
+extract it, then move the included Patched app to your Applications folder. It opens
+without any Gatekeeper prompt beyond the usual "downloaded from the internet" question.
+
+Releases up to 0.1.6 were ad-hoc signed and not notarised. If you install one of
+those, macOS may block it: check that you trust the source, then use System
+Settings → Privacy & Security → Open Anyway for that specific app. Do not disable
+Gatekeeper or lower system security globally.
 
 Each release also has a `Patched-<version>.zip.sig` file: the Ed25519 signature
-Patched checks before it updates itself. Without a Developer ID there is no Team ID
-to pin, so that signature, made with my release key, is what Patched trusts for its
-own updates. Releases are source and ZIP downloads; there is no Homebrew tap at
+Patched checks before it updates itself, made with my release key. From 0.1.7,
+Patched also requires its own updates to be signed by Team ID `Y9352JY7U8` and
+notarised, so a release needs both the release key and the Developer ID. Releases are source and ZIP downloads; there is no Homebrew tap at
 this stage.
 
 ## Command-line interface
@@ -141,4 +143,4 @@ the expected Team ID can still be malicious.
 This is a community project without company-backed support. If you find a
 problem, see [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
 If Patched saves you time, you can [buy me a coffee](https://buymeacoffee.com/andybridson).
-Donations go towards an Apple Developer ID, so releases can be signed and notarised.
+Donations help pay for the Apple Developer membership that signs and notarises releases.

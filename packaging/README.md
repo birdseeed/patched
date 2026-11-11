@@ -53,7 +53,7 @@ Create a local release archive, checksum and signature with:
 
 ```sh
 /bin/bash scripts/release.sh
-(cd dist && shasum -a 256 -c Patched-0.1.6.zip.sha256)
+(cd dist && shasum -a 256 -c Patched-0.1.7.zip.sha256)
 ```
 
 This produces `dist/Patched-<version>.zip`, `.zip.sha256` and `.zip.sig`. It does

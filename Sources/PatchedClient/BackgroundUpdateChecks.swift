@@ -4,6 +4,7 @@ import Combine
 import SwiftUI
 import UserNotifications
 import ServiceManagement
+import Security
 import UpdateSources
 
 // Scheduled checks. Patched checks for updates when the app opens, every 3 hours while it runs, and on
@@ -62,7 +63,12 @@ extension UpdateNotifying {
     var notifiedKeys: Set<String> { get set }
 }
 
-public enum LoginItemStatus: Equatable, Sendable { case notRegistered, enabled, requiresApproval, notFound }
+public enum LoginItemStatus: Equatable, Sendable {
+    case notRegistered, enabled, requiresApproval, notFound
+    /// The running Patched is ad-hoc signed (no Team ID). `SMAppService` needs a properly signed app, so the
+    /// setting is shown greyed out and nothing is registered.
+    case needsDeveloperID
+}
 
 /// `SMAppService.mainApp` behind a seam, so tests never register a real login item.
 @MainActor public protocol LoginItemControlling: AnyObject {
@@ -269,7 +275,8 @@ public enum LoginItemStatus: Equatable, Sendable { case notRegistered, enabled, 
     /// On while registered, or registered but waiting for approval in System Settings.
     public var isOn: Bool { status == .enabled || status == .requiresApproval }
     public var needsApproval: Bool { status == .requiresApproval }
-    public var isAvailable: Bool { status != .notFound }
+    /// Greyed out outside the installed app and for an ad-hoc signed build.
+    public var isAvailable: Bool { status != .notFound && status != .needsDeveloperID }
 
     public var statusText: String {
         if let errorText { return errorText }
@@ -279,12 +286,15 @@ public enum LoginItemStatus: Equatable, Sendable { case notRegistered, enabled, 
         case .requiresApproval:
             return String(localized: "Approve Patched in System Settings > General > Login Items to finish turning this on.")
         case .notFound: return String(localized: "Open at login is only available from the installed Patched.app.")
+        case .needsDeveloperID:
+            return String(localized: "Open at login needs a copy of Patched signed with a Developer ID. This copy is ad-hoc signed, so macOS won't keep it as a login item.")
         }
     }
 
     public func refresh() { status = item.status }
 
     public func setEnabled(_ on: Bool) {
+        guard isAvailable else { return }
         errorText = nil
         do { if on { try item.register() } else { try item.unregister() } }
         catch { errorText = String(localized: "Couldn't change Open at login: \(error.localizedDescription)") }
@@ -296,15 +306,38 @@ public enum LoginItemStatus: Equatable, Sendable { case notRegistered, enabled, 
 
 // MARK: Production implementations
 
+/// The running process's own code signature (dynamic code, `SecCodeCopySelf`), not whatever is on disk at its path.
+@_spi(Testing) public enum RunningCodeSignature {
+    /// The Team ID, or nil when this process is unsigned or ad-hoc signed.
+    public static func teamID() -> String? {
+        var me: SecCode?
+        guard SecCodeCopySelf([], &me) == errSecSuccess, let me else { return nil }
+        // SecCodeCopySigningInformation takes dynamic code as well as static code (SecCode is a SecStaticCode in C);
+        // Swift imports them as separate types, so the dynamic reference is passed as is.
+        var info: CFDictionary?
+        guard SecCodeCopySigningInformation(unsafeBitCast(me, to: SecStaticCode.self), SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess,
+              let dictionary = info as? [String: Any], let team = dictionary[kSecCodeInfoTeamIdentifier as String] as? String,
+              !team.isEmpty else { return nil }
+        return team
+    }
+}
+
 var runsFromAppBundle: Bool {
     Bundle.main.bundleURL.pathExtension == "app" && Bundle.main.bundleIdentifier != nil
 }
 
-/// Lazily touches `SMAppService`, and only from an installed .app bundle.
-@MainActor public final class SystemLoginItem: LoginItemControlling {
+/// `SMAppService.mainApp` itself, behind a seam so the checks can drive `SystemLoginItem` without registering anything.
+@MainActor public protocol MainAppServicing: AnyObject {
+    var status: LoginItemStatus { get }
+    func register() throws
+    func unregister() throws
+    func openSystemSettingsLoginItems()
+}
+
+/// The real `SMAppService.mainApp` (macOS 13 and later).
+@MainActor public final class SystemMainAppService: MainAppServicing {
     public init() {}
     public var status: LoginItemStatus {
-        guard runsFromAppBundle else { return .notFound }
         switch SMAppService.mainApp.status {
         case .enabled: return .enabled
         case .requiresApproval: return .requiresApproval
@@ -315,7 +348,55 @@ var runsFromAppBundle: Bool {
     }
     public func register() throws { try SMAppService.mainApp.register() }
     public func unregister() throws { try SMAppService.mainApp.unregister() }
-    public func openSystemSettings() { SMAppService.openSystemSettingsLoginItems() }
+    public func openSystemSettingsLoginItems() { SMAppService.openSystemSettingsLoginItems() }
+}
+
+/// Lazily touches `SMAppService`, and only from an installed .app bundle. An ad-hoc build (no Team ID in the
+/// running process's own code signature) cannot register: it is `.needsDeveloperID` unless the service says it
+/// is already registered (for example by an earlier signed copy), in which case that is shown and it can
+/// still be turned off.
+@MainActor public final class SystemLoginItem: LoginItemControlling {
+    private let inAppBundle: () -> Bool
+    private let readTeamID: () -> String?
+    private let service: any MainAppServicing
+    private var cachedSigned: Bool?
+
+    /// Production: this process's own bundle and signature, and `SMAppService.mainApp`.
+    public convenience init() {
+        self.init(inAppBundle: { runsFromAppBundle },
+                  teamID: { RunningCodeSignature.teamID() },
+                  service: SystemMainAppService())
+    }
+
+    @_spi(Testing) public init(inAppBundle: @escaping () -> Bool, teamID: @escaping () -> String?, service: any MainAppServicing) {
+        self.inAppBundle = inAppBundle; self.readTeamID = teamID; self.service = service
+    }
+
+    /// Whether the running app's own signature carries a Team ID. Read once: it cannot change while it runs.
+    private var isTeamSigned: Bool {
+        if let cachedSigned { return cachedSigned }
+        let signed = readTeamID().map { !$0.isEmpty } ?? false
+        cachedSigned = signed
+        return signed
+    }
+
+    public var status: LoginItemStatus {
+        guard inAppBundle() else { return .notFound }
+        if isTeamSigned { return service.status }
+        let registered = service.status
+        return registered == .enabled || registered == .requiresApproval ? registered : .needsDeveloperID
+    }
+    /// Only a Team ID signed build registers.
+    public func register() throws {
+        guard inAppBundle(), isTeamSigned else { return }
+        try service.register()
+    }
+    /// Always allowed from the app, so a login item can never be stuck on.
+    public func unregister() throws {
+        guard inAppBundle() else { return }
+        try service.unregister()
+    }
+    public func openSystemSettings() { service.openSystemSettingsLoginItems() }
 }
 
 @MainActor private final class TimerToken: CancellableToken {

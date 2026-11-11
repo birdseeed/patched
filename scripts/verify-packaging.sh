@@ -38,7 +38,7 @@ test_service=im.patched.release-signing.packaging-check
 test_keychain="$stage/release-signing-test.keychain-db"
 /usr/bin/security create-keychain -p "packaging-check-$RANDOM$RANDOM" "$test_keychain"
 /usr/bin/security set-keychain-settings "$test_keychain"
-release_env=(env -u SIGNING_IDENTITY -u NOTARY_PROFILE -u PATCHED_RELEASE_PUBLIC_KEY_OVERRIDE
+release_env=(env -u SIGNING_IDENTITY -u NOTARY_PROFILE -u PATCHED_RELEASE_PUBLIC_KEY_OVERRIDE -u RELEASE_TEAM_ID
              PATCHED_RELEASE_KEY_SERVICE="$test_service" PATCHED_RELEASE_KEYCHAIN="$test_keychain")
 expect_release_refusal() {
     local name=$1 message=$2 status
@@ -53,17 +53,44 @@ expect_release_refusal() {
     [[ ! -e "$stage/$name/Patched-$PACKAGING_VERSION.zip" && ! -e "$stage/$name/Patched-$PACKAGING_VERSION.zip.sig" ]] || {
         printf 'Refused release (%s) left a zip or signature.\n' "$name" >&2; exit 1; }
 }
+# The release Team ID pin: none on an ad-hoc build, and a Developer ID build must name a well-formed team. All
+# of these are refused before building (and before the Keychain is read), so nothing is produced.
+expect_release_refusal adhoc-pin-release 'RELEASE_TEAM_ID must be empty for an ad-hoc build' \
+    "${release_env[@]}" RELEASE_TEAM_ID=ABCDE12345 /bin/bash scripts/release.sh "${build_options[@]}"
+signed_env=(env -u NOTARY_PROFILE -u PATCHED_RELEASE_PUBLIC_KEY_OVERRIDE -u RELEASE_TEAM_ID
+            SIGNING_IDENTITY=packaging-verification-unused PATCHED_RELEASE_KEY_SERVICE="$test_service"
+            PATCHED_RELEASE_KEYCHAIN="$test_keychain")
+expect_release_refusal unpinned-signed-release 'SIGNING_IDENTITY requires RELEASE_TEAM_ID' \
+    "${signed_env[@]}" /bin/bash scripts/release.sh "${build_options[@]}"
+for bad_team in abcde12345 ABCDE1234 ABCDE123456 'ABCDE1234"' 'ABCDE 1234' 'ABCDÉ12345'; do
+    expect_release_refusal malformed-team-release 'RELEASE_TEAM_ID must be exactly ten upper-case letters or digits' \
+        "${signed_env[@]}" RELEASE_TEAM_ID="$bad_team" /bin/bash scripts/release.sh "${build_options[@]}"
+    [[ ! -e "$stage/malformed-team-release" ]] || { printf 'Malformed Team ID release created output.\n' >&2; exit 1; }
+done
+expect_release_refusal unnotarised-signed-release 'SIGNING_IDENTITY requires NOTARY_PROFILE' \
+    "${signed_env[@]}" RELEASE_TEAM_ID=ABCDE12345 /bin/bash scripts/release.sh "${build_options[@]}"
+for name in adhoc-pin-release unpinned-signed-release unnotarised-signed-release; do
+    [[ ! -e "$stage/$name" ]] || { printf 'Refused Team ID release (%s) created output.\n' "$name" >&2; exit 1; }
+done
+# build-app.sh on its own refuses a pin on an ad-hoc build as well, before building.
+if env -u SIGNING_IDENTITY -u NOTARY_PROFILE RELEASE_TEAM_ID=ABCDE12345 /bin/bash scripts/build-app.sh "${build_options[@]}" \
+        --output-dir "$stage/adhoc-pin-build" > "$stage/adhoc-pin-build.log" 2>&1; then
+    printf 'build-app.sh accepted a Team ID pin on an ad-hoc build.\n' >&2; exit 1
+fi
+/usr/bin/grep -q 'RELEASE_TEAM_ID must be empty for an ad-hoc build' "$stage/adhoc-pin-build.log"
+[[ ! -e "$stage/adhoc-pin-build" ]] || { printf 'Refused pinned ad-hoc build created output.\n' >&2; exit 1; }
+printf 'Release Team ID refused on an ad-hoc build, missing or malformed on a signed one.\n'
 # No key: refused before building, nothing produced.
 expect_release_refusal no-key-release 'Release signing key not found' \
     "${release_env[@]}" /bin/bash scripts/release.sh "${build_options[@]}"
 [[ ! -e "$stage/no-key-release" ]] || { printf 'Release without a key created output.\n' >&2; exit 1; }
 # The public-key override is refused for the real service.
 expect_release_refusal real-override-release 'only for a throwaway test key' \
-    env -u SIGNING_IDENTITY -u NOTARY_PROFILE -u PATCHED_RELEASE_KEY_SERVICE PATCHED_RELEASE_KEYCHAIN="$test_keychain" \
+    env -u SIGNING_IDENTITY -u NOTARY_PROFILE -u RELEASE_TEAM_ID -u PATCHED_RELEASE_KEY_SERVICE PATCHED_RELEASE_KEYCHAIN="$test_keychain" \
     PATCHED_RELEASE_PUBLIC_KEY_OVERRIDE=czM+l4MfG6HP6I7YVIjQSjPvW/7wIKTfJw1wN74W1EU= /bin/bash scripts/release.sh "${build_options[@]}"
 # ...and for any other service unless a throwaway keychain is named too.
 expect_release_refusal no-keychain-override-release 'only for a throwaway test key' \
-    env -u SIGNING_IDENTITY -u NOTARY_PROFILE -u PATCHED_RELEASE_KEYCHAIN PATCHED_RELEASE_KEY_SERVICE="$test_service" \
+    env -u SIGNING_IDENTITY -u NOTARY_PROFILE -u RELEASE_TEAM_ID -u PATCHED_RELEASE_KEYCHAIN PATCHED_RELEASE_KEY_SERVICE="$test_service" \
     PATCHED_RELEASE_PUBLIC_KEY_OVERRIDE=czM+l4MfG6HP6I7YVIjQSjPvW/7wIKTfJw1wN74W1EU= /bin/bash scripts/release.sh "${build_options[@]}"
 mkdir -p .build/packaging-module-cache
 /usr/bin/xcrun swiftc -module-cache-path "$PACKAGING_ROOT/.build/packaging-module-cache" \
@@ -79,7 +106,7 @@ unset test_private_key
 expect_release_refusal wrong-key-release 'does not verify against the release public key built into Patched' \
     "${release_env[@]}" /bin/bash scripts/release.sh "${build_options[@]}"
 printf 'Release signing refused without a key, with the real-service override, and with a key Patched does not embed.\n'
-env -u SIGNING_IDENTITY -u NOTARY_PROFILE /bin/bash scripts/build-app.sh "${build_options[@]}" --output-dir "$stage/build"
+env -u SIGNING_IDENTITY -u NOTARY_PROFILE -u RELEASE_TEAM_ID /bin/bash scripts/build-app.sh "${build_options[@]}" --output-dir "$stage/build"
 app="$stage/build/Patched.app"
 cli="$app/Contents/Helpers/patched"
 plist="$app/Contents/Info.plist"
@@ -105,6 +132,33 @@ assert_key CFBundleDevelopmentRegion en
 localizations=$(/usr/bin/plutil -extract CFBundleLocalizations json -o - "$plist")
 [[ "$localizations" = '["en"]' ]] || { printf 'Info.plist CFBundleLocalizations: expected ["en"], got %s\n' "$localizations" >&2; exit 1; }
 assert_key NSHumanReadableCopyright 'Copyright © 2026 Andy Bridson'
+# An ad-hoc build pins no release Team ID, so self-update relies on the release key alone.
+assert_key PatchedReleaseTeamID ''
+# The signing-team check refuses this ad-hoc app for any team, so a pinned build or release signed by a
+# certificate of another team (or none) is refused after signing.
+if (packaging_require_signing_team "$app" ABCDE12345) > "$stage/signing-team.log" 2>&1; then
+    printf 'The signing-team check accepted an ad-hoc app.\n' >&2; exit 1
+fi
+/usr/bin/grep -q 'does not match the team of the signing certificate (not set)' "$stage/signing-team.log" || {
+    printf 'Unexpected signing-team refusal: %s\n' "$(cat "$stage/signing-team.log")" >&2; exit 1; }
+if (packaging_require_signing_team "$app" '') > /dev/null 2>&1; then
+    printf 'The signing-team check accepted an empty team.\n' >&2; exit 1
+fi
+printf 'Signing-team check refuses an ad-hoc signature.\n'
+# release.sh checks a Developer ID release against the same requirement string self-update uses (one source).
+release_requirement=$(packaging_release_requirement ABCDE12345)
+expected_requirement='identifier "im.patched.app" and anchor apple generic and certificate leaf[subject.OU] = "ABCDE12345" and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and notarized'
+[[ "$release_requirement" = "$expected_requirement" ]] || {
+    printf 'Release requirement read from SelfUpdate.swift is unexpected: %s\n' "$release_requirement" >&2; exit 1; }
+if (packaging_release_requirement 'ABCDE1234"') > /dev/null 2>&1; then
+    printf 'A malformed team reached the release requirement.\n' >&2; exit 1
+fi
+# An ad-hoc (not Developer ID, not notarised) signature does not satisfy it.
+if (packaging_require_release_requirement "$app" ABCDE12345) > "$stage/release-requirement.log" 2>&1; then
+    printf 'The release requirement check accepted an ad-hoc app.\n' >&2; exit 1
+fi
+/usr/bin/grep -q 'does not satisfy the Developer ID release requirement' "$stage/release-requirement.log"
+printf 'Release requirement matches self-update and refuses an ad-hoc signature.\n'
 [[ -x "$app/Contents/MacOS/Patched" && -x "$cli" ]]
 # The brand icon is part of the bundle and is a real icon file with the 1024 pixel representation.
 icon="$app/Contents/Resources/AppIcon.icns"
@@ -208,7 +262,7 @@ if "$stage/release-signing" verify "$stage/tampered.zip" "$release_sig" "$test_p
 fi
 printf 'Release signature verified with the throwaway key; the real key and a tampered zip are refused.\n'
 # --unsigned-for-testing still builds a zip without the Keychain, and writes no signature.
-env -u SIGNING_IDENTITY -u NOTARY_PROFILE PATCHED_RELEASE_KEY_SERVICE=im.patched.release-signing.absent \
+env -u SIGNING_IDENTITY -u NOTARY_PROFILE -u RELEASE_TEAM_ID PATCHED_RELEASE_KEY_SERVICE=im.patched.release-signing.absent \
     PATCHED_RELEASE_KEYCHAIN="$stage/absent.keychain-db" \
     /bin/bash scripts/release.sh "${build_options[@]}" --unsigned-for-testing --output-dir "$stage/unsigned-release"
 [[ -f "$stage/unsigned-release/Patched-$PACKAGING_VERSION.zip" && ! -e "$stage/unsigned-release/Patched-$PACKAGING_VERSION.zip.sig" ]]

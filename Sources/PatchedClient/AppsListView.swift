@@ -15,7 +15,7 @@ private typealias AppsListState<Value> = State<Value>
 
 /// The segmented filter above the list.
 @_spi(Testing) public enum AppsListFilter: String, CaseIterable, Identifiable, Sendable {
-    case all = "All", updates = "Updates", upToDate = "Up to date", noSource = "No source"
+    case all = "All", updates = "Updates", upToDate = "Up to date", noSource = "No source", hidden = "Hidden"
     public var id: String { rawValue }
     /// The segment's localisable title.
     var title: LocalizedStringKey {
@@ -24,12 +24,16 @@ private typealias AppsListState<Value> = State<Value>
         case .updates: return "Updates"
         case .upToDate: return "Up to date"
         case .noSource: return "No source"
+        case .hidden: return "Hidden"
         }
     }
 
     func matches(_ row: AppUpdateRow) -> Bool {
+        // Hidden (ignored) apps appear only under Hidden.
+        if self == .hidden { return row.isIgnored }
+        if row.isIgnored { return false }
         switch self {
-        case .all: return true
+        case .all, .hidden: return true   // .hidden returned above
         case .updates: return row.hasUpdateToShow
         case .upToDate: return row.status == .upToDate
         case .noSource: return row.status == .noSource
@@ -80,6 +84,19 @@ extension AppUpdateRow {
 
 /// What the list shows for a search and a segment. Pure, so it can be checked without a view.
 @_spi(Testing) public enum AppsListModel {
+    /// The segments on offer: Hidden only while at least one app is hidden.
+    public static func availableFilters(_ rows: [AppUpdateRow]) -> [AppsListFilter] {
+        let anyHidden = rows.contains { $0.isIgnored }
+        return AppsListFilter.allCases.filter { $0 != .hidden || anyHidden }
+    }
+    /// The chosen segment, or All when it is no longer on offer (the last hidden app was unhidden).
+    public static func effectiveFilter(_ chosen: AppsListFilter, rows: [AppUpdateRow]) -> AppsListFilter {
+        availableFilters(rows).contains(chosen) ? chosen : .all
+    }
+    /// How many apps the header counts: hidden apps only on the Hidden segment.
+    public static func countedRows(_ rows: [AppUpdateRow], filter: AppsListFilter) -> Int {
+        rows.filter { filter == .hidden ? $0.isIgnored : !$0.isIgnored }.count
+    }
     public static func visibleRows(_ rows: [AppUpdateRow], query: String, filter: AppsListFilter) -> [AppUpdateRow] {
         let needle = query.trimmingCharacters(in: .whitespacesAndNewlines)
         return rows
@@ -136,7 +153,8 @@ public struct AppsListView: View {
         self.actions = AppsListActions(revealer: revealer, showUpdate: showUpdate, currentRows: { controller.rows })
     }
 
-    private var visible: [AppUpdateRow] { AppsListModel.visibleRows(controller.applicationsRows, query: query, filter: filter) }
+    private var activeFilter: AppsListFilter { AppsListModel.effectiveFilter(filter, rows: controller.applicationsRows) }
+    private var visible: [AppUpdateRow] { AppsListModel.visibleRows(controller.applicationsRows, query: query, filter: activeFilter) }
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -154,8 +172,8 @@ public struct AppsListView: View {
             }
             HStack(spacing: 12) {
                 TextField("Search by name or bundle ID", text: $query).textFieldStyle(.roundedBorder).frame(maxWidth: 260)
-                Picker("Show", selection: $filter) {
-                    ForEach(AppsListFilter.allCases) { Text($0.title).tag($0) }
+                Picker("Show", selection: Binding(get: { activeFilter }, set: { filter = $0 })) {
+                    ForEach(AppsListModel.availableFilters(controller.applicationsRows)) { Text($0.title).tag($0) }
                 }
                 .pickerStyle(.segmented).labelsHidden().fixedSize()
                 Spacer(minLength: 0)
@@ -165,6 +183,11 @@ public struct AppsListView: View {
         }
         .padding(20)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        // When the Hidden segment goes away (the last hidden app was unhidden), forget it, so hiding another app
+        // later does not jump back to Hidden unasked.
+        .onChange(of: AppsListModel.availableFilters(controller.applicationsRows)) { offered in
+            if !offered.contains(filter) { filter = .all }
+        }
     }
 
     private var header: some View {
@@ -187,7 +210,7 @@ public struct AppsListView: View {
     private var subtitle: String {
         if controller.phase == .checking { return String(localized: "Checking…") }
         guard controller.hasChecked else { return String(localized: "Not checked yet") }
-        let count = controller.applicationsRows.count
+        let count = AppsListModel.countedRows(controller.applicationsRows, filter: activeFilter)
         let noun = count == 1 ? String(localized: "1 app") : String(localized: "\(count) apps")
         guard let at = controller.lastCheckedAt else { return noun }
         return String(localized: "\(noun) · checked \(at.formatted(date: .omitted, time: .shortened))")
@@ -272,8 +295,8 @@ private struct AppsListRowView: View {
         if row.canOpenInAppStore {
             Button("Open in App Store") { controller.openInAppStore(id: row.id) }.disabled(row.activity != .idle)
         }
-        if controller.canIgnore(row) { Button("Ignore") { controller.ignore(id: row.id) } }
-        if controller.canStopIgnoring(row) { Button("Stop ignoring") { controller.stopIgnoring(id: row.id) } }
+        if controller.canIgnore(row) { Button("Hide") { controller.ignore(id: row.id) } }
+        if controller.canStopIgnoring(row) { Button("Unhide") { controller.stopIgnoring(id: row.id) } }
     }
 }
 

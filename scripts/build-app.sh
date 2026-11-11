@@ -14,6 +14,8 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 [[ "$configuration" = release || "$configuration" = debug ]] || { printf 'Invalid build configuration\n' >&2; exit 2; }
+release_team_id=${RELEASE_TEAM_ID:-}
+packaging_check_release_team "$release_team_id" "${SIGNING_IDENTITY:-}" 0
 packaging_version
 packaging_output_dir "$output_dir"
 cd "$PACKAGING_ROOT"
@@ -55,7 +57,7 @@ for size in 16 32 128 256 512; do
 done
 /usr/bin/iconutil -c icns "$iconset" -o "$app/Contents/Resources/AppIcon.icns"
 packaging_render packaging/Info.plist.template "$app/Contents/Info.plist" \
-    "VERSION=$PACKAGING_VERSION" "BUILD_NUMBER=$build_number"
+    "VERSION=$PACKAGING_VERSION" "BUILD_NUMBER=$build_number" "RELEASE_TEAM_ID=$release_team_id"
 sign_args=(--force --options runtime --entitlements "$PACKAGING_ROOT/packaging/Patched.entitlements")
 if [[ -n "${SIGNING_IDENTITY:-}" ]]; then
     sign_args+=(--timestamp -s "$SIGNING_IDENTITY")
@@ -66,6 +68,8 @@ fi
 /usr/bin/codesign "${sign_args[@]}" "$app"
 /usr/bin/codesign --verify --strict --verbose=2 "$app/Contents/Helpers/patched"
 /usr/bin/codesign --verify --deep --strict --verbose=2 "$app"
+# A pinned build must be signed by the team it pins, or it would refuse its own next release.
+if [[ -n "$release_team_id" ]]; then packaging_require_signing_team "$app" "$release_team_id"; fi
 destination="$PACKAGING_OUTPUT/Patched.app"
 [[ ! -L "$destination" ]] || { printf 'Refusing symlink app output\n' >&2; exit 1; }
 if [[ -e "$destination" ]]; then

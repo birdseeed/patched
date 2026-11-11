@@ -70,6 +70,16 @@ import PatchedShell
     func openSystemSettings() { openedSettings += 1 }
 }
 
+/// `SMAppService.mainApp` for `SystemLoginItem`: records what was asked of it and never registers anything real.
+@MainActor final class FakeMainAppService: MainAppServicing {
+    var status: LoginItemStatus = .notRegistered
+    var registerResult: LoginItemStatus = .enabled
+    var registers = 0, unregisters = 0, openedSettings = 0
+    func register() throws { registers += 1; status = registerResult }
+    func unregister() throws { unregisters += 1; status = .notRegistered }
+    func openSystemSettingsLoginItems() { openedSettings += 1 }
+}
+
 /// Holds a fake network call open until the check releases it.
 final class Gate: @unchecked Sendable {
     private let lock = NSLock()
@@ -479,6 +489,71 @@ struct FakeNetworkDown: Error {}
         try expect(!broken.isOn && broken.statusText.contains("boom"), "register failure hidden: \(broken.statusText)")
         let missing = FakeLoginItem(); missing.status = .notFound
         try expect(!OpenAtLoginController(item: missing).isAvailable, "notFound offered as available")
+    }
+
+    check("login item: an ad-hoc signed Patched shows Open at login greyed out with why, and never touches SMAppService") {
+        let service = FakeMainAppService()
+        let item = SystemLoginItem(inAppBundle: { true }, teamID: { nil }, service: service)
+        let controller = OpenAtLoginController(item: item)
+        try expect(controller.status == .needsDeveloperID && !controller.isAvailable && !controller.isOn && !controller.needsApproval,
+                   "ad-hoc: \(controller.status)")
+        try expect(controller.statusText.contains("signed with a Developer ID") && controller.statusText.contains("ad-hoc signed"),
+                   "ad-hoc text: \(controller.statusText)")
+        controller.setEnabled(true); controller.refresh()
+        try item.register()
+        try expect(service.registers == 0, "ad-hoc build registered: \(service.registers)")
+        // An empty Team ID is no Team ID.
+        let blank = OpenAtLoginController(item: SystemLoginItem(inAppBundle: { true }, teamID: { "" }, service: service))
+        try expect(blank.status == .needsDeveloperID, "empty Team ID: \(blank.status)")
+        // Outside an app bundle the bundle message wins and the signature is not even read.
+        var signatureReads = 0
+        let loose = OpenAtLoginController(item: SystemLoginItem(inAppBundle: { false }, teamID: { signatureReads += 1; return nil }, service: service))
+        try expect(loose.status == .notFound && !loose.isAvailable && signatureReads == 0, "outside a bundle: \(loose.status), reads \(signatureReads)")
+    }
+
+    check("login item: an ad-hoc Patched that is already a login item shows it and can turn it off, but not back on") {
+        for already in [LoginItemStatus.enabled, .requiresApproval] {
+            let service = FakeMainAppService()
+            service.status = already
+            let controller = OpenAtLoginController(item: SystemLoginItem(inAppBundle: { true }, teamID: { nil }, service: service))
+            try expect(controller.status == already && controller.isOn && controller.isAvailable, "\(already): \(controller.status)")
+            controller.setEnabled(false)
+            try expect(service.unregisters == 1 && !controller.isOn, "\(already): could not turn it off: \(service.unregisters)")
+            try expect(controller.status == .needsDeveloperID && !controller.isAvailable, "\(already): after turning off: \(controller.status)")
+            controller.setEnabled(true)
+            try expect(service.registers == 0 && !controller.isOn, "\(already): ad-hoc build registered again")
+        }
+        // The check runner itself is ad-hoc (linker) signed, so its own dynamic code has no Team ID.
+        try expect(RunningCodeSignature.teamID() == nil, "the check runner reports a Team ID: \(RunningCodeSignature.teamID() ?? "")")
+    }
+
+    check("login item: a Developer ID signed Patched registers and unregisters through SMAppService") {
+        let service = FakeMainAppService()
+        var signatureReads = 0
+        let item = SystemLoginItem(inAppBundle: { true }, teamID: { signatureReads += 1; return "ABCDE12345" }, service: service)
+        let controller = OpenAtLoginController(item: item)
+        try expect(controller.isAvailable && !controller.isOn && controller.status == .notRegistered, "signed: \(controller.status)")
+        controller.setEnabled(true)
+        try expect(service.registers == 1 && controller.isOn && controller.status == .enabled, "register: \(service.registers) \(controller.status)")
+        try expect(controller.statusText == "Patched opens when you log in.", "enabled text: \(controller.statusText)")
+        controller.setEnabled(false)
+        try expect(service.unregisters == 1 && !controller.isOn && controller.status == .notRegistered, "unregister: \(service.unregisters)")
+        try expect(signatureReads == 1, "the signature was read \(signatureReads) times")
+    }
+
+    check("login item: a registration waiting for approval says where to allow it and offers the Login Items button") {
+        let service = FakeMainAppService()
+        service.registerResult = .requiresApproval
+        let controller = OpenAtLoginController(item: SystemLoginItem(inAppBundle: { true }, teamID: { "ABCDE12345" }, service: service))
+        controller.setEnabled(true)
+        try expect(controller.needsApproval && controller.isOn && controller.isAvailable, "approval: \(controller.status)")
+        try expect(controller.statusText.contains("System Settings > General > Login Items"), "approval text: \(controller.statusText)")
+        controller.openSystemSettings()
+        try expect(service.openedSettings == 1, "Login Items settings not opened")
+        let view = try String(contentsOfFile: #filePath.replacingOccurrences(of: "Tests/PatchedAppUpdatesChecks/BackgroundCheckChecks.swift",
+                                                                              with: "Sources/PatchedClient/OpenAtLoginView.swift"), encoding: .utf8)
+        try expect(view.contains("if controller.needsApproval") && view.contains("controller.openSystemSettings()")
+                   && view.contains(".disabled(!controller.isAvailable)"), "the view lost the approval button or the greyed-out state")
     }
 
     check("session: the testing session has no schedule and the production seams stay inert until started") {

@@ -1,6 +1,7 @@
 import Foundation
 import CryptoKit
 import Darwin
+import Security
 import UpdateSources
 @_spi(Testing) import UpdateInstaller
 
@@ -33,11 +34,31 @@ private final class FakeCodeCheck: @unchecked Sendable {
     }
 }
 
+/// The Developer ID team check for fixtures: a bundle is "signed" by the team written in Resources/fake-team
+/// (as `makeApp(team:)` writes it); no file means ad-hoc. Records every (path, team) it was asked about.
+private final class FakeTeamCheck: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _calls: [(String, String)] = []
+    var calls: [(String, String)] { lock.withLock { _calls } }
+    var check: @Sendable (String, String) throws -> Void {
+        { [self] path, team in
+            lock.withLock { _calls.append((path, team)) }
+            guard let data = FileManager.default.contents(atPath: path + "/Contents/Resources/fake-team") else {
+                throw InstallRefusal.releaseTeamMismatch("fake: ad-hoc signed")
+            }
+            guard String(decoding: data, as: UTF8.self) == team else {
+                throw InstallRefusal.releaseTeamMismatch("fake: signed by \(String(decoding: data, as: UTF8.self)), not \(team)")
+            }
+        }
+    }
+}
+
 private final class SelfRig {
     let sandbox: Sandbox
     let key = Curve25519.Signing.PrivateKey()
     let downloader = FakeDownloader()
     let code = FakeCodeCheck()
+    let team = FakeTeamCheck()
     var appPath: String { sandbox.apps + "/Patched.app" }
     var backups: String { sandbox.state + "/backups" }
     var publicKey: String { key.publicKey.rawRepresentation.base64EncodedString() }
@@ -47,9 +68,9 @@ private final class SelfRig {
         try makeApp(at: appPath, id: patchedID, short: installed, build: "10", team: nil, payload: "old")
     }
 
-    func updater(running: String = "0.1.0", publicKey: String? = nil) -> SelfUpdater {
+    func updater(running: String = "0.1.0", publicKey: String? = nil, pin: ReleaseTeamPin = .none) -> SelfUpdater {
         SelfUpdater(appPath: appPath, runningVersion: running, backupsRoot: backups, downloader: downloader,
-                    codeCheck: code.check, publicKey: publicKey ?? self.publicKey)
+                    codeCheck: code.check, publicKey: publicKey ?? self.publicKey, teamPin: pin, teamCheck: team.check)
     }
 
     /// Builds `Patched-<claimed>.zip` holding a Patched.app of `contains`, signs it with `signer` (the rig's key
@@ -57,10 +78,18 @@ private final class SelfRig {
     @discardableResult
     func publish(_ claimed: String, contains: String? = nil, id: String = patchedID, signer: Curve25519.Signing.PrivateKey? = nil,
                  signature: String? = nil, serveSignature: Bool = true, tamper: Bool = false, unsigned: Bool = false,
-                 extra: ((String) throws -> Void)? = nil) throws -> PatchedRelease {
+                 team: String? = nil, pin: String? = nil, extra: ((String) throws -> Void)? = nil) throws -> PatchedRelease {
         let folder = sandbox.fixtures + "/release-" + UUID().uuidString
         let app = folder + "/Patched.app"
-        try makeApp(at: app, id: id, short: contains ?? claimed, build: "20", team: nil, payload: "new")
+        try makeApp(at: app, id: id, short: contains ?? claimed, build: "20", team: team, payload: "new")
+        // A release signed by a team pins that team, as build-app.sh writes it, unless a check says otherwise.
+        if let written = pin ?? team {
+            let plistPath = app + "/Contents/Info.plist"
+            var plist = try PropertyListSerialization.propertyList(from: try Data(contentsOf: URL(fileURLWithPath: plistPath)),
+                                                                   format: nil) as? [String: Any] ?? [:]
+            plist[PatchedReleaseKey.teamIDInfoKey] = written
+            try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0).write(to: URL(fileURLWithPath: plistPath))
+        }
         if unsigned { try Data().write(to: URL(fileURLWithPath: app + "/Contents/Resources/fake-unsigned")) }
         try extra?(app)
         let zipPath = sandbox.fixtures + "/Patched-\(claimed)-\(UUID().uuidString).zip"
@@ -391,6 +420,228 @@ func registerSelfUpdateChecks() {
         try fm.createDirectory(atPath: other, withIntermediateDirectories: true)
         try expect(SelfUpdater.removeStaleWorkFolders(besideApp: rig.appPath, uid: geteuid() &+ 1, now: later).isEmpty && fm.fileExists(atPath: other),
                    "removed a folder owned by someone else")
+    }
+
+    check("self update: with no release Team ID pin (ad-hoc builds, up to 0.1.6) the team is never checked") {
+        try expect(ReleaseTeamPin.from(infoValue: nil) == .none && ReleaseTeamPin.from(infoValue: "") == .none, "empty pin is not none")
+        let rig = try SelfRig()
+        _ = try await rig.updater().install(try rig.publish("0.2.0"))
+        try expectEqual(try version(rig.appPath), "0.2.0", "ad-hoc download over an unpinned Patched")
+        try expect(rig.team.calls.isEmpty, "team checked without a pin: \(rig.team.calls)")
+        // The production initialiser reads the pin from this process's own bundle: the checks have none.
+        try expect(ReleaseTeamPin.running == .none, "the check runner has a pin: \(ReleaseTeamPin.running)")
+    }
+
+    check("self update: a pinned Patched accepts a release signed by its Developer ID team, checked before and after the swap") {
+        let rig = try SelfRig()
+        let r = try rig.publish("0.2.0", team: "ABCDE12345")
+        _ = try await rig.updater(pin: .team("ABCDE12345")).install(r)
+        try expectEqual(try version(rig.appPath), "0.2.0")
+        let calls = rig.team.calls
+        try expect(calls.count == 2 && calls.allSatisfy({ $0.1 == "ABCDE12345" }) && calls.last?.0 == rig.appPath,
+                   "team checks: \(calls)")
+        try expect(calls.first?.0 != rig.appPath && calls.first?.0.hasSuffix("/Patched.app") == true, "staged app not team-checked: \(calls)")
+    }
+
+    check("self update: a pinned Patched refuses an ad-hoc or other-team download, even with a valid release signature") {
+        for (name, team) in [("ad-hoc download", nil), ("other team", "ZYXWV98765"), ("lower-case look-alike", "abcde12345")] as [(String, String?)] {
+            let rig = try SelfRig()
+            let r = try rig.publish("0.2.0", team: team)
+            let before = rig.snapshot()
+            try await expectSelfRefusal("release_team_mismatch", name) { _ = try await rig.updater(pin: .team("ABCDE12345")).install(r) }
+            try rig.expectUntouched(before, name)
+            try expectEqual(rig.team.calls.count, 1, "\(name): team checks")
+        }
+        // A new app that loses its team after the swap is swapped back.
+        let rig = try SelfRig()
+        let r = try rig.publish("0.2.0", team: "ABCDE12345")
+        let before = rig.snapshot()
+        let flaky = FakeTeamCheck()
+        let installed = rig.appPath
+        let updater = SelfUpdater(appPath: rig.appPath, runningVersion: "0.1.0", backupsRoot: rig.backups, downloader: rig.downloader,
+                                  codeCheck: rig.code.check, publicKey: rig.publicKey, teamPin: .team("ABCDE12345"),
+                                  teamCheck: { path, team in
+                                      if path == installed { throw InstallRefusal.releaseTeamMismatch("fake: after the swap") }
+                                      try flaky.check(path, team)
+                                  })
+        try await expectSelfRefusal("verification_failed_after_swap", "post-swap team") { _ = try await updater.install(r) }
+        try rig.expectUntouched(before, "post-swap team")
+    }
+
+    check("self update: a pinned Patched refuses a release that drops or changes the pin in its Info.plist") {
+        for (name, pin) in [("pin dropped", ""), ("pin changed", "ZYXWV98765"), ("pin damaged", "abc")] {
+            let rig = try SelfRig()
+            let r = try rig.publish("0.2.0", team: "ABCDE12345", pin: pin)
+            let before = rig.snapshot()
+            try await expectSelfRefusal("release_team_mismatch", name) { _ = try await rig.updater(pin: .team("ABCDE12345")).install(r) }
+            try rig.expectUntouched(before, name)
+        }
+        // An unpinned Patched (0.1.6) does accept a release that starts pinning (0.1.7).
+        let rig = try SelfRig()
+        _ = try await rig.updater().install(try rig.publish("0.2.0", team: "ABCDE12345"))
+        try expectEqual(try version(rig.appPath), "0.2.0")
+    }
+
+    check("self update: Security statuses map to a team mismatch, a revoked certificate or a retry, never to success") {
+        try expect(SelfUpdater.validityRefusal(status: errSecSuccess, team: "ABCDE12345", detail: "") == nil, "success refused")
+        try expectEqual(SelfUpdater.validityRefusal(status: errSecCSReqFailed, team: "ABCDE12345", detail: "")?.code, "release_team_mismatch")
+        for status: OSStatus in [-2147409652, -67820, -66992] {
+            try expectEqual(SelfUpdater.validityRefusal(status: status, team: "ABCDE12345", detail: "x")?.code, "release_certificate_revoked", "\(status)")
+        }
+        for status: OSStatus in [-67630, -67632, -67636, -67642, -67643, -2147408883, -2147408863, -2147408861, -2147408860, -2147408853] {
+            try expectEqual(SelfUpdater.validityRefusal(status: status, team: "ABCDE12345", detail: "")?.code, "release_certificate_unchecked", "\(status)")
+        }
+        for status: OSStatus in [errSecCSUnsigned, -67061, -1, 1] {
+            try expectEqual(SelfUpdater.validityRefusal(status: status, team: "ABCDE12345", detail: "")?.code, "signature_invalid", "\(status)")
+        }
+    }
+
+    check("self update: the production updater pins the running app's own Info.plist team and uses the real team check") {
+        let sandbox = try Sandbox()
+        let pinned = sandbox.fixtures + "/Pinned.app"
+        try FileManager.default.createDirectory(atPath: pinned + "/Contents", withIntermediateDirectories: true)
+        try PropertyListSerialization.data(fromPropertyList: ["CFBundleIdentifier": patchedID, "CFBundlePackageType": "APPL",
+                                                              PatchedReleaseKey.teamIDInfoKey: "ABCDE12345"], format: .xml, options: 0)
+            .write(to: URL(fileURLWithPath: pinned + "/Contents/Info.plist"))
+        let production = SelfUpdater(productionWith: try Bundle(path: pinned).unwrapChecked(), appPath: sandbox.apps + "/Patched.app",
+                                     runningVersion: "0.1.0", backupsRoot: sandbox.state + "/backups", downloader: FakeDownloader(),
+                                     codeCheck: { _ in }, uid: geteuid())
+        try expectEqual(production.teamPinForTesting, .team("ABCDE12345"), "production pin")
+        // The real check: refuses a malformed team before reading anything, and an ad-hoc signed Patched as a mismatch.
+        try await expectRefusal("cannot_pin_identity") { try production.teamCheckForTesting("/nonexistent", "abc") }
+        let adhoc = sandbox.fixtures + "/AdHoc/Patched.app"
+        try FileManager.default.createDirectory(atPath: adhoc + "/Contents/MacOS", withIntermediateDirectories: true)
+        try PropertyListSerialization.data(fromPropertyList: ["CFBundleIdentifier": patchedID, "CFBundleExecutable": "Patched",
+                                                              "CFBundlePackageType": "APPL"], format: .xml, options: 0)
+            .write(to: URL(fileURLWithPath: adhoc + "/Contents/Info.plist"))
+        try FileManager.default.copyItem(atPath: "/usr/bin/true", toPath: adhoc + "/Contents/MacOS/Patched")
+        try tool("/usr/bin/codesign", ["--force", "--sign", "-", "--identifier", patchedID, adhoc])
+        try await expectRefusal("release_team_mismatch") { try production.teamCheckForTesting(adhoc, "ABCDE12345") }
+        // The public initialiser uses this process's own bundle, which (for the check runner) pins nothing.
+        let running = SelfUpdater(appPath: sandbox.apps + "/Patched.app", runningVersion: "0.1.0", backupsRoot: sandbox.state + "/backups")
+        try expectEqual(running.teamPinForTesting, ReleaseTeamPin.running)
+    }
+
+    check("self update: a malformed release Team ID pin refuses every update before anything is downloaded") {
+        let bad: [Any] = ["abcde12345", "ABCDE1234", "ABCDE123456", "ABCDE1234\"", " ABCDE1234", "ABCDE1234 ", "ABCDÉ12345",
+                          "ABCDE12345\" or anchor apple", 42, ["ABCDE12345"]]
+        for value in bad {
+            guard case .malformed = ReleaseTeamPin.from(infoValue: value) else {
+                throw CheckFailure(description: "\(value) was not treated as a malformed pin: \(ReleaseTeamPin.from(infoValue: value))")
+            }
+        }
+        try expectEqual(ReleaseTeamPin.from(infoValue: "ABCDE12345"), .team("ABCDE12345"))
+        let rig = try SelfRig()
+        let r = try rig.publish("0.2.0", team: "ABCDE12345")
+        let before = rig.snapshot()
+        try await expectSelfRefusal("cannot_pin_identity", "malformed pin") {
+            _ = try await rig.updater(pin: ReleaseTeamPin.from(infoValue: "abcde12345")).install(r)
+        }
+        try rig.expectUntouched(before, "malformed pin")
+        try expectEqual(rig.downloader.calls, 0, "downloaded with a malformed pin")
+        try expect(rig.team.calls.isEmpty, "malformed pin reached the team check")
+        // The requirement builder refuses anything that is not a Team ID, so nothing can be injected.
+        for team in ["abcde12345", "ABCDE1234\"", "ABCDE12345\" or anchor apple", ""] {
+            try await expectRefusal("cannot_pin_identity") { _ = try ReleaseTeamPin.requirement(team: team) }
+            try await expectRefusal("cannot_pin_identity") { try SelfUpdater.verifyReleaseTeam("/nonexistent", team: team) }
+        }
+    }
+
+    check("self update: the pin is read from the app's own Info.plist, and the requirement is the Developer ID Application one") {
+        let sandbox = try Sandbox()
+        for (name, value, expected) in [("Pinned", "ABCDE12345" as Any?, ReleaseTeamPin.team("ABCDE12345")), ("Empty", "", .none),
+                                        ("Absent", nil, .none), ("Bad", "abc", .malformed("abc"))] {
+            let app = sandbox.fixtures + "/" + name + ".app"
+            try FileManager.default.createDirectory(atPath: app + "/Contents", withIntermediateDirectories: true)
+            var plist: [String: Any] = ["CFBundleIdentifier": patchedID, "CFBundlePackageType": "APPL"]
+            if let value { plist[PatchedReleaseKey.teamIDInfoKey] = value }
+            try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
+                .write(to: URL(fileURLWithPath: app + "/Contents/Info.plist"))
+            try expectEqual(ReleaseTeamPin.from(bundle: try Bundle(path: app).unwrapChecked()), expected, name)
+        }
+        try expectEqual(PatchedReleaseKey.teamIDInfoKey, "PatchedReleaseTeamID")
+        let text = try ReleaseTeamPin.requirement(team: "ABCDE12345")
+        try expectEqual(text, "identifier \"im.patched.app\" and anchor apple generic and certificate leaf[subject.OU] = \"ABCDE12345\""
+                        + " and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists"
+                        + " and notarized")
+        var requirement: SecRequirement?
+        try expectEqual(SecRequirementCreateWithString(text as CFString, [], &requirement), errSecSuccess, "requirement does not parse")
+    }
+
+    check("self update: the real team check refuses an ad-hoc signed Patched, before and in a whole update") {
+        let sandbox = try Sandbox()
+        func signedPatched(at app: String, version: String) throws {
+            try FileManager.default.createDirectory(atPath: app + "/Contents/MacOS", withIntermediateDirectories: true)
+            let plist: [String: Any] = ["CFBundleIdentifier": patchedID, "CFBundleExecutable": "Patched", "CFBundlePackageType": "APPL",
+                                        "CFBundleShortVersionString": version, "CFBundleVersion": version]
+            try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
+                .write(to: URL(fileURLWithPath: app + "/Contents/Info.plist"))
+            try FileManager.default.copyItem(atPath: "/usr/bin/true", toPath: app + "/Contents/MacOS/Patched")
+            try tool("/usr/bin/codesign", ["--force", "--sign", "-", "--options", "runtime", "--identifier", patchedID, app])
+        }
+        let lone = sandbox.fixtures + "/Lone/Patched.app"
+        try signedPatched(at: lone, version: "0.2.0")
+        try SelfUpdater.verifyCodeSignature(lone)
+        try await expectRefusal("release_team_mismatch") { try SelfUpdater.verifyReleaseTeam(lone, team: "ABCDE12345") }
+        // End to end: real ditto, real codesign, real team check; the release signature verifies but the pin refuses it.
+        let installed = sandbox.apps + "/Patched.app"
+        try signedPatched(at: installed, version: "0.1.0")
+        let folder = sandbox.fixtures + "/new"
+        try signedPatched(at: folder + "/Patched.app", version: "0.2.0")
+        let zipPath = sandbox.fixtures + "/Patched-0.2.0.zip"
+        try zip(folder + "/Patched.app", to: zipPath)
+        let key = Curve25519.Signing.PrivateKey()
+        let signature = try key.signature(for: try Data(contentsOf: URL(fileURLWithPath: zipPath))).base64EncodedString() + "\n"
+        try Data(signature.utf8).write(to: URL(fileURLWithPath: zipPath + ".sig"))
+        let r = release("0.2.0")
+        let downloader = FakeDownloader()
+        downloader.serve(r.assets!.zipURL.absoluteString, from: zipPath)
+        downloader.serve(r.assets!.signatureURL.absoluteString, from: zipPath + ".sig")
+        let updater = SelfUpdater(appPath: installed, runningVersion: "0.1.0", backupsRoot: sandbox.state + "/backups", downloader: downloader,
+                                  codeCheck: SelfUpdater.verifyCodeSignature, publicKey: key.publicKey.rawRepresentation.base64EncodedString(),
+                                  teamPin: .team("ABCDE12345"))
+        try await expectSelfRefusal("release_team_mismatch", "ad-hoc release over a pinned Patched") { _ = try await updater.install(r) }
+        try expectEqual(try version(installed), "0.1.0", "installed")
+        try expectEqual(try FileManager.default.contentsOfDirectory(atPath: sandbox.apps), ["Patched.app"])
+    }
+
+    check("real verifier: the release requirement accepts a real Developer ID Application app for its own team only") {
+        // Read-only against a real installed app, like the installer's real-verifier check; the ad-hoc copy is a clone in a temp folder.
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["PATCHED_FORBID_REAL_STATE"] != "1" else {
+            print("SKIP real verifier: release requirement check forbidden by PATCHED_FORBID_REAL_STATE"); return
+        }
+        guard environment["PATCHED_RUN_INSTALLED_APP_CHECKS"] == "1" else {
+            print("SKIP real verifier: release requirement check disabled (explicit opt-in required)"); return
+        }
+        func signing(_ path: String) -> (team: String, identifier: String)? {
+            var code: SecStaticCode?
+            guard SecStaticCodeCreateWithPath(URL(fileURLWithPath: path) as CFURL, [], &code) == errSecSuccess, let code else { return nil }
+            var info: CFDictionary?
+            guard SecCodeCopySigningInformation(code, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess,
+                  let d = info as? [String: Any], let team = d[kSecCodeInfoTeamIdentifier as String] as? String,
+                  let identifier = d[kSecCodeInfoIdentifier as String] as? String, !team.isEmpty else { return nil }
+            return (team, identifier)
+        }
+        let candidates = ["/Applications/Obsidian.app", "/Applications/DuckDuckGo.app", "/Applications/Google Chrome.app"]
+        guard let real = candidates.first(where: { signing($0) != nil }), let facts = signing(real) else {
+            print("SKIP real verifier: no Developer ID app found"); return
+        }
+        try SelfUpdater.verifyDeveloperIDSignature(real, team: facts.team, identifier: facts.identifier, enforceRevocation: false)
+        let other = facts.team == "AAAAAAAAAA" ? "BBBBBBBBBB" : "AAAAAAAAAA"
+        try await expectRefusal("release_team_mismatch") {
+            try SelfUpdater.verifyDeveloperIDSignature(real, team: other, identifier: facts.identifier, enforceRevocation: false)
+        }
+        try await expectRefusal("release_team_mismatch") {
+            try SelfUpdater.verifyDeveloperIDSignature(real, team: facts.team, identifier: "im.patched.app", enforceRevocation: false)
+        }
+        let sandbox = try Sandbox()
+        let copy = sandbox.fixtures + "/AdHoc.app"
+        try tool("/bin/cp", ["-c", "-R", real, copy])
+        try tool("/usr/bin/codesign", ["--force", "-s", "-", "--identifier", facts.identifier, copy])
+        try await expectRefusal("release_team_mismatch") {
+            try SelfUpdater.verifyDeveloperIDSignature(copy, team: facts.team, identifier: facts.identifier, enforceRevocation: false)
+        }
     }
 
     check("self update: a reopened Patched waits only for a plain process number given after its own flag") {

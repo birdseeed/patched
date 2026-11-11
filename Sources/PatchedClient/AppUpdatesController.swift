@@ -246,7 +246,9 @@ public struct AppUpdateRow: Identifiable, Equatable, Sendable {
     public var isAppStoreUnconfirmed: Bool { status == .noSource && outcome?.noSourceReason == .appStoreNotListed }
     /// Rows that offer Open in App Store: Patched only opens the App Store, it never installs these apps.
     public var canOpenInAppStore: Bool { isAppStoreUpdate || isAppStoreUnconfirmed }
-    /// The user's catalogue says to ignore this app: nothing is looked up for it and it is not listed under Updates.
+    /// Patched's own row: it is never hidden from the lists.
+    var isPatchedItself: Bool { bundleID == NoSourceReason.patchedBundleID || outcome?.noSourceReason == .thisApp }
+    /// The user's catalogue says to ignore (hide) this app: nothing is looked up for it and it is not listed under Updates.
     public var isIgnored: Bool { status == .noSource && outcome?.noSourceReason == .ignored }
     /// The row's Update button.
     public var updateActionTitle: String {
@@ -312,7 +314,7 @@ extension NoSourceReason {
         switch self {
         case .noPublicFeed: return String(localized: "No public update feed")
         case .appStoreNotListed: return String(localized: "Updates through the App Store")
-        case .ignored: return String(localized: "Ignored")
+        case .ignored: return String(localized: "Hidden")
         case .thisApp: return String(localized: "This app")
         }
     }
@@ -479,7 +481,7 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
     @Published public private(set) var summary: String = String(localized: "Choose Check for Updates to look for newer versions.")
     @Published public private(set) var notice: String?
     @Published public private(set) var catalogueError: String?
-    /// The last Ignore or Stop ignoring failure, shown on both Updates and Applications (the row it belongs to
+    /// The last Hide or Unhide failure, shown on both Updates and Applications (the row it belongs to
     /// may be hidden once ignored). Cleared by the next successful edit or by dismissing it.
     @Published public private(set) var ignoreEditFailure: String?
     public func dismissIgnoreEditFailure() { ignoreEditFailure = nil }
@@ -742,7 +744,10 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
         checkTask = Task { [weak self] in
             let scanned = await Self.background { await scanApps() }
             guard let self, self.isCurrentCheck(mine) else { return }
-            let seeded = scanned.sorted { Self.ordered($0.app.name, $1.app.name) }.map(Self.pendingRow)
+            // A hidden (ignored) app is never looked up, so it keeps its Hidden row while the check runs instead
+            // of reappearing as "Checking…" in the Applications list until its outcome arrives.
+            let hidden = Dictionary(self.rowsBeforeCheck.filter(\.isIgnored).map { ($0.path, $0) }, uniquingKeysWith: { first, _ in first })
+            let seeded = scanned.sorted { Self.ordered($0.app.name, $1.app.name) }.map { hidden[$0.app.path] ?? Self.pendingRow($0) }
             self.rows = seeded
             let outcomes: [AppCheckOutcome]
             do { outcomes = try await Self.background { try await checkApps(scanned.map(\.app)) } }
@@ -955,6 +960,11 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
         let reason: String
         switch refusal {
         case .releaseSignatureInvalid?: reason = String(localized: "the download isn't signed with Patched's release key")
+        case .releaseTeamMismatch?: reason = String(localized: "the download isn't signed with Patched's Developer ID")
+        case .releaseCertificateRevoked?: reason = String(localized: "Apple has revoked the download's signing certificate, so it can't be trusted")
+        case .releaseCertificateUnchecked?:
+            reason = String(localized: "Patched couldn't check the download's certificate with Apple. Check your connection and try again")
+        case .cannotPinIdentity?: reason = String(localized: "this copy of Patched has a damaged release Team ID, so it can't check the download. Install the new version from the release page")
         case .download(let detail)?: reason = String(localized: "the download failed (\(detail))")
         case .insecureDownload?: reason = String(localized: "the download went somewhere other than GitHub")
         case .tooLarge?: reason = String(localized: "the download is larger than a Patched release can be")
@@ -1164,7 +1174,7 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
     // MARK: Ignoring
 
     public func canIgnore(_ row: AppUpdateRow) -> Bool {
-        editCatalogue != nil && row.bundleID != nil && !row.isIgnored && canEditIgnore(row)
+        editCatalogue != nil && row.bundleID != nil && !row.isIgnored && !row.isPatchedItself && canEditIgnore(row)
     }
     public func canStopIgnoring(_ row: AppUpdateRow) -> Bool { editCatalogue != nil && row.isIgnored && canEditIgnore(row) }
     private func canEditIgnore(_ row: AppUpdateRow) -> Bool {
@@ -1172,15 +1182,16 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
     }
     /// Rows the Updates screen lists: everything except apps the user ignores.
     public var updatesRows: [AppUpdateRow] { rows.filter { !$0.isIgnored && !$0.isHiddenBackgroundHelper } }
-    /// Rows the Applications screen lists: everything except background-only helpers with no update to show.
-    public var applicationsRows: [AppUpdateRow] { rows.filter { !$0.isHiddenBackgroundHelper } }
+    /// Rows the Applications screen lists, hidden ones included (its Hidden segment shows them, helpers too, so
+    /// each can be unhidden): everything except background-only helpers with no update to show.
+    public var applicationsRows: [AppUpdateRow] { rows.filter { !$0.isHiddenBackgroundHelper || $0.isIgnored } }
 
-    /// A click on Ignore: writes an ignore entry for the app's bundle ID to the user catalogue, then checks that app again.
+    /// A click on Hide: writes an ignore entry for the app's bundle ID to the user catalogue, then checks that app again.
     public func ignore(id: String) {
         guard let row = row(id: id), canIgnore(row), let bundleID = row.bundleID else { return }
         editIgnore(row, bundleID: bundleID, ignored: true)
     }
-    /// A click on Stop ignoring: removes only that app's ignore entry, then checks the app again.
+    /// A click on Unhide: removes only that app's ignore entry, then checks the app again.
     public func stopIgnoring(id: String) {
         guard let row = row(id: id), canStopIgnoring(row), let bundleID = row.bundleID else { return }
         editIgnore(row, bundleID: bundleID, ignored: false)
@@ -1198,7 +1209,7 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
             let copies = self.rows.filter { $0.bundleID == bundleID }.map(\.id)
             for copy in (copies.contains(path) ? copies : copies + [path]) { await self.refreshRow(copy) }
             if let failure {
-                let text = (ignored ? String(localized: "Couldn't ignore \(row.name). ") : String(localized: "Couldn't stop ignoring \(row.name). ")) + failure
+                let text = (ignored ? String(localized: "Couldn't hide \(row.name). ") : String(localized: "Couldn't unhide \(row.name). ")) + failure
                 self.mutate(path) { $0.result = .init(kind: .failure, text: text) }
                 self.ignoreEditFailure = text
             } else {
