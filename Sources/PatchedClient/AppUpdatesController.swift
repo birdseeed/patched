@@ -246,6 +246,12 @@ public struct AppUpdateRow: Identifiable, Equatable, Sendable {
     public var isAppStoreUnconfirmed: Bool { status == .noSource && outcome?.noSourceReason == .appStoreNotListed }
     /// Rows that offer Open in App Store: Patched only opens the App Store, it never installs these apps.
     public var canOpenInAppStore: Bool { isAppStoreUpdate || isAppStoreUnconfirmed }
+    /// What the automatic run may install: a plain update to an ordinary app. Never Patched itself, an installer
+    /// package, an app that needs admin rights, a hidden app or a Mac App Store app.
+    var isAutomaticallyInstallable: Bool {
+        status == .updateAvailable && privilege == .standard && !needsManualAdmin && !isPatchedItself && !isIgnored
+            && !isAppStoreUpdate && !isHiddenBackgroundHelper && outcome?.installable == true
+    }
     /// Patched's own row: it is never hidden from the lists.
     var isPatchedItself: Bool { bundleID == NoSourceReason.patchedBundleID || outcome?.noSourceReason == .thisApp }
     /// The user's catalogue says to ignore (hide) this app: nothing is looked up for it and it is not listed under Updates.
@@ -551,6 +557,8 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
     /// Most of the apps that need the network could not reach it in the last check.
     var lastCheckMostlyOffline: Bool { lastCheckNetworkRefused > 0 && lastCheckNetworkRefused * 2 >= lastCheckNetworked }
     private var stopRequested = false
+    /// The live app's installer state folders, shared with the Self Service controller. Nil in fixtures.
+    var installerState: LazyState?
     /// The one row whose single update may be cancelled right now (see `canCancelUpdate`).
     private var cancellablePath: String?
     /// Apps that refused with needs_admin; their rows offer String(localized: "Update (admin)") from then on.
@@ -563,6 +571,9 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
     @_spi(Testing) public var urlOpener: any ExternalURLOpening = InertURLOpener()
     /// Called once after every check ends, however it was started. Used by the background scheduler.
     var onCheckFinished: ((AppCheckRunOutcome) -> Void)?
+    /// Called once a successful check is completely over: installer state refreshed and any queued Update All
+    /// released. The scheduler decides there whether an automatic run is due.
+    var onSuccessfulCheckSettled: (() -> Void)?
 
     public init(scan: @escaping AppUpdateScan, check: @escaping AppUpdateCheck, recheck: @escaping AppUpdateRecheck,
                 catalogue: @escaping AppUpdateCatalogueProbe = { nil }, editCatalogue: AppUpdateCatalogueEdit? = nil,
@@ -625,6 +636,7 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
             },
             installer: installer, adminUpdates: adminUpdates, packageUpdates: packageUpdates)
         controller.setupProbe = { state.problem }
+        controller.installerState = state
         controller.urlOpener = WorkspaceURLOpener()
         // Patched's own release lookup: never under the test tripwire, and only for an installed build that
         // knows its version.
@@ -685,12 +697,24 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
     }
     /// The installable updates waiting, as used for notifications. The offered build is part of each one's identity.
     var availableUpdates: [AvailableUpdate] {
-        rows.filter { $0.status == .updateAvailable || $0.status == .appStoreUpdate }.map { row in
-            var build = ""
-            if case .updateAvailable(let offer)? = row.outcome?.result { build = offer.buildVersion ?? "" }
-            return AvailableUpdate(path: row.path, name: row.name, version: row.latestVersion ?? "?", build: build,
-                                   appStore: row.status == .appStoreUpdate)
-        }
+        rows.filter { $0.status == .updateAvailable || $0.status == .appStoreUpdate }.map(availableUpdate(for:))
+    }
+    private func availableUpdate(for row: AppUpdateRow) -> AvailableUpdate {
+        var build = ""
+        if case .updateAvailable(let offer)? = row.outcome?.result { build = offer.buildVersion ?? "" }
+        return AvailableUpdate(path: row.path, name: row.name, version: row.latestVersion ?? "?", build: build,
+                               appStore: row.status == .appStoreUpdate)
+    }
+    /// The identities (`AvailableUpdate.key`) of the updates an automatic run would attempt right now. Only these
+    /// are left out of the "updates available" notification; everything else is announced as usual.
+    var automaticallyInstallableKeys: Set<String> {
+        Set(updatableRows.filter { $0.isAutomaticallyInstallable }.map { availableUpdate(for: $0).key })
+    }
+    /// Why an automatic run must wait: work in progress, installing blocked (a broken catalogue or an unreadable
+    /// journal), or a confirmation the user has not answered (a "quit and update" question or Patched's own update).
+    var automaticRunMustWait: Bool {
+        if case .confirming = selfInstall { return true }
+        return isWorking || installBlocked || pendingQuit != nil || deferredQuit != nil
     }
     /// The same identity as `AvailableUpdate.key`, for an outcome freshly rechecked.
     nonisolated static func updateKey(_ outcome: AppCheckOutcome) -> String? {
@@ -795,6 +819,7 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
             // Only a successful check may release a queued Update All, and only after the install-blocking
             // state (catalogue, journals) has been refreshed.
             self.releaseQueuedUpdateAll()
+            self.onSuccessfulCheckSettled?()
         }
     }
 
@@ -1020,7 +1045,7 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
     /// Sequential; a failure on one app never stops the rest. Open apps are skipped, not quit.
     /// Each app is rescanned and rechecked just before it is installed. Never passes admin consent.
     /// Only an explicit click (the Updates window, the menu item or the notification's Update All button)
-    /// may call this; the scheduler never does. `onFinished` receives what happened, once, when the run ends.
+    /// may call this, or the scheduler's automatic run (`automatic: true`, gated on the Automatic updates setting). `onFinished` receives what happened, once, when the run ends.
     /// With `keys` (from a notification) only rows whose current offer is one of those advertised updates are
     /// installed, and each is rechecked to still be that same offer; everything else is left alone.
     /// Returns false when nothing was started.
@@ -1031,15 +1056,18 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
     }
 
     @discardableResult
-    func updateAll(only keys: Set<String>?, askInWindow: Bool = false,
+    func updateAll(only keys: Set<String>?, askInWindow: Bool = false, automatic: Bool = false,
                    onFinished: (@MainActor (UpdateAllSummary) -> Void)? = nil) -> Bool {
         updateAllInvocations += 1
         var candidates = updatableRows
+        // The automatic run is narrower than Update All: plain installs only. It never opens the App Store, and
+        // it names its exclusions again here so they hold even if `updatableRows` ever changes.
+        if automatic { candidates = candidates.filter { $0.isAutomaticallyInstallable } }
         if let keys { candidates = candidates.filter { keys.contains(updateKey(of: $0)) } }
         let paths = candidates.map(\.id)
         // App Store updates are never installed here; Update All only opens the App Store for them, once, after
         // the installable updates have run. With nothing installable, that is all it does.
-        let storeAtStart = scopedAppStoreCount(keys)
+        let storeAtStart = automatic ? 0 : scopedAppStoreCount(keys)
         guard !paths.isEmpty || storeAtStart > 0, !isWorking, phase == .idle, !installBlocked else { return false }
         stopRequested = false
         if paths.isEmpty {
@@ -1072,7 +1100,7 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
             self.updateAllProgress = nil
             // The App Store, once, after the installs; not when the user chose Stop.
             var store = 0, storeFailed = 0
-            let storeNow = self.stopRequested ? 0 : self.scopedAppStoreCount(keys)
+            let storeNow = (self.stopRequested || automatic) ? 0 : self.scopedAppStoreCount(keys)
             if storeNow > 0 {
                 if await self.urlOpener.openAppStoreUpdates() { store = storeNow } else { storeFailed = storeNow }
             }
@@ -1325,7 +1353,10 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
 
     private enum StepResult { case updated, failed, skippedRunning, needsAdmin, changed }
 
-    private func launch(_ work: @escaping @MainActor () async -> Void) {
+    /// Runs one operation with `isWorking` set, so nothing else (a check, Update All, an automatic run, a rollback,
+    /// recovery or a Self Service install) can start until it ends. `then` runs once `isWorking` is false again.
+    /// Internal so the Self Service controller shares the same busy state.
+    func launch(_ work: @escaping @MainActor () async -> Void, then: (@MainActor () -> Void)? = nil) {
         isWorking = true
         epoch += 1; pendingQuit = nil; deferredQuit = nil
         operation = Task { [weak self] in
@@ -1337,6 +1368,7 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
             // Offered only now that confirming can actually run.
             self.pendingQuit = self.deferredQuit
             self.deferredQuit = nil
+            then?()
         }
     }
 
@@ -1550,6 +1582,8 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
                 case .completed: text = String(localized: "finished; new version installed, old version backed up")
                 case .reverted: text = String(localized: "undone; old version is back in place")
                 case .cleanedUp: text = String(localized: "leftover temporary files removed")
+                case .removedUnfinishedInstall: text = String(localized: "interrupted Self Service install undone; the unfinished copy was removed")
+                case .finishedFreshInstall: text = String(localized: "interrupted Self Service install finished; the app passed every check and was kept")
                 }
                 lines.append("\((report.targetPath as NSString).lastPathComponent): \(text)")
                 if !report.leftovers.isEmpty { lines.append(String(localized: "  could not remove: \(report.leftovers.joined(separator: ", "))")) }

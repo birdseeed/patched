@@ -1,5 +1,8 @@
 import SwiftUI
+import Combine
+import UpdateInstaller
 import PatchedShell
+import UpdateSources
 
 /// Retains display selection and controllers for the shared client session.
 /// Construction and presentation do no work; Check and Update remain explicit actions.
@@ -7,8 +10,13 @@ import PatchedShell
     public let navigation: ShellNavigation
     public let firstRun: NativeFirstRunController
     public let appUpdates: AppUpdatesController
+    /// Self Service: the organisation's catalogue. It shares `appUpdates`' busy state. Nothing is read until `reload()`.
+    public let selfService: SelfServiceController
+    private var availableVisibility: AnyCancellable?
     public let openAtLogin: OpenAtLoginController
     public let notificationStatus: NotificationStatusController
+    /// The Install updates automatically setting, with any organisation override.
+    public let automaticUpdates: AutomaticUpdateSettings
     let backgroundChecks: UpdateCheckScheduler?
     let updateNotifier: SystemUpdateNotifier?
     /// The menu item and notification button for Update All; both end in `appUpdates.updateAll()`.
@@ -23,6 +31,7 @@ import PatchedShell
         firstRun = NativeFirstRunController(navigation: resolvedNavigation)
         let live = AppUpdatesController.live()
         appUpdates = live
+        selfService = SelfServiceController.live(updates: live)
         urlOpener = live.urlOpener
         // Construction touches nothing else real: the login item, notification centre and stored check time
         // are only used once `startBackgroundChecks` runs (from the app) or Settings is shown.
@@ -30,29 +39,50 @@ import PatchedShell
         notificationStatus = NotificationStatusController.system()
         let notifier = SystemUpdateNotifier.shared
         updateNotifier = notifier
-        backgroundChecks = UpdateCheckScheduler.system(controller: live, notifier: notifier)
+        let automatic = AutomaticUpdateSettings.system()
+        automaticUpdates = automatic
+        backgroundChecks = UpdateCheckScheduler.system(controller: live, notifier: notifier, automatic: automatic)
         updateAllEntry = UpdateAllEntryPoint(controller: live, summaryNotifier: notifier)
+        bindAvailableVisibility()
     }
     // Testing-only injection must retain the exact fixture owners. The nil
     // default suppresses setup to preserve every older fixture's paint contract.
     @_spi(Testing) public init(navigation: ShellNavigation, firstRun: NativeFirstRunController? = nil,
         appUpdates: AppUpdatesController? = nil, urlOpener: (any ExternalURLOpening)? = nil,
-        notificationStatus: NotificationStatusController? = nil) {
+        notificationStatus: NotificationStatusController? = nil, selfService: SelfServiceController? = nil) {
         let setup = firstRun ?? NativeFirstRunController(navigation: navigation, completion: MemorySetupCompletion(completed: true))
         precondition(setup.navigation === navigation, "Testing first-run owners must match the session")
         self.navigation = navigation
         self.firstRun = setup
         self.appUpdates = appUpdates ?? AppUpdatesController.inert()
+        // Unless a fixture gives one, Self Service sees no catalogue and installs nothing.
+        self.selfService = selfService ?? SelfServiceController(
+            updates: self.appUpdates, catalogue: { .notManaged }, scan: { [] }, teamID: { _ in nil },
+            installer: UnavailableSelfServiceInstaller())
         // A given opener serves the support links, Notification Settings and the App Store; otherwise nothing is ever opened.
         let opener = urlOpener ?? InertURLOpener()
         if urlOpener != nil { self.appUpdates.urlOpener = opener }
         self.urlOpener = opener
         self.openAtLogin = OpenAtLoginController(item: UnavailableLoginItem())
         self.notificationStatus = notificationStatus ?? NotificationStatusController(reader: { $0(.unknown) })
+        self.automaticUpdates = AutomaticUpdateSettings(store: MemoryAutomaticUpdateStore(), managed: ManagedPreferences(reader: NoManagedPreferences()))
         self.backgroundChecks = nil
         self.updateNotifier = nil
         self.updateAllEntry = UpdateAllEntryPoint(controller: self.appUpdates, summaryNotifier: nil)
+        bindAvailableVisibility()
     }
+    /// Available is listed in the sidebar only while a catalogue is managed on this Mac (valid or not).
+    private func bindAvailableVisibility() {
+        let navigation = navigation, controller = selfService
+        navigation.setAvailableShown(controller.isManaged || controller.catalogueProblem != nil)
+        availableVisibility = Publishers.CombineLatest(controller.$isManaged, controller.$catalogueProblem)
+            .map { managed, problem in managed || problem != nil }
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { navigation.setAvailableShown($0) }
+    }
+    /// Reads the managed catalogue and the installed apps again (no network). The window calls this when it opens.
+    public func reloadSelfService() async { await selfService.reload() }
     /// What the Help & Support screen shows.
     public var supportContent: SupportContent { SupportContent.make() }
     /// A click on a Help & Support link. Returns whether it opened.
@@ -81,11 +111,14 @@ public struct NativeClientRootView: View {
             }
         }
         .frame(minWidth: 680, minHeight: 520)
+        .reloadsSelfServiceWhenShown(session)
     }
 
     private var shell: some View {
-        ShellView(navigation: session.navigation,
-            destinationContent: { destination in AnyView(destinationView(destination)) })
+        OpensSettings { openSettings in
+            ShellView(navigation: session.navigation, openSettings: openSettings,
+                destinationContent: { destination in AnyView(destinationView(destination)) })
+        }
             .frame(minWidth: 680, minHeight: 520)
     }
 
@@ -96,6 +129,9 @@ public struct NativeClientRootView: View {
                 .frame(minHeight: 440)
         case .updates:
             AppUpdatesView(controller: session.appUpdates)
+                .frame(minHeight: 440)
+        case .available:
+            AvailableView(controller: session.selfService)
                 .frame(minHeight: 440)
         case .support:
             ScrollView { supportPanel }
@@ -134,15 +170,10 @@ public struct NativeClientRootView: View {
                         .buttonStyle(.borderedProminent).controlSize(.large)
                     }
                     Divider().padding(.vertical, 4)
-                    HStack(spacing: 10) {
-                        ForEach(content.links.filter { $0.url != PublicLinks.coffee }, id: \.url) { link in
-                            Button(action: { session.openSupportLink(link) }) {
-                                Label { Text(verbatim: link.title) } icon: { Image(systemName: Self.symbol(for: link)) }
-                            }
-                            .buttonStyle(.bordered).controlSize(.large)
-                            .help(Text(verbatim: link.detail))
-                            .accessibilityHint(Text(verbatim: link.detail))
-                        }
+                    // In a row when they fit, otherwise stacked (longer translations, larger text).
+                    ViewThatFits(in: .horizontal) {
+                        HStack(spacing: 10) { secondaryLinks }
+                        VStack(alignment: .leading, spacing: 8) { secondaryLinks }
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -158,8 +189,29 @@ public struct NativeClientRootView: View {
         .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 
-    /// A symbol for each repository link in Help & Support.
+    /// Help & Support's ordinary link buttons: everything but the donation.
+    private var secondaryLinks: some View {
+        ForEach(session.supportContent.links.filter { $0.url != PublicLinks.coffee }, id: \.url) { link in
+            Button(action: { session.openSupportLink(link) }) {
+                Label { Text(verbatim: link.title) } icon: { Image(systemName: Self.symbol(for: link)) }
+            }
+            .buttonStyle(.bordered).controlSize(.large)
+            .help(Text(verbatim: link.detail))
+            .accessibilityHint(Text(verbatim: link.detail))
+        }
+    }
+
+    /// A symbol for each link button in Help & Support.
     private static func symbol(for link: SupportContent.Link) -> String {
-        link.url == PublicLinks.repository ? "chevron.left.forwardslash.chevron.right" : "exclamationmark.bubble"
+        if link.url == PublicLinks.repository { return "chevron.left.forwardslash.chevron.right" }
+        if link.url == PublicLinks.contact { return "envelope" }
+        return "exclamationmark.bubble"
+    }
+}
+
+/// For a session built without a real catalogue: nothing can be installed.
+private struct UnavailableSelfServiceInstaller: SelfServiceInstalling {
+    func install(_ entry: SelfServiceEntry, progress: UpdateProgressHandler?) async throws -> FreshInstallReport {
+        throw InstallRefusal.needsAdmin("Self Service is not set up in this session.")
     }
 }

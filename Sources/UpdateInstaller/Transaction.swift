@@ -53,6 +53,8 @@ struct SwapEngine: Sendable {
     var detach: @Sendable (String) -> Bool = { Unpacker.detachDiskImage(at: $0) }
     /// Whether Apple's Installer is running (it may still change an app after Patched stopped watching).
     var installerRunning: @Sendable () -> Bool = { InstallerActivity.isRunning() }
+    /// The Self Service folder a fresh-install journal must point into. Called only for fresh-install journals.
+    var selfServiceRoot: @Sendable () -> String? = { nil }
     var store: JournalStore { JournalStore(directory: locations.transactions) }
 
     func write(_ journal: inout TransactionJournal) throws {
@@ -98,10 +100,23 @@ struct SwapEngine: Sendable {
                 throw InstallRefusal.journal("backup copy \(partial) is not where it should be")
             }
         }
+        if journal.kind == .freshInstall {
+            // A fresh install's target must sit directly in the folder the journal recorded, and that folder must be
+            // this user's Self Service folder: a journal cannot point recovery at an app anywhere else.
+            guard let root = journal.destinationRoot, root.hasPrefix("/"), FileSafety.lexicallyNormalised(root) == root, parent == root else {
+                throw InstallRefusal.journal("fresh install target \(target) is not in its recorded destination folder")
+            }
+            guard let allowed = selfServiceRoot(), Self.canonical(allowed) == Self.canonical(root) else {
+                throw InstallRefusal.journal("fresh install folder \(root) is not this user's Self Service folder")
+            }
+        }
                 // The folders we may move or delete in must not sit under a symlink.
         try FileSafety.requireNoSymlinks(parent)
         for root in [locations.downloads, locations.backups] where FileSafety.exists(root) { try FileSafety.requireNoSymlinks(root) }
     }
+
+    /// A path resolved on disk when it exists, otherwise normalised, so two spellings of one folder compare equal.
+    static func canonical(_ path: String) -> String { FileSafety.realPath(path) ?? FileSafety.lexicallyNormalised(path) }
 
     /// The folder holding the staging folder: beside the target for ordinary swaps (one rename), the
     /// private downloads folder on the admin path (the target's folder may not be writable by the user).
@@ -143,8 +158,12 @@ struct SwapEngine: Sendable {
 
     /// Cleans up and moves the journal to its end state (`then`, or deleted when nil). If anything is left
     /// over the journal becomes `cleanupPending` instead, listing it, so `recover` can try again.
+    /// A fresh install that reaches an end state (finished or reverted) is deleted rather than kept: there is no backup
+    /// to roll back to, so the record has no further use, and keeping it would make an older Patched (which does not
+    /// know the `freshInstall` kind) pause all updates over an unreadable journal after a downgrade.
     @discardableResult
-    func settle(_ journal: inout TransactionJournal, then: TransactionJournal.Phase?) throws -> [String] {
+    func settle(_ journal: inout TransactionJournal, then requested: TransactionJournal.Phase?) throws -> [String] {
+        let then = journal.kind == .freshInstall ? nil : requested
         var left = cleanUp(journal)
         if then == .finished { left += pruneBackups(keeping: journal) }
         if left.isEmpty {
@@ -433,6 +452,11 @@ struct SwapEngine: Sendable {
     func pathsAtRisk(_ journal: TransactionJournal) -> [String] {
         // Recovery never uses admin rights, so on the admin path it only ever deletes its own staged copy.
         if journal.isPrivileged { return [journal.stagedBundlePath] }
+        if journal.kind == .freshInstall {
+            // Only a copy the journal proves Patched moved to the destination may be removed.
+            let ours = journal.newIdentity != nil && FileSafety.directoryIdentity(journal.targetPath) == journal.newIdentity
+            return ours && journal.phase != .staging ? [journal.targetPath, journal.stagedBundlePath] : [journal.stagedBundlePath]
+        }
         if journal.phase == .staging || journal.phase == .cleanupPending { return [journal.stagedBundlePath] }
         let target = FileSafety.directoryIdentity(journal.targetPath)
         let staged = FileSafety.directoryIdentity(journal.stagedBundlePath)
@@ -460,6 +484,7 @@ struct SwapEngine: Sendable {
             return (.cleanedUp, [])
         }
         if journal.isPrivileged { return try recoverPrivileged(journal) }
+        if journal.kind == .freshInstall { return try recoverFreshInstall(journal) }
         if journal.phase == .staging {
             restoreSuperseded(journal)
             return (.discarded, try settle(&journal, then: nil))

@@ -120,7 +120,8 @@ struct FakeNetworkDown: Error {}
     let opener = RecordingOpener()
 
     init(_ outcomes: [AppCheckOutcome], gated: Bool = false, installer: FakeInstaller = FakeInstaller(), adminUpdates: Bool = false,
-         packageUpdates: Bool = false) {
+         packageUpdates: Bool = false, automatic: AutomaticUpdateSettings? = nil,
+         summaryNotifier: (any UpdateSummaryNotifying)? = nil, calendar: Calendar = .current) {
         let world = World(outcomes), checks = checks, holder = holder
         if gated { holder.current = Gate() }
         installer.world = world
@@ -137,7 +138,8 @@ struct FakeNetworkDown: Error {}
             recheck: { world[$0] }, installer: installer, adminUpdates: adminUpdates, packageUpdates: packageUpdates)
         controller.urlOpener = opener
         let clock = clock, timer = timer, wake = wake, notifier = notifier, store = store
-        scheduler = UpdateCheckScheduler(controller: controller, now: { clock.date }, timer: timer, notifier: notifier, wake: wake, store: store)
+        scheduler = UpdateCheckScheduler(controller: controller, now: { clock.date }, timer: timer, notifier: notifier, wake: wake, store: store,
+                                        automatic: automatic, summaryNotifier: summaryNotifier, calendar: calendar)
     }
     /// Makes every later check wait until the returned gate is opened.
     func hold() -> Gate { let g = Gate(); holder.current = g; return g }

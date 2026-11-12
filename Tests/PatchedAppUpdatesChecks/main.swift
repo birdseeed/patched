@@ -771,6 +771,7 @@ check("offscreen: the Updates view paints rows, in light and dark, and is inert"
 
 registerBackgroundCheckChecks()
 registerAdminUpdateChecks()
+registerAutomaticUpdateChecks()
 registerUpdateAllEntryChecks()
 registerAppStoreChecks()
 registerMenuAndManualAdminChecks()
@@ -778,6 +779,8 @@ registerAppsListChecks()
 registerNoSourceActionChecks()
 registerSelfUpdateChecks()
 registerProgressAndCancelChecks()
+registerSelfServiceChecks()
+registerAvailableChecks()
 
 var failures = 0
 for (name, action) in cases {

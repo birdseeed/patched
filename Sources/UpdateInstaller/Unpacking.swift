@@ -124,8 +124,9 @@ public enum Unpacker {
 /// Picks the one bundle in an unpacked archive that is an update for the installed app.
 public enum BundleSelector {
     /// Candidates are real (non-symlink) `.app` directories at the top level, or one level down inside a
-    /// plain folder. Exactly one may have the installed app's bundle ID.
-    public static func select(in root: String, bundleID: String) throws -> String {
+    /// plain folder. Exactly one may have the installed app's bundle ID. With no bundle ID (a Self Service entry
+    /// that names none) there must be exactly one readable app in the download.
+    public static func select(in root: String, bundleID: String?) throws -> String {
         var candidates: [String] = []
         func appsIn(_ directory: String) -> [String] {
             let names = (try? FileManager.default.contentsOfDirectory(atPath: directory)) ?? []
@@ -144,10 +145,10 @@ public enum BundleSelector {
         for candidate in candidates {
             guard let facts = try? BundleFacts.read(bundleAt: candidate) else { continue }
             seen.append("\((candidate as NSString).lastPathComponent)=\(facts.bundleID)")
-            if facts.bundleID == bundleID { matches.append(candidate) }
+            if bundleID == nil || facts.bundleID == bundleID { matches.append(candidate) }
         }
         if matches.isEmpty {
-            throw InstallRefusal.bundleNotFound("expected \(bundleID), found " + (seen.isEmpty ? "no apps" : seen.joined(separator: ", ")))
+            throw InstallRefusal.bundleNotFound("expected \(bundleID ?? "an app"), found " + (seen.isEmpty ? "no apps" : seen.joined(separator: ", ")))
         }
         if matches.count > 1 {
             throw InstallRefusal.ambiguousBundle(matches.map { ($0 as NSString).lastPathComponent }.joined(separator: ", "))

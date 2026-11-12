@@ -8,12 +8,17 @@ public struct ShellView: View {
     @ObservedObject private var navigation: ShellNavigation
     private let destinationLabels: [ShellDestination: String]
     private let destinationContent: (ShellDestination) -> AnyView
+    private let openSettings: (() -> Void)?
 
+    /// `openSettings`, when given, adds a Settings row under the lower destinations. It opens the app's
+    /// standard Settings window (the same one ⌘, opens); it is never a destination and is never selected.
     public init(navigation: ShellNavigation,
                 destinationLabels: [ShellDestination: String] = [:],
+                openSettings: (() -> Void)? = nil,
                 destinationContent: @escaping (ShellDestination) -> AnyView) {
         self.navigation = navigation
         self.destinationLabels = destinationLabels
+        self.openSettings = openSettings
         self.destinationContent = destinationContent
     }
     private func destinationLabel(_ destination: ShellDestination) -> String {
@@ -41,6 +46,11 @@ public struct ShellView: View {
             rows(navigation.mainDestinations)
             Spacer().frame(height: 14)
             rows(navigation.lowerDestinations)
+            if let openSettings {
+                ShellSidebarRow(title: String(localized: "Settings"), symbol: "gearshape", isSelected: false, action: openSettings)
+                    .accessibilityIdentifier("action:settings")
+                    .accessibilityHint(Text("Opens the Settings window"))
+            }
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 8).padding(.vertical, 6)
@@ -81,6 +91,7 @@ public struct ShellView: View {
     private func symbol(for destination: ShellDestination) -> String {
         switch destination {
         case .updates: return "arrow.down.circle"
+        case .available: return "plus.app"
         case .applications: return "square.grid.2x2"
         case .support: return "questionmark.circle"
         }

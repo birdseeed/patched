@@ -107,6 +107,8 @@ public enum PublicLinks {
     /// The public repository. Help & Support links to its issue tracker ("Report a problem") and to the source;
     /// both open only on a click. Nil would hide those two links.
     public static let repository: URL? = URL(string: "https://github.com/birdseeed/patched")
+    /// Help & Support's "Contact the developer": opens a new email in the user's mail app, only on a click.
+    public static let contact = URL(string: "mailto:hello@patched.im?subject=Patched")!
 }
 
 /// What the Help & Support screen shows. Pure, so it can be checked without a window.
@@ -120,17 +122,21 @@ public struct SupportContent: Equatable, Sendable {
     public let about: String
     public let links: [Link]
 
-    public static func make(repository: URL? = PublicLinks.repository, coffee: URL = PublicLinks.coffee) -> SupportContent {
+    public static func make(repository: URL? = PublicLinks.repository, coffee: URL = PublicLinks.coffee,
+                            contact: URL = PublicLinks.contact) -> SupportContent {
         var links = [Link(title: String(localized: "Buy me a coffee"),
                           detail: String(localized: "Donations help pay for the Apple Developer membership that signs and notarises each release."), url: coffee)]
         if let repository {
             links.append(Link(title: String(localized: "Report a problem"), detail: String(localized: "Opens the issue tracker."),
                               url: repository.appendingPathComponent("issues")))
+        }
+        links.append(Link(title: String(localized: "Contact the developer"), detail: String(localized: "Opens an email to hello@patched.im."), url: contact))
+        if let repository {
             links.append(Link(title: String(localized: "Source code"), detail: String(localized: "The Patched repository."), url: repository))
         }
         return SupportContent(
             heading: String(localized: "Help & Support"),
-            about: String(localized: "Patched is a free, open source community project. There is no company behind it and no support team, so there is nowhere to send a support request."),
+            about: String(localized: "Patched is a free, open source community project. There is no company behind it and no support team, but if something goes wrong, report it or email the developer below and we'll do our best to help."),
             links: links)
     }
 }

@@ -34,7 +34,9 @@ public struct StoredOffer: Codable, Sendable, Equatable {
 
 /// One install or rollback, written to disk before every state change so `recover` can finish or undo it.
 public struct TransactionJournal: Codable, Sendable, Equatable {
-    public enum Kind: String, Codable, Sendable { case update, rollback }
+    /// `freshInstall`: Self Service installing a catalogue app that is not installed yet. There is no old app and no
+    /// backup; `targetPath` is the destination in ~/Applications, and `newIdentity` is the copy Patched moved there.
+    public enum Kind: String, Codable, Sendable { case update, rollback, freshInstall }
     /// `staging`: downloading/unpacking/verifying, nothing in the target folder changed yet.
     /// `prepared`: verified bundle staged, about to swap. `swapped`: swap done, re-verifying.
     /// `swapBack`: re-verification failed, about to swap the old bundle back.
@@ -81,6 +83,9 @@ public struct TransactionJournal: Codable, Sendable, Equatable {
     public var offer: StoredOffer?
     /// Owner (uid) of the installed bundle after a privileged replacement, as recorded for the report.
     public var installedOwner: UInt32?
+    /// Fresh installs only: the Self Service folder (~/Applications) the install was started in. Recovery refuses a
+    /// journal whose target is not directly inside it, or whose folder is not this user's Self Service folder.
+    public var destinationRoot: String?
     public var createdAt: String
     public var updatedAt: String
 

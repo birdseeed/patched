@@ -199,6 +199,123 @@ TLS to GitHub is relied on only for availability, not for integrity.
 normal installer does for every other app (the requirement already demands a
 notarisation ticket).
 
+## Automatic updates
+
+Off by default, set by the user in Settings or by an organisation through managed preferences
+(`AutomaticUpdatesEnabled`, `AutomaticUpdatesTime`, for `im.patched.app`). It is the one
+deliberate exception to "nothing installs until you choose Update". The only code that can
+start it is the scheduler's `runAutomaticIfDue`, after a successful check, when the setting
+is on, the chosen time has passed by no more than 6 hours and it is still the same day (the window never crosses midnight, so a late time has a shorter window), and no run is recorded for today.
+It calls the same `updateAll` as the Update All button, in a narrower `automatic` form, so
+every check in "What is checked for every update" applies, and each app is rechecked just
+before its install.
+
+Exclusions, enforced twice (in Update All's selection and again in the automatic form):
+installer packages (Apple's Installer needs a password), root-owned or admin apps (consent is
+never passed), Patched itself (self-update stays an explicit confirmed click), hidden apps and
+Mac App Store apps (the App Store is not even opened). Open apps are skipped and never quit,
+and recovery never runs. It waits while an install, roll back or recovery is running, and is
+skipped after a check that mostly failed offline. It does not wake the Mac or hold power
+assertions. Roll back works as for any update.
+
+Managed values are read with `CFPreferencesAppValueIsForced`: only a forced value counts, so a
+user default is never mistaken for policy. A forced value locks the control. A forced
+`AutomaticUpdatesEnabled` of the wrong type fails closed (off and locked, reported in Settings),
+so a bad profile cannot leave installs running that the organisation meant to stop. A time that
+is not exactly `HH:mm` is ignored and reported, and the user's time or 02:00 applies. It waits
+while installing is blocked or a confirmation is open, and it does not dismiss one. An attacker who can write managed preferences already
+runs as root or controls the Mac's MDM, and gains nothing here that they could not do
+directly.
+
+## Self Service
+
+An organisation can give people a catalogue of approved apps that they install for
+themselves. The catalogue is the managed preference `SelfServiceCatalogue` for
+`im.patched.app`, read with `CFPreferencesAppValueIsForced` like the automatic-updates keys:
+only a forced value counts, so a user cannot supply or extend a catalogue. The "Available"
+screen that lists it is coming in the same release; the installer, recovery and
+`patched catalogue list` are in place now.
+
+**What is trusted.** MDM is trusted to deliver the catalogue: whoever controls the
+configuration profile decides which apps can be installed and which developer each one is
+pinned to. An attacker who can write forced managed preferences already runs as root or
+controls the Mac's MDM. The trust anchor for a fresh install is the **Team ID pinned in the
+catalogue entry**: with no app installed there is nothing else to compare against, so a
+download signed by any other team is refused, however it was served.
+
+**Without a `BundleID` the Team ID is the whole anchor.** An entry that omits `BundleID`
+accepts any app that its developer has signed and notarised, not only the app the
+administrator meant: a large developer ships many apps under one Team ID. `BundleID` is the
+normal case and is strongly recommended; `patched catalogue list` warns about every entry
+without one.
+
+**The feed chooses the build.** The update source (Sparkle feed or Homebrew cask) decides
+which download is offered, and Patched only checks that the download is the version the feed
+names. A feed, or whoever controls it, can therefore offer any build that team has signed and
+notarised, including an older one with known flaws: with nothing installed there is no
+"must be newer" rule. A possible later hardening is an optional `MinVersion` per entry that
+refuses anything older; it is not in version one.
+
+**Parsing.** Strict and per entry, with no network. At most 500 entries (more makes the whole
+catalogue invalid) and bounded string lengths. Every key must be known, so a misspelt key such
+as `BundleId` cannot silently drop a check. `TeamID` must be ten capital letters or digits.
+Exactly one source: an https `SparkleFeedURL` with a host and no user name or password, or a
+`HomebrewCask` token in Homebrew's character set. A value of the wrong type or form makes that
+entry invalid, with a plain reason, and the others still work. A top-level value that is not an
+array makes the whole catalogue invalid. The feed is looked up only when the user chooses
+Install for that entry.
+
+**Where it installs.** `~/Applications` only, so no admin rights and no privileged code are
+involved. The folder is created (mode 0700) if it is missing; a symlink anywhere in its path, a
+folder owned by someone else, or one the user cannot write is refused. Entries marked
+`NeedsAdmin` are shown and never installed. Anything already at the destination is never
+overwritten: the move into place is `renamex_np` with `RENAME_EXCL`, so an app that appears at
+the last moment still wins, and the user is pointed to Updates.
+
+**The checks.** A fresh install is the update pipeline with no app to replace:
+
+- Applied as for updates: https-only download and redirects, the 4 GiB cap, length, SHA-256 and
+  SHA-512 when the feed gives them, the unpack budget, `ditto` and `hdiutil` with the same
+  options, exactly one matching app in the download, no symlinks leaving the bundle, a strict
+  code signature pinned to the entry's Team ID, Gatekeeper's notarised Developer ID assessment,
+  the version the feed offered, the per-app lock, refusal while a journal is unreadable or
+  unfinished, and verification again after the move (signature, Team ID, bundle ID, version and
+  Gatekeeper). Only zip and dmg; installer packages are refused.
+- Compared with the catalogue entry instead of the installed app: the Team ID, and the bundle ID
+  when the entry gives one. Without a bundle ID the download must hold exactly one app.
+- Not applicable: "strictly newer than the installed one" (nothing is installed), the Sparkle
+  EdDSA check (the public key would come from the same download it is meant to check, so it
+  adds nothing over the Team ID pin), the App Store receipt check and backups (there is no old
+  app). Quarantine is handled as for updates: Patched neither adds nor removes it.
+
+**Journal and Recover.** A fresh install writes a `freshInstall` journal before every step, and
+the existing `recover` (at launch, from Recover, and `patched recover`) finishes or undoes it:
+
+- Interrupted before the move (`staging`, or `prepared` with nothing of ours at the
+  destination): the staging folder and download are removed; the destination is not touched.
+- Interrupted after the move but before success was recorded (`prepared` or `swapped`), with
+  the very folder the journal recorded (same device and inode) at the destination: it is
+  checked again (signature, Team ID, bundle ID, version and Gatekeeper). If that passes, the
+  install is finished and the app kept. Otherwise it is removed, but only if it still has the
+  journal's bundle ID and nothing runs from it. Anything else at the destination is left alone
+  and reported.
+- Once a fresh install is finished or undone and cleaned up, its journal is deleted rather
+  than kept: there is no backup to roll back to, and an older Patched that does not know the
+  `freshInstall` kind would otherwise pause all updates over a journal it cannot read.
+- A fresh-install journal names the Self Service folder it was started in. Recovery refuses
+  one whose target is not directly in that folder, or whose folder is not this user's
+  `~/Applications`, so an edited journal cannot point recovery at an app anywhere else.
+- Until the app in the download is identified, the journal carries a placeholder bundle ID
+  whose lock the running install holds, so a concurrent `recover` leaves a live install alone.
+- Finished: nothing to undo.
+
+A copy that fails the check after the move is removed in the same way during the install
+itself. If it cannot be removed (for example it is already running), Patched never quits or
+kills it: the journal stays open and the result says that the copy at that path is unverified,
+not trusted and should be deleted. An older Patched cannot read a
+`freshInstall` journal; it reports it as unreadable and refuses updates until it is resolved,
+which fails safe.
+
 ## Out of scope
 
 - **Malware already running as you.** It can change your apps directly, so the
@@ -288,7 +405,7 @@ the notification's button installs only the updates it advertised (their path, v
 build travel in the notification) that are still on offer after a fresh recheck, and
 otherwise installs nothing and opens Updates, a click on a fresh launch or during a check
 waits for a successful check and is dropped if that check fails or is cancelled (the
-menu offers Cancel), scheduled checks never install anything or reach Update All, and recovery never
+menu offers Cancel), scheduled checks install nothing unless the opt-in automatic updates setting is on (see "Automatic updates" below, which never uses admin rights or the installer package path either), and recovery never
 uses admin rights. From the CLI it refuses with `needs_interactive_admin` when the
 login session has no screen (for example SSH) or another user is at the screen.
 macOS asks once per update; nothing runs as root in the background, and there is

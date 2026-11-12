@@ -348,24 +348,28 @@ func storeOutcome(_ app: InstalledApp, version: String = "3.0", track: Int = 123
         try expect(try text("Mystery") == "No public update feed", "default reason")
     }
 
-    check("help & support: honest panel with the coffee, problem-report and source links") {
+    check("help & support: honest panel with the coffee, problem-report, contact and source links") {
         let opener = RecordingOpener()
         let session = NativeClientSession(navigation: ShellNavigation(destination: .support),
                                            urlOpener: opener)
         let content = session.supportContent
         try expect(PublicLinks.repository?.absoluteString == "https://github.com/birdseeed/patched", "repository link: \(String(describing: PublicLinks.repository))")
-        try expect(content.links.map(\.title) == ["Buy me a coffee", "Report a problem", "Source code"], "links: \(content.links.map(\.title))")
+        try expect(content.links.map(\.title) == ["Buy me a coffee", "Report a problem", "Contact the developer", "Source code"], "links: \(content.links.map(\.title))")
         try expect(content.links[0].url.absoluteString == "https://buymeacoffee.com/andybridson" && content.links[0].detail.contains("Apple Developer membership"), "coffee link")
         try expect(content.links[1].url.absoluteString == "https://github.com/birdseeed/patched/issues", "issues link: \(content.links[1].url)")
-        try expect(content.links[2].url.absoluteString == "https://github.com/birdseeed/patched", "source link: \(content.links[2].url)")
+        try expect(content.links[2].url.absoluteString == "mailto:hello@patched.im?subject=Patched" && content.links[2].detail.contains("hello@patched.im"), "contact link: \(content.links[2].url)")
+        try expect(content.links[3].url.absoluteString == "https://github.com/birdseeed/patched", "source link: \(content.links[3].url)")
         try expect(content.about.contains("free, open source community project") && content.about.contains("no company"), "about: \(content.about)")
+        // Points people at the links below rather than telling them there is nowhere to go.
+        try expect(content.about.contains("we'll do our best to help") && !content.about.contains("nowhere"), "about: \(content.about)")
         try expect(opener.nothingOpened, "building the panel opened something")
         try expect(session.openSupportLink(content.links[0]) && opener.urls == [PublicLinks.coffee], "click: \(opener.urls)")
+        try expect(session.openSupportLink(content.links[2]) && opener.urls.last == PublicLinks.contact, "contact click: \(opener.urls)")
         // Without a repository the two links are left out.
         let without = SupportContent.make(repository: nil)
-        try expect(without.links.map(\.title) == ["Buy me a coffee"], "without repository: \(without.links.map(\.title))")
+        try expect(without.links.map(\.title) == ["Buy me a coffee", "Contact the developer"], "without repository: \(without.links.map(\.title))")
         let later = SupportContent.make(repository: URL(string: "https://example.org/patched")!)
-        try expect(later.links.map(\.title) == ["Buy me a coffee", "Report a problem", "Source code"], "with repository: \(later.links.map(\.title))")
+        try expect(later.links.map(\.title) == ["Buy me a coffee", "Report a problem", "Contact the developer", "Source code"], "with repository: \(later.links.map(\.title))")
         let png = try paintView(NativeClientRootView(session: session), width: 900, height: 640)
         try expect(png.count > 3_000, "support panel looks blank")
         if let dir = ProcessInfo.processInfo.environment["PATCHED_SELFCHECK_PNG_DIR"] {

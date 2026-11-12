@@ -53,4 +53,24 @@ private func compactProbeBounds(_ image: CGImage) throws -> (count: Int, minX: I
             }
         }
     }
+    // With Available listed the sidebar has one more row: the last row must still be drawn inside the compact window.
+    for dark in [false, true] {
+        let name = "available-listed-640-" + (dark ? "dark" : "light")
+        check("compact bounds: " + name) {
+            let output = try outputDirectory()
+            let state = fixtureNavigation()
+            state.setAvailableShown(true)
+            state.select(.support)
+            let view = ShellView(navigation: state, destinationLabels: [.updates: longLabel],
+                                 destinationContent: { _ in probe(longLabel) })
+            let result = try render(view, width: 640, height: 480, dark: dark)
+            try retain(result, name: name, output: output)
+            let bounds = try compactProbeBounds(result.image)
+            try expect(bounds.width >= 39 && bounds.height >= 39 && bounds.count >= 1500, "Content probe clipped with Available listed")
+            // The brand blue is measured in light mode only, as in the other sidebar render checks.
+            if dark { return }
+            let (count, centreY) = try brandBluePixels(result.image, maxX: 160)
+            try expect(count > 1500 && centreY < 480 - 20, "Last sidebar row clipped or unselected with Available listed (\(count) px, y \(centreY))")
+        }
+    }
 }

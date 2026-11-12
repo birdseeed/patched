@@ -9,8 +9,12 @@ import UpdateSources
 import UpdateInstaller
 
 // Scheduled checks. Patched checks for updates when the app opens, every 3 hours while it runs, and on
-// demand. Scheduled and launch checks only notify (a notification and a menu-bar count). Nothing here
-// can install: the scheduler holds an `AppUpdatesController` but only ever calls `check()`.
+// demand. Scheduled and launch checks notify (a notification and a menu-bar count) and otherwise only call
+// `check()`. The one exception is the opt-in "Install updates automatically" setting (off by default, and
+// possibly set by an organisation). Only `runAutomaticIfDue()` below may install, and only when that setting
+// is on, the chosen time has come and no run has happened today. It calls the same `updateAll` as the Update
+// All button, in its narrower `automatic` form: no App Store, no installer packages, no admin, no Patched
+// itself, no hidden apps and no open apps. Nothing else in this file can install.
 
 // MARK: Seams
 
@@ -100,6 +104,10 @@ public enum LoginItemStatus: Equatable, Sendable {
     private let notifier: any UpdateNotifying
     private let wake: any WakeEventSourcing
     private let store: any BackgroundCheckStoring
+    private let automatic: AutomaticUpdateSettings?
+    private let summaryNotifier: (any UpdateSummaryNotifying)?
+    private let calendar: Calendar
+    private var automaticRetryToken: (any CancellableToken)?
     private var timerToken: (any CancellableToken)?
     private var wakeToken: (any CancellableToken)?
     private var ownCheckInFlight = false
@@ -111,9 +119,12 @@ public enum LoginItemStatus: Equatable, Sendable {
     public private(set) var started = false
 
     public init(controller: AppUpdatesController, now: @escaping () -> Date, timer: any CheckTimerScheduling,
-                notifier: any UpdateNotifying, wake: any WakeEventSourcing, store: any BackgroundCheckStoring) {
+                notifier: any UpdateNotifying, wake: any WakeEventSourcing, store: any BackgroundCheckStoring,
+                automatic: AutomaticUpdateSettings? = nil, summaryNotifier: (any UpdateSummaryNotifying)? = nil,
+                calendar: Calendar = .autoupdatingCurrent) {
         self.controller = controller; self.now = now; self.timer = timer
         self.notifier = notifier; self.wake = wake; self.store = store
+        self.automatic = automatic; self.summaryNotifier = summaryNotifier; self.calendar = calendar
     }
 
     /// Begins the schedule: one check now (unless one ran in the last 10 minutes, or always after a
@@ -124,6 +135,7 @@ public enum LoginItemStatus: Equatable, Sendable {
         checkDespiteRecentCheck = afterSelfUpdate
         controller.onCheckFinished = { [weak self] outcome in self?.finished(outcome) }
         controller.onSelfLookupFinished = { [weak self] in self?.settleSelfUpdateWhenReady() }
+        controller.onSuccessfulCheckSettled = { [weak self] in self?.runAutomaticIfDue() }
         wakeToken = wake.observe { [weak self] in self?.woke() }
         attempt(.launch)
     }
@@ -134,6 +146,8 @@ public enum LoginItemStatus: Equatable, Sendable {
         wakeToken?.cancel(); wakeToken = nil
         controller.onCheckFinished = nil
         controller.onSelfLookupFinished = nil
+        controller.onSuccessfulCheckSettled = nil
+        automaticRetryToken?.cancel(); automaticRetryToken = nil
         pendingSelfSettle = nil
         // A check still running will finish unobserved; do not let its ownership outlive this run.
         ownCheckInFlight = false
@@ -198,9 +212,45 @@ public enum LoginItemStatus: Equatable, Sendable {
         if outcome == .succeeded, controller.lastCheckMostlyOffline {
             store.lastCheck = now().addingTimeInterval(-(Self.interval - Self.offlineRetryDelay))
         }
-        if outcome == .succeeded { settle(notify: mine); pendingSelfSettle = mine; settleSelfUpdateWhenReady() }
+        // The updates an automatic run is about to attempt are not announced (its summary follows). Every other
+        // update, including ones the run leaves out, is announced as usual.
+        let attempted = automaticRunWouldStart() ? controller.automaticallyInstallableKeys : []
+        if outcome == .succeeded { settle(notify: mine, unannounced: attempted); pendingSelfSettle = mine; settleSelfUpdateWhenReady() }
         else { pendingSelfSettle = nil }
         arm()
+    }
+
+    // MARK: Automatic updates
+
+    /// Setting on, chosen time reached (within 6 hours and before midnight), none yet today, and the last check was not mostly offline.
+    private func automaticRunWouldStart() -> Bool {
+        guard let automatic else { return false }
+        automatic.refresh()
+        return automatic.isEnabled && !controller.lastCheckMostlyOffline
+            && AutomaticUpdateSchedule.isDue(now: now(), time: automatic.time, lastRunDay: automatic.lastRunDay, calendar: calendar)
+    }
+
+    /// The only place the scheduler installs anything. Runs after a successful check, once a day.
+    private func runAutomaticIfDue() {
+        guard started, let automatic, automaticRunWouldStart() else { return }
+        // A check (the user's, say) is running: its own end comes back here.
+        guard controller.phase == .idle else { return }
+        // Never during an install, rollback or recovery, with installing blocked, or over an open confirmation:
+        // look again shortly, while the window lasts. Nothing is recorded, so the day is not spent.
+        guard !controller.automaticRunMustWait else {
+            automaticRetryToken?.cancel()
+            automaticRetryToken = timer.schedule(after: Self.deferDelay) { [weak self] in self?.runAutomaticIfDue() }
+            return
+        }
+        automaticRetryToken?.cancel(); automaticRetryToken = nil
+        // Recorded as the run starts, so a relaunch the same day, or a second check, never runs it again.
+        automatic.lastRunDay = AutomaticUpdateSchedule.dayKey(now(), calendar: calendar)
+        let notifier = summaryNotifier
+        controller.updateAll(only: nil, askInWindow: false, automatic: true) { summary in
+            // Quiet when nothing was installed, failed or skipped for being open.
+            guard summary.updated + summary.failed + summary.skippedOpen > 0 else { return }
+            notifier?.notify(automaticSummary: summary)
+        }
     }
 
     private static let ownPrefix = "im.patched.self-update\u{1F}"
@@ -242,14 +292,18 @@ public enum LoginItemStatus: Equatable, Sendable {
     }
 
     /// Only a changed set of available updates produces a notification. Failed or cancelled checks never do.
-    private func settle(notify shouldNotify: Bool) {
+    private func settle(notify shouldNotify: Bool, unannounced: Set<String> = []) {
         let rows = controller.rows
-        let current = controller.availableUpdates
+        // Updates an automatic run will attempt stay un-announced: if one fails or is skipped as open, a later check can still tell the user.
+        let current = controller.availableUpdates.filter { !unannounced.contains($0.key) }
         let currentKeys = Set(current.map(\.key))
         var previous = store.notifiedKeys
         // Patched's own release has its own bookkeeping (`settleSelfUpdate`); its keys are left alone here.
         let ownKeys = previous.filter { $0.hasPrefix(Self.ownPrefix) }
         previous.subtract(ownKeys)
+        // An attempted update that was announced before stays announced, so an app that is always open at the chosen
+        // time is not announced again after every day's run; the run's summary already says it was skipped.
+        let announcedBefore = previous.intersection(unannounced)
         // An app that could not be checked this time keeps its record, so a flaky network does not re-notify.
         let unsettled = Set(rows.compactMap { row -> String? in
             if case .refused = row.status { return row.path }
@@ -257,12 +311,12 @@ public enum LoginItemStatus: Equatable, Sendable {
         })
         let retained = previous.filter { key in unsettled.contains(String(key.split(separator: "\u{1F}", omittingEmptySubsequences: false).first ?? "")) }
         guard shouldNotify, !currentKeys.subtracting(previous).isEmpty else {
-            store.notifiedKeys = retained.union(currentKeys).union(ownKeys)
+            store.notifiedKeys = retained.union(currentKeys).union(ownKeys).union(announcedBefore)
             return
         }
         // New updates count as announced only once the notification was really submitted, so a denied or
         // failed notification is tried again at the next check (for example after permission is granted).
-        store.notifiedKeys = retained.union(currentKeys.intersection(previous)).union(ownKeys)
+        store.notifiedKeys = retained.union(currentKeys.intersection(previous)).union(ownKeys).union(announcedBefore)
         let sorted = current.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
         notifier.notify(updates: sorted) { [weak self] delivered in
             if delivered { self?.store.notifiedKeys.formUnion(currentKeys) }
@@ -489,9 +543,11 @@ var runsFromAppBundle: Bool {
 
 extension UpdateCheckScheduler {
     /// The real timer, wake notification and stored state. Nothing is touched until `start()`.
-    static func system(controller: AppUpdatesController, notifier: any UpdateNotifying) -> UpdateCheckScheduler {
+    static func system(controller: AppUpdatesController, notifier: SystemUpdateNotifier,
+                       automatic: AutomaticUpdateSettings) -> UpdateCheckScheduler {
         UpdateCheckScheduler(controller: controller, now: { Date() }, timer: SystemCheckTimer(),
-                             notifier: notifier, wake: SystemWakeSource(), store: DefaultsCheckStore())
+                             notifier: notifier, wake: SystemWakeSource(), store: DefaultsCheckStore(),
+                             automatic: automatic, summaryNotifier: notifier)
     }
 }
 

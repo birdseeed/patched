@@ -472,28 +472,34 @@ func advertised(_ apps: [InstalledApp], version: String = "2.0") -> Set<String> 
         try expect(updateEvents(rig.installer) == ["update Alpha quit=false"], "stale row installed: \(rig.installer.recorder.events)")
     }
 
-    check("update-all: the scheduler path never reaches updateAll, the installer or a summary, and only the click paths call it") {
+    check("update-all: with automatic updates off the scheduler path never reaches updateAll, the installer or a summary; only the click paths and the gated automatic run call it") {
         let rig = Rig([outcome(app("Alpha"), .updateAvailable(offer("2.0")))])
         rig.scheduler.start(); await rig.settle()
         rig.clock.advance(UpdateCheckScheduler.interval); try rig.timer.fireActive(); await rig.settle()
         try expect(rig.notifier.posted.count == 1, "no notification posted")
         try rig.noInstallerActivity()
         try expect(rig.controller.updateAllInvocations == 0, "scheduler called updateAll")
-        // Source guard: the scheduler file does not know Update All at all, and only the Updates window and
-        // the entry point call it.
+        // Source guard: the scheduler file calls Update All in exactly one place, the automatic run (gated on the
+        // setting, in its narrow `automatic: true` form). Otherwise only the Updates window and the entry point call it.
         let sources = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("Sources")
         let files = (FileManager.default.enumerator(atPath: sources.path)?.allObjects as? [String]) ?? []
         var callers: [String] = []
         for relative in files where relative.hasSuffix(".swift") {
             let text = try String(contentsOfFile: sources.path + "/" + relative, encoding: .utf8)
-            if relative == "PatchedClient/BackgroundUpdateChecks.swift" {
-                try expect(!text.lowercased().contains("updateall"), "\(relative) mentions Update All")
-            }
             let code = text.split(separator: "\n").filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }.joined(separator: "\n")
+            if relative == "PatchedClient/BackgroundUpdateChecks.swift" {
+                let calls = code.components(separatedBy: "updateAll(").count - 1
+                try expect(calls == 1 && code.contains("updateAll(only: nil, askInWindow: false, automatic: true)"),
+                           "\(relative) must call updateAll once, in its automatic form: \(calls) calls")
+                let guarded = code.components(separatedBy: "private func runAutomaticIfDue()")
+                try expect(guarded.count == 2 && guarded[1].contains("guard started, let automatic, automaticRunWouldStart()")
+                           && guarded[0].components(separatedBy: "updateAll(").count == 1,
+                           "\(relative): the install call is not inside the setting-gated runAutomaticIfDue()")
+            }
             if code.contains("updateAll(") { callers.append(relative) }
         }
-        try expect(callers.sorted() == ["PatchedClient/AppUpdatesController.swift", "PatchedClient/AppUpdatesView.swift", "PatchedClient/UpdateAllEntryPoints.swift"],
+        try expect(callers.sorted() == ["PatchedClient/AppUpdatesController.swift", "PatchedClient/AppUpdatesView.swift", "PatchedClient/BackgroundUpdateChecks.swift", "PatchedClient/UpdateAllEntryPoints.swift"],
                    "callers of updateAll: \(callers.sorted())")
     }
 }

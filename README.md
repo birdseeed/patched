@@ -58,7 +58,8 @@ touch the app's data (Application Support, its container, preferences), so if th
 newer version migrated that data on first launch, the older one may not read it.
 Roll back is most reliable straight after an update; for data, use Time Machine. Patched checks when it opens and every three hours while it runs
 (a recent check within ten minutes suppresses the opening check). Scheduled
-checks only report available updates and notify you; they do not install them.
+checks only report available updates and notify you; they do not install them, unless you switch on
+**Install updates automatically** in Settings (off by default, once a day at a time you choose, within 6 hours of it and not past midnight; see [Automatic updates at a set time](#automatic-updates-at-a-set-time)).
 Use **Open at login** in Settings to have the installed app start when you log in.
 Settings also shows whether notifications are on, with a button to open macOS
 Notification Settings.
@@ -77,6 +78,142 @@ Patched keeps its update state and backups in
 state without overwriting an existing destination. An unfinished transaction
 must be recovered before migration can finish. See
 [THREAT-MODEL.md](THREAT-MODEL.md) for migration and recovery details.
+
+## Automatic updates at a set time
+
+Off by default. In Settings, "Install updates automatically" installs updates once a day at a
+time you choose (02:00 unless you change it). It is the one exception to "nothing installs
+until you choose Update", and it only happens if you switch it on.
+
+It installs what Update All installs: updates to apps you can replace without admin rights,
+rechecked just before each install with every usual check. It never installs installer
+packages, apps that need admin rights, Patched itself, hidden apps or Mac App Store apps. It
+never quits an app: open apps are skipped, listed in the summary and still offered on the
+Updates screen. It runs at the first check at or after the chosen time, at most once a day.
+If the Mac was asleep or Patched was not running, it still runs at the first check within
+6 hours of that time, and not past midnight (a 23:00 setting has one hour), otherwise it waits
+for the next day. It does not wake the Mac. It waits while an install, roll back or recovery
+is running, while installing is blocked or a question is open, and skips a check that mostly
+failed offline. Updates it leaves out are announced in the usual "updates available"
+notification. You get one summary notification, only when something was updated, failed or
+was skipped because the app was open. Roll back works as for any update.
+
+An organisation sets this with a configuration profile that manages the `im.patched.app`
+preference domain (managed preferences). A minimal payload, with a placeholder UUID to replace:
+
+    <dict>
+      <key>PayloadType</key><string>com.apple.ManagedClient.preferences</string>
+      <key>PayloadVersion</key><integer>1</integer>
+      <key>PayloadIdentifier</key><string>com.example.patched.automatic-updates</string>
+      <key>PayloadUUID</key><string>00000000-0000-0000-0000-000000000000</string>
+      <key>PayloadContent</key>
+      <dict>
+        <key>im.patched.app</key>
+        <dict>
+          <key>Forced</key>
+          <array><dict>
+            <key>mcx_preference_settings</key>
+            <dict>
+              <key>AutomaticUpdatesEnabled</key><true/>
+              <key>AutomaticUpdatesTime</key><string>02:00</string>
+            </dict>
+          </dict></array>
+        </dict>
+      </dict>
+    </dict>
+
+Writing to `/Library/Managed Preferences` by hand is for testing only.
+
+| Key | Type | Meaning |
+| --- | --- | --- |
+| `AutomaticUpdatesEnabled` | Boolean | `true` turns it on, `false` turns it off. |
+| `AutomaticUpdatesTime` | String | Time of day as `HH:mm`, 24-hour, for example `02:00`. |
+
+A managed value locks that control in Settings with "Set by your organisation". A value of the
+wrong type is not used. For `AutomaticUpdatesEnabled` that fails closed: automatic updates
+are off and locked, and Settings says so. A time that is not exactly `HH:mm` (`2:00`, `24:00`
+and `02:00:00` are all refused) is ignored: the user's own time, or 02:00, applies and Settings
+says a managed value was ignored. Only values that are forced count, so a plain user default never locks anything.
+See `THREAT-MODEL.md`, "Automatic updates".
+
+## Self Service
+
+For organisations: a catalogue of approved apps that people can install for themselves, without
+admin rights, into `~/Applications`. When a catalogue is set on a Mac, an **Available** screen
+appears in the sidebar. It lists the apps not yet installed, with a search field and a category
+filter, and an Install button on each row that can be installed. Installing shows the same
+progress, Cancel and result text as Updates. The catalogue is read when the window opens or
+Available is shown. An entry that needs admin rights is greyed out with its reason, and an invalid entry says
+why it is invalid. With no catalogue, the screen is not shown. Once installed, an app appears in
+Updates like any other. `patched catalogue list` shows the catalogue on this Mac and whether each
+entry is valid.
+
+The catalogue is a managed preference, `SelfServiceCatalogue` for `im.patched.app`, set by a
+configuration profile from your MDM. Only a forced value counts, so a user cannot add to it. It
+is an array of dictionaries, at most 500 entries:
+
+| Key | Type | Meaning |
+| --- | --- | --- |
+| `Name` | String | Required. The name people see, up to 128 characters. |
+| `TeamID` | String | Required. The developer's Apple Team ID (ten capital letters or digits). The download must be signed by this team. |
+| `SparkleFeedURL` | String | The app's Sparkle appcast, https only, with no user name or password in it. |
+| `HomebrewCask` | String | A Homebrew cask token, for example `firefox`. Give exactly one of `SparkleFeedURL` and `HomebrewCask`. |
+| `BundleID` | String | Optional, but give it for every entry. The installed app must have exactly this bundle ID. Without it, any app signed and notarised by the entry's Team ID is accepted, and the download must hold exactly one app. `patched catalogue list` warns about entries without one. |
+| `Description` | String | Optional, up to 512 characters. |
+| `Category` | String | Optional, up to 64 characters, for filtering. |
+| `NeedsAdmin` | Boolean | Optional. `true` shows the app greyed out ("needs admin rights") and never installs it. |
+
+Each entry is checked on its own. One with a missing or misspelt key, a value of the wrong type, a
+Team ID that is not valid, an `http` feed or a bad cask token is shown as invalid with the reason,
+and the rest still work. A value that is not an array, or more than 500 entries, means no catalogue
+at all. Nothing is fetched until someone chooses Install. Only zip and dmg downloads are supported;
+installer packages are refused. Patched never overwrites anything already in `~/Applications`.
+
+The feed or cask decides which build is offered, and nothing is installed yet to compare it with,
+so a feed can offer any build the developer signed and notarised, including an older one. Use
+feeds you trust as much as the developer. See `THREAT-MODEL.md`, "Self Service".
+
+A minimal payload, with placeholder UUIDs and a placeholder Team ID to replace:
+
+    <dict>
+      <key>PayloadType</key><string>com.apple.ManagedClient.preferences</string>
+      <key>PayloadVersion</key><integer>1</integer>
+      <key>PayloadIdentifier</key><string>com.example.patched.self-service</string>
+      <key>PayloadUUID</key><string>00000000-0000-0000-0000-000000000001</string>
+      <key>PayloadContent</key>
+      <dict>
+        <key>im.patched.app</key>
+        <dict>
+          <key>Forced</key>
+          <array><dict>
+            <key>mcx_preference_settings</key>
+            <dict>
+              <key>SelfServiceCatalogue</key>
+              <array>
+                <dict>
+                  <key>Name</key><string>Example Notes</string>
+                  <key>Description</key><string>Shared team notes</string>
+                  <key>Category</key><string>Productivity</string>
+                  <key>TeamID</key><string>ABCDE12345</string>
+                  <key>BundleID</key><string>com.example.notes</string>
+                  <key>SparkleFeedURL</key><string>https://example.com/notes/appcast.xml</string>
+                </dict>
+                <dict>
+                  <key>Name</key><string>Example Browser</string>
+                  <key>TeamID</key><string>ABCDE12345</string>
+                  <key>BundleID</key><string>com.example.browser</string>
+                  <key>HomebrewCask</key><string>example-browser</string>
+                </dict>
+              </array>
+            </dict>
+          </dict></array>
+        </dict>
+      </dict>
+    </dict>
+
+The payload goes inside a configuration profile (top-level `PayloadType` `Configuration`, with its
+own placeholder UUID, for example `00000000-0000-0000-0000-000000000002`). After installing the
+profile, run `patched catalogue list` to check it. See `THREAT-MODEL.md`, "Self Service".
 
 ## Install a release
 
@@ -125,9 +262,11 @@ patched update --all [--quit] [--dry-run] [--json]
 patched rollback <app path | bundle ID> [--quit]
 patched recover [--quit]
 patched backups
+patched catalogue list
 ```
 
-`check` is read-only. `--dry-run` downloads and verifies an update in a staging
+`check` is read-only. `catalogue list` shows the Self Service catalogue set on this Mac
+and whether each entry is valid. `--dry-run` downloads and verifies an update in a staging
 folder, then cleans it up without installing. `--quit` asks a running app to
 quit; it is not force-killed. The updater refuses to replace apps that require
 administrator privileges; use the app's own updater for those. A `.pkg` update

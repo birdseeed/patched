@@ -13,6 +13,32 @@ import PatchedShell
             try expect(fixtureNavigation().label(for: destination) == label, "Approved literal destination label missing")
         }
     }
+    check("navigation: Available is absent without a catalogue and present, between Updates and Applications, with one") {
+        let state = fixtureNavigation()
+        try expect(!state.availableShown && state.mainDestinations == expectedMain && state.mainDestinations.count == 2,
+                   "Available is listed with no catalogue: \(state.mainDestinations)")
+        try expect(state.focusOrder == ["destination:updates", "destination:applications", "destination:support"], "focus order changed")
+        state.setAvailableShown(true)
+        try expect(state.mainDestinations == [.updates, .available, .applications] && state.lowerDestinations == expectedLower,
+                   "Available missing or misplaced: \(state.mainDestinations)")
+        try expect(state.label(for: .available) == "Available", "Available label")
+        state.setAvailableShown(false)
+        try expect(state.mainDestinations == expectedMain, "Available not removed again")
+    }
+    check("navigation: Available cannot be selected while hidden, and hiding it returns to Updates") {
+        var events: [ShellDestination] = []
+        let state = fixtureNavigation(onSelection: { events.append($0) })
+        try expect(!state.select(.available) && !state.selectRaw("available") && state.destination == .updates && events.isEmpty,
+                   "Hidden Available was selectable")
+        state.setAvailableShown(true)
+        try expect(state.select(.available) && state.destination == .available, "Shown Available refused")
+        state.setAvailableShown(false)
+        try expect(state.destination == .updates && events == [.available, .updates], "Hiding Available left it selected: \(events)")
+    }
+    check("navigation: a new navigation never starts on a hidden Available") {
+        let state = fixtureNavigation(destination: .available)
+        try expect(state.destination == .updates && !state.availableShown, "started on hidden Available")
+    }
     check("navigation: construction is inert and keeps explicitly supplied selection") {
         var events: [ShellDestination] = []
         let state = fixtureNavigation(destination: .support, onSelection: { events.append($0) })
@@ -86,5 +112,52 @@ import PatchedShell
         }
         let u = centres[.updates] ?? 0, a = centres[.applications] ?? 0, h = centres[.support] ?? 0
         try expect(u < a && a < h && a - u > 10, "Selection did not move with the destination: \(u) \(a) \(h)")
+    }
+}
+
+@MainActor func registerAvailableSidebarChecks() {
+    check("render sidebar: with a catalogue the Available row is listed and selectable, without one the sidebar is unchanged") {
+        var centres: [ShellDestination: Double] = [:]
+        for destination in [ShellDestination.updates, .available, .applications, .support] {
+            let state = fixtureNavigation(destination: .updates)
+            state.setAvailableShown(true)
+            state.select(destination)
+            let result = try render(ShellView(navigation: state, destinationContent: { probe($0.rawValue) }))
+            let (count, centreY) = try brandBluePixels(result.image, maxX: 190)
+            try expect(count > 1500, "No brand-blue selected row for \(destination.rawValue) (\(count) px)")
+            centres[destination] = centreY
+        }
+        let u = centres[.updates] ?? 0, v = centres[.available] ?? 0, a = centres[.applications] ?? 0, h = centres[.support] ?? 0
+        try expect(u < v && v < a && a < h && v - u > 10 && a - v > 10, "Available is not between Updates and Applications: \(u) \(v) \(a) \(h)")
+        // Without a catalogue: Applications sits exactly where it did before Available existed (one row below Updates).
+        let plain = fixtureNavigation(destination: .applications)
+        let base = try brandBluePixels(try render(ShellView(navigation: plain, destinationContent: { probe($0.rawValue) })).image, maxX: 190).1
+        try expect(abs(base - v) < 2, "Without a catalogue, Applications is not directly below Updates: \(base) vs Available \(v)")
+    }
+}
+
+@MainActor func registerSidebarSettingsChecks() {
+    check("sidebar Settings row: shown only with an opener, never a destination, wired to the standard Settings window") {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let shell = try String(contentsOf: root.appendingPathComponent("Sources/PatchedShell/ShellView.swift"), encoding: .utf8)
+        for required in ["if let openSettings {", "symbol: \"gearshape\", isSelected: false, action: openSettings",
+                         ".accessibilityIdentifier(\"action:settings\")"] {
+            try expect(shell.contains(required), "Shell sidebar Settings row is missing \(required)")
+        }
+        let session = try String(contentsOf: root.appendingPathComponent("Sources/PatchedClient/NativeClientSession.swift"), encoding: .utf8)
+        try expect(session.contains("OpensSettings { openSettings in") && session.contains("ShellView(navigation: session.navigation, openSettings: openSettings,"),
+                   "The app's sidebar is not given the Settings opener")
+        let opener = try String(contentsOf: root.appendingPathComponent("Sources/PatchedClient/OpensSettings.swift"), encoding: .utf8)
+        try expect(opener.contains("@Environment(\\.openSettings)") && opener.contains("Selector((\"showPreferencesWindow:\"))"),
+                   "Settings opener does not use openSettings (macOS 14) and showPreferencesWindow: (macOS 13)")
+    }
+    check("render sidebar: the Settings row is drawn, but never as a selected row") {
+        let without = try render(ShellView(navigation: fixtureNavigation(destination: .updates),
+            destinationContent: { probe($0.rawValue) }))
+        let with = try render(ShellView(navigation: fixtureNavigation(destination: .updates), openSettings: {},
+            destinationContent: { probe($0.rawValue) }))
+        try expect(with.png != without.png, "Giving an opener drew no Settings row")
+        let added = try brandBluePixels(with.image, maxX: 190).0 - brandBluePixels(without.image, maxX: 190).0
+        try expect(added < 1000, "Settings row added \(added) brand-blue px: drawn as selected")
     }
 }

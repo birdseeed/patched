@@ -53,6 +53,8 @@ public enum InstallRefusal: Error, Sendable, Equatable {
     case rollbackUnsupported(String)
     case recoveryAmbiguous(String)
     case io(String)
+    /// Self Service: something is already at the destination in ~/Applications. Patched never overwrites it.
+    case destinationExists(String)
     // Admin updates: root-owned replacement (off unless PATCHED_ENABLE_ADMIN_UPDATES=1) and .pkg (on unless PATCHED_ENABLE_PKG_UPDATES=0).
     /// The update needs admin rights but there is nobody at the Mac to answer macOS's prompt
     /// (no graphical login session, for example over SSH, or another user is at the screen).
@@ -125,6 +127,7 @@ public enum InstallRefusal: Error, Sendable, Equatable {
         case .rollbackUnsupported: return "rollback_unsupported"
         case .recoveryAmbiguous: return "recovery_ambiguous"
         case .io: return "io_error"
+        case .destinationExists: return "destination_exists"
         case .needsInteractiveAdmin: return "needs_interactive_admin"
         case .adminDenied: return "admin_denied"
         case .privilegedReplaceFailed: return "privileged_replace_failed"
@@ -180,6 +183,7 @@ public enum InstallRefusal: Error, Sendable, Equatable {
         case .rollbackUnsupported(let d): return "rollback is not supported for installer packages: \(d)"
         case .recoveryAmbiguous(let d): return "cannot recover automatically: \(d)"
         case .io(let d): return "file error: \(d)"
+        case .destinationExists(let d): return "something is already installed there, so nothing was changed; use Updates for an installed app: \(d)"
         case .needsInteractiveAdmin(let d): return "admin updates need you at this Mac to answer macOS's prompt: \(d)"
         case .adminDenied(let d): return "macOS did not grant admin rights, so nothing was changed: \(d)"
         case .privilegedReplaceFailed(let d): return "macOS could not replace the app with admin rights: \(d)"

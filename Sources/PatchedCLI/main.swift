@@ -26,13 +26,17 @@ usage: patched check [--json] [--app <path>] [--explain <app path | bundle ID>]
          from an affected bundle to quit first.
        patched backups
          Lists backups.
+       patched catalogue list
+         Shows the Self Service catalogue your organisation set on this Mac (the managed preference
+         SelfServiceCatalogue for im.patched.app) and whether each entry is valid. Read-only: nothing
+         is fetched or installed. Exits 1 when there is no catalogue or anything in it is invalid.
 """
 
 // MARK: Arguments
 
 var arguments = Array(CommandLine.arguments.dropFirst())
 // `admin-probe` is hidden and experimental: see scripts/admin-probe-runbook.md.
-guard let command = arguments.first, ["check", "update", "rollback", "recover", "backups", "admin-probe"].contains(command) else { fail(usage, code: 2) }
+guard let command = arguments.first, ["check", "update", "rollback", "recover", "backups", "catalogue", "admin-probe"].contains(command) else { fail(usage, code: 2) }
 arguments.removeFirst()
 var asJSON = false, quitIfRunning = false, dryRun = false, all = false
 var appPath: String?
@@ -298,6 +302,8 @@ case "recover":
             case .completed: text = "finished; new version installed, old version backed up"
             case .reverted: text = "undone; old version is back in place"
             case .cleanedUp: text = "leftover temporary files removed"
+            case .removedUnfinishedInstall: text = "interrupted Self Service install undone; the unfinished copy was removed"
+            case .finishedFreshInstall: text = "interrupted Self Service install finished; the app passed every check and was kept"
             }
             print("\(report.targetPath): \(text) (journal \(report.journalID))")
             if !report.leftovers.isEmpty {
@@ -310,6 +316,12 @@ case "recover":
         }
     }
     exit(failed ? 1 : 0)
+
+case "catalogue":
+    guard positional == ["list"] else { fail("usage: patched catalogue list", code: 2) }
+    let catalogue = SelfServiceCatalogue.load()
+    for line in catalogue.listing { print(line) }
+    exit(catalogue.isFullyValid ? 0 : 1)
 
 case "admin-probe":
     guard positional.isEmpty else { fail("admin-probe takes no app", code: 2) }

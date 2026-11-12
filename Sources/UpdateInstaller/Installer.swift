@@ -71,6 +71,12 @@ public enum RecoveryOutcome: String, Sendable, Equatable {
     case reverted
     /// An earlier run's leftover temporary files or mounts are now gone.
     case cleanedUp
+    /// A Self Service install was interrupted after its copy reached the destination and before it was verified there;
+    /// that copy (and only a copy the journal proves Patched put there) was removed, so the app is not installed.
+    case removedUnfinishedInstall
+    /// A Self Service install was interrupted after its copy reached the destination; the copy passed every check again
+    /// there, so the install was finished and the app kept.
+    case finishedFreshInstall
 }
 
 /// What the installer knows about the app it is about to replace, read from disk.
@@ -115,6 +121,9 @@ public struct UpdateInstaller: Sendable {
     let adminPath: AdminUpdatePath?
     /// Whether Apple's Installer is running; injectable for checks.
     let installerRunning: @Sendable () -> Bool
+    /// The Self Service destination (~/Applications). Nil means the real one, resolved only when a fresh-install
+    /// journal is recovered; checks pass a temporary folder.
+    let selfServiceRoot: String?
 
     public init(locations: InstallerLocations,
                 downloader: any ArtifactDownloading = URLSessionArtifactDownloader(),
@@ -128,7 +137,8 @@ public struct UpdateInstaller: Sendable {
                 forceCopyBackup: Bool = false,
                 diskImageDetacher: @escaping @Sendable (String) -> Bool = { Unpacker.detachDiskImage(at: $0) },
                 adminPath: AdminUpdatePath? = nil,
-                installerRunning: @escaping @Sendable () -> Bool = { InstallerActivity.isRunning() }) {
+                installerRunning: @escaping @Sendable () -> Bool = { InstallerActivity.isRunning() },
+                selfServiceRoot: String? = nil) {
         self.locations = locations; self.downloader = downloader; self.verifier = verifier
         self.runningApps = runningApps; self.uid = uid; self.teamIDReader = teamIDReader
         self.hooks = hooks; self.quitTimeout = quitTimeout
@@ -136,6 +146,7 @@ public struct UpdateInstaller: Sendable {
         self.diskImageDetacher = diskImageDetacher
         self.adminPath = adminPath
         self.installerRunning = installerRunning
+        self.selfServiceRoot = selfServiceRoot
     }
 
     /// Whether each part of the admin path is switched on (each still needs an `AdminInteraction` per call).
@@ -156,7 +167,8 @@ public struct UpdateInstaller: Sendable {
                                   if !helpers.isEmpty { throw Self.helperRefusal(name: (path as NSString).lastPathComponent, path: path, helpers) }
                               }
                           },
-                          detach: diskImageDetacher, installerRunning: installerRunning)
+                          detach: diskImageDetacher, installerRunning: installerRunning,
+                          selfServiceRoot: { [selfServiceRoot] in selfServiceRoot ?? (try? SelfServiceDestination.standard()) })
     }
     var store: JournalStore { JournalStore(directory: locations.transactions) }
 

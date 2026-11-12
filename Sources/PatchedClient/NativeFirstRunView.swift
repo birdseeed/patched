@@ -50,9 +50,9 @@ public struct NativeFirstRunView: View {
         case .review:
             heading("How Patched works")
             VStack(alignment: .leading, spacing: 16) {
-                point("Checking", "Patched checks for updates when it opens and every 3 hours. Checks never install anything.")
+                point("Checking", "Patched checks for updates when it opens and every 3 hours. Checks never install anything unless you turn on automatic updates in Settings.")
                 point("Notifications", "Patched asks macOS for permission to show notifications the first time it has an update to tell you about.")
-                point("Installing", "An app is updated only when you click Update or Update All. If the app is open, Patched asks before quitting it.")
+                point("Installing", "An app is updated only when you click Update or Update All, unless you turn on automatic updates in Settings. If the app is open, Patched asks before quitting it.")
                 point("Apps that need more help", "Apps from the App Store are updated in the App Store, and apps that need admin rights are updated with their own updater. Patched opens them for you.")
             }
         case .findApps:

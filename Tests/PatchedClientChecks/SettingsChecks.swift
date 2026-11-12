@@ -65,13 +65,15 @@ import PatchedShell
         try expect(allowed != denied, "Notification state does not change the Settings screen")
         try expect(!session.appUpdates.hasChecked && session.appUpdates.phase != .checking, "Settings started a check")
     }
-    check("settings: the screen holds only Open at login, the schedule line, notifications and the version") {
+    check("settings: the screen holds only Open at login, the schedule line, automatic updates, notifications and the version") {
         let view = code(try source("Sources/PatchedClient/SettingsView.swift"))
         for token in ["OpenAtLoginView(controller: openAtLogin)", "Self.scheduleText", "notifications.statusText",
-                      "Open Notification Settings", "Text(\"Version\")", "Form {", ".formStyle(.grouped)", "Section("] {
+                      "Open Notification Settings", "Text(\"Version\")", "Install updates automatically",
+                      ".disabled(automaticUpdates.enabledLocked)", ".disabled(automaticUpdates.timeLocked || !automaticUpdates.isEnabled)",
+                      "AutomaticUpdateSettings.lockedNote", "AutomaticUpdateSettings.invalidNote", "Form {", ".formStyle(.grouped)", "Section("] {
             try expect(view.contains(token), "Settings lacks \(token)")
         }
-        try expect(SettingsView.scheduleText == "Patched checks for updates when it opens and every 3 hours. It never installs anything on its own.",
+        try expect(SettingsView.scheduleText == "Patched checks for updates when it opens and every 3 hours. It only installs updates on its own if you turn on automatic updates below.",
                    "Schedule line changed")
         for stale in ["Toggle(\"Automatic", "Pause", "Network", "Diagnostics", "Save schedule", "Reload saved", "requestAuthorization"] {
             try expect(!view.contains(stale), "Settings still has \(stale)")

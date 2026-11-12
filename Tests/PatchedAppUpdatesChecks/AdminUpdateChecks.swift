@@ -164,10 +164,11 @@ import UpdateInstaller
         // The CLI decides consent only through CommandLineUpdates, and its --all loop asks for the batch scope.
         let cli = try String(contentsOfFile: sources.path + "/PatchedCLI/main.swift", encoding: .utf8)
         try expect(cli.contains("install(outcome, installer: installer, scope: .all)") && !cli.contains("admin: "), "CLI bypasses CommandLineUpdates")
-        // The scheduler holds the controller but only ever checks.
+        // The scheduler holds the controller and checks. Its one install path is the gated automatic Update All
+        // (see the Update All source guard), which never passes consent, so no admin word may appear here.
         for relative in ["PatchedClient/BackgroundUpdateChecks.swift"] {
             let text = try String(contentsOfFile: sources.path + "/" + relative, encoding: .utf8)
-            for forbidden in ["AdminInteraction", "AdminUpdatePath", "admin:", ".update(id", "updateAll", "rollBack(", "finishInstaller", ".recover()"] {
+            for forbidden in ["AdminInteraction", "AdminUpdatePath", "admin:", ".update(id", "rollBack(", "finishInstaller", ".recover()"] {
                 try expect(!text.contains(forbidden), "\(relative) mentions \(forbidden)")
             }
         }

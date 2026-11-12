@@ -12,6 +12,8 @@ var cases: [(String, @MainActor () throws -> Void)] = []
 }
 registerNavigationChecks()
 registerNativeSidebarChecks()
+registerAvailableSidebarChecks()
+registerSidebarSettingsChecks()
 registerOffscreenChecks()
 registerCompactBoundsChecks()
 var failures = 0

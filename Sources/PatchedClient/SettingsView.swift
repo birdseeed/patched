@@ -44,14 +44,18 @@ public enum NotificationPermission: Equatable, Sendable { case unknown, notDeter
 
 /// The Settings window: Open at login, how checking works, notifications and the version, as a grouped form.
 public struct SettingsView: View {
-    public static let scheduleText = String(localized: "Patched checks for updates when it opens and every 3 hours. It never installs anything on its own.")
+    public static let scheduleText = String(localized: "Patched checks for updates when it opens and every 3 hours. It only installs updates on its own if you turn on automatic updates below.")
+    public static let automaticDetailText = String(localized: "Once a day at this time, or at the first check after it (within 6 hours, and not past midnight), Patched installs updates for apps you can replace without admin rights, after the same checks as Update All. It skips open apps, Patched itself, installer packages, App Store apps, hidden apps and apps that need admin rights. You can roll back any update.")
+    @ObservedObject private var automaticUpdates: AutomaticUpdateSettings
     @ObservedObject private var openAtLogin: OpenAtLoginController
     @ObservedObject private var notifications: NotificationStatusController
     private let openNotificationSettings: () -> Void
     private let version: String?
 
     public init(openAtLogin: OpenAtLoginController, notifications: NotificationStatusController,
+                automaticUpdates: AutomaticUpdateSettings,
                 version: String?, openNotificationSettings: @escaping () -> Void) {
+        self.automaticUpdates = automaticUpdates
         self.openAtLogin = openAtLogin
         self.notifications = notifications
         self.version = version
@@ -66,6 +70,21 @@ public struct SettingsView: View {
             Section(header: Text("Checking for updates")) {
                 Text(verbatim: Self.scheduleText).fixedSize(horizontal: false, vertical: true)
             }
+            Section(header: Text("Automatic updates")) {
+                Toggle(isOn: Binding(get: { automaticUpdates.isEnabled }, set: { automaticUpdates.setEnabled($0) })) {
+                    Text("Install updates automatically")
+                }
+                .disabled(automaticUpdates.enabledLocked)
+                DatePicker(selection: timeBinding, displayedComponents: .hourAndMinute) { Text("Time") }
+                    .disabled(automaticUpdates.timeLocked || !automaticUpdates.isEnabled)
+                if automaticUpdates.enabledLocked || automaticUpdates.timeLocked {
+                    Text(verbatim: AutomaticUpdateSettings.lockedNote).foregroundStyle(.secondary)
+                }
+                if automaticUpdates.managedValueIgnored {
+                    Text(verbatim: AutomaticUpdateSettings.invalidNote).foregroundStyle(.secondary)
+                }
+                Text(verbatim: Self.automaticDetailText).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
             Section(header: Text("Notifications")) {
                 Text(verbatim: notifications.statusText).fixedSize(horizontal: false, vertical: true)
                 Button(action: openNotificationSettings) { Text("Open Notification Settings") }
@@ -77,10 +96,21 @@ public struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .onAppear { openAtLogin.refresh(); notifications.refresh() }
+        .onAppear { openAtLogin.refresh(); notifications.refresh(); automaticUpdates.refresh() }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            openAtLogin.refresh(); notifications.refresh()
+            openAtLogin.refresh(); notifications.refresh(); automaticUpdates.refresh()
         }
+    }
+
+    /// The picker works in dates; the setting is an hour and minute.
+    private var timeBinding: Binding<Date> {
+        Binding(get: {
+            let time = automaticUpdates.time
+            return Calendar.current.date(bySettingHour: time.hour, minute: time.minute, second: 0, of: Date()) ?? Date()
+        }, set: { date in
+            let parts = Calendar.current.dateComponents([.hour, .minute], from: date)
+            if let time = TimeOfDay(hour: parts.hour ?? 2, minute: parts.minute ?? 0) { automaticUpdates.setTime(time) }
+        })
     }
 }
 
@@ -92,6 +122,7 @@ public struct NativeClientSettingsView: View {
 
     public var body: some View {
         SettingsView(openAtLogin: session.openAtLogin, notifications: session.notificationStatus,
+                     automaticUpdates: session.automaticUpdates,
                      version: NativeClientSession.appVersion, openNotificationSettings: { session.openNotificationSettings() })
             .frame(width: 460)
             .fixedSize(horizontal: false, vertical: true)

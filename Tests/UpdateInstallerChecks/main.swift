@@ -264,7 +264,9 @@ func installer(_ box: Sandbox, downloader: FakeDownloader = FakeDownloader(), ve
                     }, atCheckpoint: { name in
                         if name == crashAtCheckpoint { throw SimulatedCrash(phase: name) }
                     }),
-                    quitTimeout: 1, unpackBudget: budget, forceCopyBackup: forceCopyBackup, diskImageDetacher: detacher)
+                    quitTimeout: 1, unpackBudget: budget, forceCopyBackup: forceCopyBackup, diskImageDetacher: detacher,
+                    // Self Service checks install into <sandbox>/home/Applications; recovery must accept only that folder.
+                    selfServiceRoot: box.root + "/home/Applications")
 }
 
 /// Installed v1 at Applications/Example.app and a v2 zip served at https://example.test/v2.zip.
@@ -1843,6 +1845,7 @@ check("no shell anywhere and processes only through the fixed-path runner") {
 }
 
 registerAdminChecks()
+registerSelfServiceChecks()
 registerSelfUpdateChecks()
 
 // Run only the temporary-root migration checks when requested explicitly.

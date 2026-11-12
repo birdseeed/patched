@@ -161,10 +161,17 @@ import UserNotifications
     }
 
     /// Posts the summary only when notifications are already authorised; never asks.
-    public func notify(summary: UpdateAllSummary) {
+    public func notify(summary: UpdateAllSummary) { post(summary: summary, title: String(localized: "Update All finished")) }
+
+    /// The summary after an automatic run at the chosen time.
+    public func notify(automaticSummary: UpdateAllSummary) {
+        post(summary: automaticSummary, title: String(localized: "Updated automatically"))
+    }
+
+    private func post(summary: UpdateAllSummary, title: String) {
         guard runsFromAppBundle else { return }
         let content = UNMutableNotificationContent()
-        content.title = String(localized: "Update All finished")
+        content.title = title
         content.body = summary.text
         content.threadIdentifier = Self.requestIdentifier
         Task { @MainActor in

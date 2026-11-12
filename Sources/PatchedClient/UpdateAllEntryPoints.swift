@@ -6,7 +6,8 @@ import Combine
 // `AppUpdatesController.updateAll()`, which rescans and rechecks each app before installing, skips open
 // apps, never passes admin consent and refuses while checking, working or blocked. Open apps are quit only
 // after the run, when `confirmOpenApps` asks once and the user agrees; with no answer they are left alone.
-// The scheduler never reaches this file: it holds only `check()`.
+// The scheduler never reaches this file. Its only way to install is the opt-in automatic run, which calls
+// `AppUpdatesController.updateAll(automatic: true)` directly and posts `notify(automaticSummary:)`.
 
 /// What the Patched menu shows for Update All.
 public struct UpdateAllMenuState: Equatable, Sendable {
@@ -72,6 +73,12 @@ extension AppUpdatesController {
 /// Never asks for permission: it posts only when notifications are already authorised.
 @MainActor public protocol UpdateSummaryNotifying: AnyObject {
     func notify(summary: UpdateAllSummary)
+    /// The summary after an automatic run. Open apps were left alone and stay offered as normal.
+    func notify(automaticSummary: UpdateAllSummary)
+}
+
+extension UpdateSummaryNotifying {
+    public func notify(automaticSummary: UpdateAllSummary) { notify(summary: automaticSummary) }
 }
 
 /// Routes the menu item and the notification action to `AppUpdatesController.updateAll()`.
