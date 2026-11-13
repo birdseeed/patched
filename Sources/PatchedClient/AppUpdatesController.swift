@@ -1202,6 +1202,10 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
 
     // MARK: Ignoring
 
+    /// Whether the row's menu has a Hide item at all; `canIgnore` says whether it is enabled right now.
+    public func offersHide(_ row: AppUpdateRow) -> Bool {
+        editCatalogue != nil && row.bundleID != nil && !row.isIgnored && !row.isPatchedItself
+    }
     public func canIgnore(_ row: AppUpdateRow) -> Bool {
         editCatalogue != nil && row.bundleID != nil && !row.isIgnored && !row.isPatchedItself && canEditIgnore(row)
     }

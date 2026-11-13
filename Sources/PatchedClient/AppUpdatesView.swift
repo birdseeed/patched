@@ -170,15 +170,23 @@ private struct AppUpdateRowView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             actions
-            if controller.canIgnore(row) || row.rollbackVersion != nil {
+            // The menu keeps its place while another update runs (Hide is then disabled, not removed), and rows
+            // with no menu at all keep an invisible one, so every row's buttons line up.
+            if controller.offersHide(row) || row.rollbackVersion != nil {
                 Menu {
                     if let backup = row.rollbackVersion {
                         Button(action: { controller.rollBack(id: row.id) }) { Text("Roll back to \(backup)") }
                             .disabled(!controller.canRollBack(row))
                     }
-                    if controller.canIgnore(row) { Button("Hide") { controller.ignore(id: row.id) } }
+                    if controller.offersHide(row) {
+                        Button("Hide") { controller.ignore(id: row.id) }.disabled(!controller.canIgnore(row))
+                    }
                 } label: { Image(systemName: "ellipsis.circle").accessibilityLabel(Text("More actions for \(row.name)")) }
                     .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+            } else {
+                Menu {} label: { Image(systemName: "ellipsis.circle") }
+                    .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+                    .hidden().disabled(true).accessibilityHidden(true)
             }
         }
         .padding(.vertical, 10)

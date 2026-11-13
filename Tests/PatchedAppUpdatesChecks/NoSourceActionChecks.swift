@@ -172,6 +172,8 @@ private func mode(_ path: String) -> Int {
         // While a check is running nothing can be ignored.
         controller.check()
         try expect(!controller.canIgnore(try row("Alpha")), "ignored mid-check")
+        // ...but Hide stays in the row's menu, disabled, so the menu (and the row's buttons) don't move.
+        try expect(controller.offersHide(try row("Alpha")), "Hide removed mid-check, so the row's menu would vanish")
         await controller.waitUntilIdle()
     }
 
