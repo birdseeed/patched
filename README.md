@@ -253,6 +253,54 @@ Patched also requires its own updates to be signed by Team ID `Y9352JY7U8` and
 notarised, so a release needs both the release key and the Developer ID. Patched
 never updates itself from the disk image.
 
+## Uninstall
+
+Dragging Patched to the Trash leaves its data behind on purpose. The most important
+part is the rollback backups: the previous version of each app Patched has updated,
+which can add up to several gigabytes and may be the only copy of that version.
+
+1. If you can still open Patched or run its command-line tool, finish anything
+   interrupted first:
+
+   ```sh
+   /Applications/Patched.app/Contents/Helpers/patched recover
+   /Applications/Patched.app/Contents/Helpers/patched backups
+   ```
+
+   To keep the backups, copy `~/Library/Application Support/Patched/Updater/backups`
+   somewhere safe.
+
+2. In Patched's Settings, turn off **Open Patched when I log in**, then quit Patched.
+   If it is still listed in System Settings > General > Login Items, remove it there.
+
+3. Move Patched to the Trash. If you installed it with Homebrew, run
+   `brew uninstall --cask patched` and `brew untap birdseeed/patched` instead
+   (`brew uninstall --zap --cask patched` also deletes all of Patched's data,
+   backups included, so it replaces step 4).
+
+4. Delete Patched's data:
+
+   ```sh
+   rm -rf ~/Library/Application\ Support/Patched ~/Library/Application\ Support/mac-updater
+   rm -f ~/Library/Application\ Support/.patched-state-migration.json \
+         ~/Library/Application\ Support/.patched-state-migration.lock \
+         ~/Library/Application\ Support/.patched-state-migration.lease
+   rm -rf ~/Library/Caches/Patched ~/Library/Caches/mac-updater ~/Library/Logs/Patched
+   defaults delete im.patched.app 2>/dev/null || true
+   launchctl bootout "gui/$(id -u)/im.patched.check" 2>/dev/null || true
+   rm -f ~/Library/LaunchAgents/im.patched.check.plist
+   ```
+
+   The last two lines only matter if you set up the optional scheduled check.
+
+5. If `/Applications` or `~/Applications` has a hidden folder named
+   `.patched-self-update-…` or `.mac-updater-…` (press Shift-Command-. in Finder to
+   show hidden files), delete it only if it holds no app you still need: a
+   self-update folder that contains Patched may be the previous version.
+
+Patched installs no helper, daemon or keychain item. If your organisation manages
+Patched with a configuration profile, leave that profile to them.
+
 ## Command-line interface
 
 The command is `patched`. The supported command shapes are:
