@@ -53,8 +53,8 @@ Create a local release archive, checksum and signature with:
 
 ```sh
 /bin/bash scripts/release.sh
-(cd dist && shasum -a 256 -c Patched-0.2.2.zip.sha256)
-(cd dist && shasum -a 256 -c Patched-0.2.2.dmg.sha256)
+(cd dist && shasum -a 256 -c Patched-0.2.3.zip.sha256)
+(cd dist && shasum -a 256 -c Patched-0.2.3.dmg.sha256)
 ```
 
 This produces `dist/Patched-<version>.zip`, `.zip.sha256` and `.zip.sig`, and a

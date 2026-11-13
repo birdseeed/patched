@@ -2024,11 +2024,14 @@ check("no shell anywhere and processes only through the fixed-path runner") {
         }
     }
     try expectEqual(ProcessRunner.allowedTools, ["/usr/bin/ditto", "/usr/bin/hdiutil", "/usr/sbin/spctl",
-                                                 "/usr/sbin/pkgutil", "/usr/bin/open", "/usr/bin/codesign"])
+                                                 "/usr/sbin/pkgutil", "/usr/bin/open", "/usr/bin/codesign", "/bin/launchctl"])
     // `pkgutil` is only for the admin path; `open` for the admin path and for reopening Patched after its own
     // update; `codesign` (verify only) for that self-update. Nothing else names them.
     for relative in files where relative.hasSuffix(".swift") && relative.hasPrefix("UpdateInstaller/") {
         let text = try String(contentsOfFile: sources.path + "/" + relative, encoding: .utf8)
+        if relative != "UpdateInstaller/Uninstall.swift" && relative != "UpdateInstaller/ProcessRunner.swift" {
+            try expect(!text.contains("/bin/launchctl"), "\(relative) runs launchctl")
+        }
         if relative != "UpdateInstaller/AdminUpdates.swift" && relative != "UpdateInstaller/ProcessRunner.swift" {
             try expect(!text.contains("/usr/sbin/pkgutil"), "\(relative) runs an admin-only tool")
             if relative != "UpdateInstaller/SelfUpdate.swift" {
@@ -2050,6 +2053,9 @@ if Array(CommandLine.arguments.dropFirst()) == ["--migration"] { cases.removeAll
 let realVerifierOnly = Array(CommandLine.arguments.dropFirst()) == ["--real-verifier-only"]
 if realVerifierOnly { cases.removeAll { !$0.0.hasPrefix("real verifier:") } }
 if !realVerifierOnly { registerMigrationChecks() }
+// `--uninstall` runs only the uninstall checks (and the full run includes them).
+if Array(CommandLine.arguments.dropFirst()) == ["--uninstall"] { cases.removeAll() }
+if CommandLine.arguments.count == 1 || CommandLine.arguments.dropFirst() == ["--uninstall"] { registerUninstallChecks() }
 
 // MARK: Runner
 

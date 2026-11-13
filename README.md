@@ -259,6 +259,27 @@ Dragging Patched to the Trash leaves its data behind on purpose. The most import
 part is the rollback backups: the previous version of each app Patched has updated,
 which can add up to several gigabytes and may be the only copy of that version.
 
+From 0.2.3 the easiest way is **Uninstall Patched…** in Patched's menu. It turns off
+Open at login, removes Patched's data, moves Patched to the Trash and quits. It asks
+whether to keep the backups (they stay in
+`~/Library/Application Support/Patched/Updater/backups`, so a reinstalled Patched can
+still roll back) or delete them. The command line does the same:
+
+```sh
+patched uninstall --dry-run        # list everything, change nothing
+patched uninstall                  # keeps rollback backups
+patched uninstall --delete-backups
+```
+
+It also takes `--keep-logs`, `--keep-app` (data only) and `--yes` for scripts. Both
+refuse, and change nothing, while an update is unfinished: run `patched recover` first.
+For a Homebrew install they remove the data but leave the app to
+`brew uninstall --cask patched` and `brew untap birdseeed/patched`. If you have made
+one of Patched's folders a symbolic link, uninstall refuses rather than follow it:
+remove the link yourself.
+
+To uninstall by hand, or if Patched is already gone:
+
 1. If you can still open Patched or run its command-line tool, finish anything
    interrupted first:
 

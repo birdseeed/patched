@@ -230,6 +230,8 @@ public struct NativeClientMenuItem: Equatable, Identifiable, Sendable {
         case openUpdates
         case updateAll, stopUpdating, cancelQueuedUpdateAll
         case checkNow, settings, quit
+        /// "Uninstall Patched…": asks in an alert, then removes Patched's files and the app.
+        case uninstall
         /// "Update Patched to X…": asks first, in an alert, and installs only once that is confirmed.
         case updatePatched
         case downloadPatched
@@ -299,6 +301,7 @@ extension NativeClientSession {
         command("open", String(localized: "Open Patched"), .openUpdates)
         command("check", String(localized: "Check Now"), .checkNow, enabled: updates.canCheck, shortcut: "r")
         command("settings", String(localized: "Settings…"), .settings, shortcut: ",")
+        command("uninstall", String(localized: "Uninstall Patched…"), .uninstall, enabled: runsFromAppBundle)
         separator("quit-separator")
         command("quit", String(localized: "Quit Patched"), .quit, shortcut: "q")
         text("background", menuText.backgroundStatus)
@@ -326,16 +329,19 @@ public struct NativeClientMenuView: View {
     private let openWindow: () -> Void
     private let openSettings: () -> Void
     private let confirmSelfUpdate: @MainActor (String) -> Bool
+    private let startUninstall: @MainActor () -> Void
 
     /// `openSettings` shows the standard Settings window; the app supplies it from its scene environment.
     /// `confirmSelfUpdate` asks before Patched updates itself; by default an alert whose default button is Cancel.
     public init(session: NativeClientSession, openWindow: @escaping () -> Void, openSettings: @escaping () -> Void = {},
-                confirmSelfUpdate: @escaping @MainActor (String) -> Bool = NativeClientMenuView.askInAlert) {
+                confirmSelfUpdate: @escaping @MainActor (String) -> Bool = NativeClientMenuView.askInAlert,
+                startUninstall: @escaping @MainActor () -> Void = { Task { await UninstallFlow.system().run() } }) {
         self.session = session
         self.updates = session.appUpdates
         self.openWindow = openWindow
         self.openSettings = openSettings
         self.confirmSelfUpdate = confirmSelfUpdate
+        self.startUninstall = startUninstall
     }
 
     public var body: some View {
@@ -387,6 +393,7 @@ public struct NativeClientMenuView: View {
         case .checkNow: session.performMenuAction(.checkNow)
         case .settings: openSettings()
         case .quit: NSApplication.shared.terminate(nil)
+        case .uninstall: startUninstall()
         case .updatePatched: session.requestSelfUpdateFromMenu(confirm: confirmSelfUpdate)
         case .downloadPatched: updates.downloadSelfUpdate()
         case .dismissPatchedFailure: updates.cancelSelfUpdate()

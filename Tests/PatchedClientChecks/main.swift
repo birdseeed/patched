@@ -141,6 +141,8 @@ if CommandLine.arguments.count == 1 { registerRealStateTripwireChecks() }
 
 if CommandLine.arguments.count == 1 { registerWindowPresenceChecks() }
 
+if CommandLine.arguments.count == 1 { registerUninstallFlowChecks() }
+
 var failures = 0
 for (name, action) in cases {
     do { try await action(); print("PASS client: \(name)") }

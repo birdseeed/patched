@@ -383,6 +383,20 @@ which fails safe.
   download and staging folders, leaving the app and its backups as they were. After
   the commit point there is no Cancel, and a late one is ignored, so the swap and
   its verification always run to a verified result or a verified swap back.
+- **Uninstall.** `patched uninstall` and the app's Uninstall Patched… delete only Patched's
+  own files: its Application Support, Caches and Logs folders (and the older `mac-updater`
+  ones), its state migration files, the optional check LaunchAgent (booted out first), its
+  user defaults, empty `.patched-self-update-*` and `.mac-updater-*` staging folders, and
+  last the app, which goes to the Bin. It plans first and plans again before deleting, and
+  refuses, deleting nothing, while any journal is unfinished or has cleanup pending, while a
+  migration is unfinished, while a staging folder holds an app or is named by a journal, while
+  another copy of Patched is running, or when a folder it would delete is a symlink (symlinks
+  are never followed, and nothing outside the Patched folders is touched). There is no force
+  option; the way forward is `patched recover`. Backups are kept in place by default so a
+  reinstalled Patched can still roll back; they are deleted only with `--delete-backups`
+  or the Delete Backups button. Managed preferences are never read or changed, an app
+  installed by Homebrew is left for `brew uninstall --cask patched`, and the login item can
+  only be removed by the app itself or by the user in System Settings.
 
 ## State migration
 

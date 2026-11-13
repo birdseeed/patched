@@ -31,7 +31,7 @@ public enum ProcessRunner {
     /// `open` (hands a verified package to Apple's Installer) are used by the admin path; `codesign` (verify
     /// only) and `open` (reopen the new Patched) by Patched's self-update.
     public static let allowedTools: Set<String> = ["/usr/bin/ditto", "/usr/bin/hdiutil", "/usr/sbin/spctl",
-                                                   "/usr/sbin/pkgutil", "/usr/bin/open", "/usr/bin/codesign"]
+                                                   "/usr/sbin/pkgutil", "/usr/bin/open", "/usr/bin/codesign", "/bin/launchctl"]
     static let captureLimit = 256 * 1024
 
     private final class Verdict: @unchecked Sendable {

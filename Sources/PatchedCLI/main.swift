@@ -26,6 +26,15 @@ usage: patched check [--json] [--app <path>] [--explain <app path | bundle ID>]
          from an affected bundle to quit first.
        patched backups
          Lists backups.
+       patched uninstall [--dry-run] [--delete-backups] [--keep-logs] [--keep-app] [--yes] [--json]
+         Removes Patched's settings, caches, logs, optional check schedule and (last) the app itself.
+         Backups of updated apps are kept unless you add --delete-backups. --dry-run lists every path
+         with its size and what would happen, and removes nothing. It refuses, removing nothing, while
+         an update is unfinished (run `patched recover`) or Patched is running. On a terminal it asks you
+         to type uninstall; elsewhere it needs --yes. If the app came from Homebrew it is left for
+         `brew uninstall --cask patched`. It cannot remove the login item: if Patched is listed in
+         System Settings > General > Login Items, remove it there. Exits 0 when done or for a dry run,
+         1 when blocked or refused, 2 for a usage error.
        patched catalogue list
          Shows the Self Service catalogue your organisation set on this Mac (the managed preference
          SelfServiceCatalogue for im.patched.app) and whether each entry is valid. Read-only: nothing
@@ -36,9 +45,15 @@ usage: patched check [--json] [--app <path>] [--explain <app path | bundle ID>]
 
 var arguments = Array(CommandLine.arguments.dropFirst())
 // `admin-probe` is hidden and experimental: see scripts/admin-probe-runbook.md.
-guard let command = arguments.first, ["check", "update", "rollback", "recover", "backups", "catalogue", "admin-probe"].contains(command) else { fail(usage, code: 2) }
+guard let command = arguments.first, ["check", "update", "rollback", "recover", "backups", "catalogue", "uninstall", "admin-probe"].contains(command) else { fail(usage, code: 2) }
 arguments.removeFirst()
 var asJSON = false, quitIfRunning = false, dryRun = false, all = false
+var deleteBackups = false, keepLogs = false, keepApp = false, assumeYes = false
+// Hidden, for testing `uninstall`: stand in for ~/Library and Patched.app, and touch no launchd, defaults or Bin.
+/// The isolated uninstall flags (--library-root, --app-bundle, --applications-root) point uninstall at other
+/// folders. They exist only for the checks, so a shipped `patched` accepts them only under the test gate.
+let isolatedUninstallAllowed = ProcessInfo.processInfo.environment["PATCHED_FORBID_REAL_STATE"] == "1"
+var libraryRoot: String?, appBundleOverride: String?
 var appPath: String?
 var explainTarget: String?
 var positional: [String] = []
@@ -53,7 +68,19 @@ while !arguments.isEmpty {
     switch argument {
     case "--json": asJSON = true
     case "--quit" where command == "update" || command == "rollback" || command == "recover": quitIfRunning = true
-    case "--dry-run" where command == "update": dryRun = true
+    case "--dry-run" where command == "update" || command == "uninstall": dryRun = true
+    case "--delete-backups" where command == "uninstall": deleteBackups = true
+    case "--keep-logs" where command == "uninstall": keepLogs = true
+    case "--keep-app" where command == "uninstall": keepApp = true
+    case "--yes" where command == "uninstall": assumeYes = true
+    case "--library-root" where command == "uninstall":
+        guard isolatedUninstallAllowed else { fail("unknown argument --library-root", code: 2) }
+        guard !arguments.isEmpty else { fail("--library-root needs a folder", code: 2) }
+        libraryRoot = absolute(arguments.removeFirst())
+    case "--app-bundle" where command == "uninstall":
+        guard isolatedUninstallAllowed else { fail("unknown argument --app-bundle", code: 2) }
+        guard !arguments.isEmpty else { fail("--app-bundle needs a path", code: 2) }
+        appBundleOverride = absolute(arguments.removeFirst())
     case "--all" where command == "update": all = true
     case "--app" where command == "check":
         guard !arguments.isEmpty else { fail("--app needs a path\n" + usage, code: 2) }
@@ -62,6 +89,8 @@ while !arguments.isEmpty {
         guard !arguments.isEmpty else { fail("--explain needs an app path or bundle ID\n" + usage, code: 2) }
         explainTarget = arguments.removeFirst()
     case "--applications-root":
+        // Only uninstall gates it: check, update, rollback and backups have always taken it.
+        guard command != "uninstall" || isolatedUninstallAllowed else { fail("unknown argument --applications-root", code: 2) }
         guard !arguments.isEmpty else { fail("--applications-root needs a folder", code: 2) }
         applicationsRoot = absolute(arguments.removeFirst())
     case "--state-root":
@@ -143,6 +172,19 @@ let fetcher = URLSessionFetcher()
         do { locations = try InstallerLocations.standard() } catch { fail("\(error)", code: 1) }
     }
     return locations
+}
+
+/// The Patched.app this command runs from (or that is installed in /Applications or ~/Applications), if any.
+func ownAppBundle() -> String? {
+    func isPatched(_ path: String) -> Bool { (try? BundleFacts.read(bundleAt: path))?.bundleID == Uninstall.bundleID }
+    if let executable = Bundle.main.executableURL.flatMap({ FileSafety.realPath($0.path) }),
+       let range = executable.range(of: ".app/Contents/") {
+        let bundle = String(executable[..<range.lowerBound]) + ".app"
+        if isPatched(bundle) { return bundle }
+    }
+    var candidates = ["/Applications/Patched.app"]
+    if let home = NSHomeDirectoryForUser(NSUserName()) { candidates.append(home + "/Applications/Patched.app") }
+    return candidates.first(where: isPatched)
 }
 
 /// Privileged replacement is off unless its hidden flag or PATCHED_ENABLE_ADMIN_UPDATES=1 turns it on. .pkg
@@ -332,6 +374,73 @@ case "admin-probe":
     }
     guard adminUpdates else { fail("admin-probe needs \(AdminUpdateFlag.commandLineFlag) or \(AdminUpdateFlag.environmentVariable)=1", code: 2) }
     exit(await AdminProbe.replaceFakeApp())
+
+case "uninstall":
+    guard positional.isEmpty else { fail(usage, code: 2) }
+    let uninstallOptions = Uninstall.Options(deleteBackups: deleteBackups, keepLogs: keepLogs, keepApp: keepApp)
+    let uninstallRoots: Uninstall.Roots
+    let uninstallServices: Uninstall.Services
+    if let libraryRoot {
+        uninstallRoots = Uninstall.Roots(library: libraryRoot, appBundle: appBundleOverride,
+                                         applicationFolders: applicationsRoot.map { [$0] } ?? [], homebrewPrefixes: [])
+        // Isolated: no launchd, no real user defaults, no Bin, and no other-copy check.
+        uninstallServices = Uninstall.Services(
+            bootOutAgent: { _ in true },
+            removeDefaults: { _ in try? FileManager.default.removeItem(atPath: libraryRoot + "/Preferences/" + Uninstall.bundleID + ".plist") },
+            runningInstances: { [] }, trash: { _ in throw InstallRefusal.io("no Bin in an isolated run") }, deleteIfTrashFails: true)
+    } else {
+        do {
+            var bundle = appBundleOverride
+            if bundle == nil { bundle = ownAppBundle() }
+            var roots = try Uninstall.Roots.standard(appBundle: bundle)
+            if let applicationsRoot { roots.applicationFolders = [applicationsRoot] }
+            uninstallRoots = roots
+        } catch { fail("\(error)", code: 1) }
+        uninstallServices = .system(excludingPID: nil, deleteIfTrashFails: true)
+    }
+    let uninstallPlan = Uninstall.plan(roots: uninstallRoots, options: uninstallOptions, services: uninstallServices)
+    func planJSON(_ plan: Uninstall.Plan) -> [String: Any] {
+        ["blocked": plan.isBlocked, "dryRun": dryRun,
+         "items": plan.items.map { ["path": $0.path, "kind": $0.kind.rawValue, "status": $0.status.rawValue, "bytes": $0.bytes, "reason": $0.reason] as [String: Any] },
+         "blockers": plan.blockers.map { ["message": $0.message, "paths": $0.paths] as [String: Any] },
+         "backups": ["locations": plan.backupLocations, "bytes": plan.backupBytes, "deleted": plan.willDeleteBackups] as [String: Any],
+         "homebrewManaged": plan.homebrewManaged, "brewCommands": plan.homebrewManaged ? Uninstall.brewCommands : []]
+    }
+    func printJSON(_ object: [String: Any]) {
+        guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]) else { fail("could not encode JSON", code: 1) }
+        FileHandle.standardOutput.write(data); print()
+    }
+    if dryRun {
+        if asJSON { printJSON(planJSON(uninstallPlan)) } else { print(uninstallPlan.report()); print("\nDry run: nothing was removed.") }
+        exit(0)
+    }
+    if uninstallPlan.isBlocked {
+        if asJSON { printJSON(planJSON(uninstallPlan)) } else { print(uninstallPlan.report()); print("\nNothing was removed.") }
+        exit(1)
+    }
+    if !assumeYes {
+        guard isatty(STDIN_FILENO) != 0 else { fail("patched uninstall asks for confirmation on a terminal; here, add --yes to go ahead. Nothing was removed.", code: 1) }
+        print(uninstallPlan.report())
+        FileHandle.standardOutput.write(Data("\nType uninstall to continue: ".utf8))
+        guard readLine()?.trimmingCharacters(in: .whitespaces) == "uninstall" else { fail("Cancelled. Nothing was removed.", code: 1) }
+    }
+    let uninstallResult = Uninstall.execute(roots: uninstallRoots, options: uninstallOptions, services: uninstallServices)
+    if let refused = uninstallResult.refused {
+        print(refused.report()); print("\nNothing was removed."); exit(1)
+    }
+    if asJSON {
+        printJSON(["done": uninstallResult.isSuccess, "removed": uninstallResult.removed, "failures": uninstallResult.failures,
+                   "warnings": uninstallResult.warnings, "appRemoved": uninstallResult.appRemoved,
+                   "brewCommands": uninstallResult.homebrewAdvice == nil ? [] : Uninstall.brewCommands])
+    } else {
+        for path in uninstallResult.removed { print("removed \(path)") }
+        for warning in uninstallResult.warnings { print("warning: \(warning)") }
+        for failure in uninstallResult.failures { print("could not remove \(failure)") }
+        if let advice = uninstallResult.homebrewAdvice { print(advice) }
+        print(uninstallResult.isSuccess ? "Patched's files were removed." : "Some files could not be removed; run patched uninstall again.")
+        print(Uninstall.loginItemAdvice)
+    }
+    exit(uninstallResult.isSuccess ? 0 : 1)
 
 case "backups":
     guard positional.isEmpty else { fail(usage, code: 2) }
