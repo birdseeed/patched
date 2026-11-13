@@ -49,7 +49,8 @@ import UpdateSources
     // default suppresses setup to preserve every older fixture's paint contract.
     @_spi(Testing) public init(navigation: ShellNavigation, firstRun: NativeFirstRunController? = nil,
         appUpdates: AppUpdatesController? = nil, urlOpener: (any ExternalURLOpening)? = nil,
-        notificationStatus: NotificationStatusController? = nil, selfService: SelfServiceController? = nil) {
+        notificationStatus: NotificationStatusController? = nil, selfService: SelfServiceController? = nil,
+        automaticUpdates: AutomaticUpdateSettings? = nil) {
         let setup = firstRun ?? NativeFirstRunController(navigation: navigation, completion: MemorySetupCompletion(completed: true))
         precondition(setup.navigation === navigation, "Testing first-run owners must match the session")
         self.navigation = navigation
@@ -65,7 +66,7 @@ import UpdateSources
         self.urlOpener = opener
         self.openAtLogin = OpenAtLoginController(item: UnavailableLoginItem())
         self.notificationStatus = notificationStatus ?? NotificationStatusController(reader: { $0(.unknown) })
-        self.automaticUpdates = AutomaticUpdateSettings(store: MemoryAutomaticUpdateStore(), managed: ManagedPreferences(reader: NoManagedPreferences()))
+        self.automaticUpdates = automaticUpdates ?? AutomaticUpdateSettings(store: MemoryAutomaticUpdateStore(), managed: ManagedPreferences(reader: NoManagedPreferences()))
         self.backgroundChecks = nil
         self.updateNotifier = nil
         self.updateAllEntry = UpdateAllEntryPoint(controller: self.appUpdates, summaryNotifier: nil)
@@ -105,7 +106,7 @@ public struct NativeClientRootView: View {
     public var body: some View {
         Group {
             if firstRun.isPresented {
-                NativeFirstRunView(controller: session.firstRun)
+                NativeFirstRunView(controller: session.firstRun, automaticUpdates: session.automaticUpdates)
             } else {
                 shell
             }

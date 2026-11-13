@@ -303,10 +303,7 @@ public struct AppUpdateRow: Identifiable, Equatable, Sendable {
             }
         case .notInstallable:
             if let block = outcome?.edSignatureBlock { return block.message }
-            if case .homebrewCask? = outcome?.source, outcome?.lowConfidence == true {
-                return String(localized: "Homebrew (unconfirmed) — add a catalogue entry to enable updates")
-            }
-            return String(localized: "Update found, but the source isn't confirmed. Add a catalogue entry to enable updates.")
+            return String(localized: "Update found, but Patched can't confirm where it comes from, so it won't install it. Update it from the app itself.")
         case .packageUnsupported: return String(localized: "Installer package updates are turned off")
         case .appStoreUpdate: return String(localized: "Update in the App Store")
         case .noSource:
@@ -1589,7 +1586,8 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
                 if !report.leftovers.isEmpty { lines.append(String(localized: "  could not remove: \(report.leftovers.joined(separator: ", "))")) }
             case .failure(let refusal):
                 if case .appRunning = refusal { running = true }
-                lines.append(String(localized: "\((report.targetPath as NSString).lastPathComponent): refused [\(refusal.code)] \(refusal.message)"))
+                let appName = ((report.targetPath as NSString).lastPathComponent as NSString).deletingPathExtension
+                lines.append("\(appName): " + PlainRefusalText.text(name: appName, refusal))
             }
         }
         if lines.isEmpty { lines = [String(localized: "Nothing to recover.")] }
@@ -1648,7 +1646,7 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
             note: report.note)
     }
 
-    nonisolated static func refusalResult(name: String, _ refusal: InstallRefusal, format: ArtifactFormat?) -> AppUpdateRow.Result {
+    @_spi(Testing) nonisolated public static func refusalResult(name: String, _ refusal: InstallRefusal, format: ArtifactFormat?) -> AppUpdateRow.Result {
         switch refusal {
         case .needsAdmin:
             return .init(kind: .info, text: String(localized: "\(name): \(AppUpdateRow.needsAdminCaption)"))
@@ -1658,8 +1656,7 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
             return .init(kind: .info, text: format == .pkg ? String(localized: "\(name): Installer package updates are turned off")
                                                         : String(localized: "\(name): This download format is not supported yet"))
         default:
-            return .init(kind: .failure, text: OutcomeText.line(name: name, status: "refused", from: nil, to: nil,
-                backupFolder: nil, reason: refusal.code, detail: refusal.message))
+            return .init(kind: .failure, text: PlainRefusalText.text(name: name, refusal))
         }
     }
 

@@ -13,11 +13,28 @@ public protocol RunningAppControlling: Sendable {
     /// Contents/MacOS). They need not be `NSRunningApplication` instances, so `quit` cannot ask them to go.
     /// The installer refuses while one runs and names it; it never kills a process.
     func bundleProcesses(path: String) -> [BundleProcess]
+    /// Asks the nested background app running as `pid` to quit, politely (`NSRunningApplication.terminate`, never a
+    /// force-terminate and never a signal), and waits up to `timeout`. Returns true when it is gone. Only called
+    /// for a process classified `.quittable`, and only when the user allowed quitting.
+    func quitProcess(pid: pid_t, timeout: TimeInterval) async -> Bool
 }
 
 extension RunningAppControlling {
     /// Controllers that do not look for helper processes find none.
     public func bundleProcesses(path: String) -> [BundleProcess] { [] }
+    /// Controllers that cannot ask a helper to quit leave it running (so it keeps blocking).
+    public func quitProcess(pid: pid_t, timeout: TimeInterval) async -> Bool { false }
+}
+
+/// How a process running from inside a bundle affects a zip/dmg swap.
+public enum HelperClass: Sendable, Equatable {
+    /// An app extension or a crash reporter: never blocks the swap and is never asked to quit.
+    case ignorable
+    /// The main executable of a nested `.app`: asked to quit like the app itself when quitting is allowed,
+    /// otherwise it blocks.
+    case quittable
+    /// An XPC service, daemon or bare tool: blocks, and is never asked to quit.
+    case other
 }
 
 /// A process whose executable lives inside an app bundle.
@@ -25,6 +42,11 @@ public struct BundleProcess: Sendable, Equatable {
     public let pid: pid_t
     public let executablePath: String
     public init(pid: pid_t, executablePath: String) { self.pid = pid; self.executablePath = executablePath }
+
+    /// What this process means for a swap of `bundle`. Pure: looks only at the path.
+    public func classification(inBundle bundle: String) -> HelperClass {
+        BundleProcessScan.classify(executable: executablePath, bundle: bundle)
+    }
 
     /// "Helper (pid 123)" style text for a refusal: the executable's path inside the bundle, so the user can see
     /// which helper it is.
@@ -49,6 +71,24 @@ public enum BundleProcessScan {
     public static func isInside(executable: String, bundle: String) -> Bool {
         let root = normalised(bundle).lowercased() + "/"
         return executable.lowercased().hasPrefix(root) && executable.count > root.count
+    }
+
+    /// Classifies an executable inside `bundle` (see `HelperClass`). An executable outside the bundle is `.other`.
+    public static func classify(executable: String, bundle: String) -> HelperClass {
+        guard isInside(executable: executable, bundle: bundle) else { return .other }
+        let rootLength = normalised(bundle).count + 1
+        let relative = String(executable.dropFirst(rootLength))
+        let parts = relative.split(separator: "/", omittingEmptySubsequences: true).map { $0.lowercased() }
+        guard let name = parts.last else { return .other }
+        // Extensions (widgets, share sheets) are relaunched by macOS from the new bundle; crash reporters hold nothing.
+        if parts.dropLast().contains(where: { $0.hasSuffix(".appex") }) { return .ignorable }
+        if name == "crashpad_handler" || name == "chrome_crashpad_handler" { return .ignorable }
+        // A nested app: <something>.app/Contents/MacOS/<executable>, not inside an XPC service or a framework
+        // (Sparkle's updater lives in a framework and stays a blocker).
+        if parts.contains(where: { $0.hasSuffix(".xpc") || $0.hasSuffix(".framework") }) { return .other }
+        if parts.count >= 4, parts[parts.count - 2] == "macos", parts[parts.count - 3] == "contents",
+           parts[parts.count - 4].hasSuffix(".app") { return .quittable }
+        return .other
     }
 
     /// The pure part: the processes among `pids` whose executable (from `pathOf`) is inside `bundle`.
@@ -102,6 +142,15 @@ public struct WorkspaceRunningApps: RunningAppControlling {
     }
 
     public func bundleProcesses(path: String) -> [BundleProcess] { BundleProcessScan.processes(inBundle: path) }
+
+    public func quitProcess(pid: pid_t, timeout: TimeInterval) async -> Bool {
+        await QuitPolling.waitUntilNoneRemain(timeout: timeout, interval: 0.25,
+            enumerate: { NSRunningApplication(processIdentifier: pid).flatMap { $0.isTerminated ? nil : [pid] } ?? [] },
+            requestQuit: { pid in
+                // Polite only: never forceTerminate.
+                _ = NSRunningApplication(processIdentifier: pid)?.terminate()
+            })
+    }
 
     public func quit(bundleID: String, path: String, timeout: TimeInterval) async -> Bool {
         await QuitPolling.waitUntilNoneRemain(timeout: timeout, interval: 0.25,

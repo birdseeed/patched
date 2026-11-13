@@ -46,6 +46,10 @@ restore data.
 - Sparkle EdDSA public keys shipped inside installed apps.
 - The update feeds (Sparkle, Electron, Homebrew), but only to say where to
   download from. Everything they say is checked against the above.
+- The built-in feed list (a few Sparkle feeds compiled into Patched, for apps that
+  pin a Sparkle key but set their feed at runtime). An entry only locates a feed:
+  the Team ID and the app's EdDSA key are still enforced, so a wrong or hostile
+  entry cannot install anything the app's own pins reject.
 - Apple's public App Store lookup (https, size-capped, strictly parsed), only to
   report a newer version of a Mac App Store app. It sends those apps' bundle IDs to
   Apple and nobody else, and its answer can never install anything (`app_store_managed`).
@@ -349,12 +353,31 @@ which fails safe.
   `Contents/Library/LoginItems`, XPC services, and tools in `Contents/MacOS` however
   they were launched, symlinks included), using `proc_listallpids` and `proc_pidpath`.
   The bundle path is compared with a trailing "/", so `Foo.app` never matches
-  `Foo.app2`. Such a helper is not an app instance and cannot be asked to quit, so
-  the update is refused with `app_running` and the message names the helper and its
-  pid, even with `--quit`; you quit it yourself. The sweep runs before the download,
-  again before the app is quit, once more after the quit (helpers get a few seconds
-  to follow the app out) and a last time immediately before the swap. It is
+  `Foo.app2`. Each such process is put in one of three classes, and nothing is ever
+  killed or signalled. An *ignorable* process (anything inside an app extension, a
+  `.appex`, such as a widget; or a crash reporter named `crashpad_handler` or
+  `chrome_crashpad_handler`) never blocks a zip or dmg swap: macOS relaunches extensions
+  from the new bundle and crash reporters hold nothing. It is not asked to quit either.
+  A *quittable* process is the main executable of a nested `.app` (a login item or a sync
+  service). With `--quit` (or the Updates screen's quit consent) it is asked to quit
+  politely, exactly like the app (`NSRunningApplication.terminate`, never a force
+  terminate), waited for up to the quit timeout, and the bundle is looked at again; without
+  that consent it blocks. A nested app that Patched itself quit is reopened afterwards,
+  from the new bundle once the update is verified or from the unchanged bundle if the
+  update is refused or fails, and nothing Patched did not quit is ever reopened. Every *other* process (XPC services, daemons, bare tools,
+  Sparkle's updater, anything inside a framework) blocks, even with `--quit`: the update is
+  refused with `helper_running`, naming it and its pid, and you quit it yourself. Rollback
+  and recovery treat ignorable processes the same way; recovery never asks a nested app to
+  quit, and rollback does so only under the same consent it needs to quit the app. The sweep
+  runs before the download (nested apps are not yet asked to quit), again before the app is
+  quit, once more after the quit (helpers get a few seconds to follow the app out) and a
+  last time immediately before the swap, all with the same classification. It is
   best-effort: it sees only processes the current user may inspect.
+- **Helpers and `.pkg` updates.** `.pkg` updates do not refuse on helpers running from inside
+  the bundle (an updater daemon, a sync service), because Apple's Installer and the package's
+  own scripts replace the app and manage its background processes. The app itself must still be
+  quit: a running instance is refused with `app_running`, or asked to quit with `--quit`, as
+  for any update. The zip and dmg swap, rollback and recovery keep the helper classes above.
 - **Cancelling.** A single update can be cancelled from its row until the commit
   point (the quit and swap). Cancelling stops the download or unpacking and removes the
   download and staging folders, leaving the app and its backups as they were. After

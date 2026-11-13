@@ -135,7 +135,7 @@ private final class CountingFetcher: HTTPFetching, @unchecked Sendable {
         await controller.waitUntilIdle()
         try expect(fetcher.fetches == 1, "install fetched \(fetcher.fetches) times")
         guard case .failed(let text) = controller.rows[0].state else { throw CheckFailure(description: "\(controller.rows[0].state)") }
-        try expect(text.hasPrefix("Alpha: refused [not_installable] not installable: could not find the latest version of Alpha"), text)
+        try expect(text == "Alpha couldn't be installed. Nothing was changed.", text)
         try expect(!FileManager.default.fileExists(atPath: base + "/home/Applications"), "created ~/Applications without installing")
     }
 
@@ -261,7 +261,7 @@ private final class CountingFetcher: HTTPFetching, @unchecked Sendable {
         controller.install(id: alpha)
         await controller.waitUntilIdle()
         guard case .failed(let text) = controller.rows[0].state else { throw CheckFailure(description: "\(controller.rows[0].state)") }
-        try expect(text == "Alpha: refused [signature_invalid] code signature check failed: not signed by Team ID AAAAAAAAAA", text)
+        try expect(text == "The download didn't pass Patched's security checks, so nothing was changed." && !text.contains("AAAAAAAAAA"), text)
         try expect(controller.canInstall(controller.rows[0]), "a failed install cannot be retried")
         try expect(SelfServiceController.refusalText(name: "Alpha", .destinationExists("x"))
                    == "Alpha is already in your Applications folder, so nothing was changed. Use Updates to keep it up to date.", "exists text")

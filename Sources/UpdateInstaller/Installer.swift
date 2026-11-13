@@ -153,7 +153,12 @@ public struct UpdateInstaller: Sendable {
     public var adminUpdatesEnabled: Bool { adminPath?.allowsReplacement == true }
     public var packageUpdatesEnabled: Bool { adminPath?.allowsPackages == true }
 
-    var engine: SwapEngine {
+    var engine: SwapEngine { makeEngine(allowHelpers: false) }
+
+    /// `allowHelpers` is only for the `.pkg` path: Apple's Installer and the package's own scripts manage the
+    /// processes running from inside the bundle, so only app instances block there. Everything else refuses
+    /// on helpers as always.
+    func makeEngine(allowHelpers: Bool) -> SwapEngine {
         let apps = runningApps
         return SwapEngine(locations: locations, verifier: verifier, hooks: hooks, forceCopyBackup: forceCopyBackup,
                           runningCheck: { bundleID, paths in
@@ -163,7 +168,8 @@ public struct UpdateInstaller: Sendable {
                                       throw InstallRefusal.appRunning("\((path as NSString).lastPathComponent) is running from \(path) (pid \(pids.map(String.init).joined(separator: ", ")))")
                                   }
                                   // Helpers inside the bundle (login items, XPC services, tools) are not app instances.
-                                  let helpers = apps.bundleProcesses(path: path)
+                                  if allowHelpers { continue }
+                                  let helpers = Self.blockingHelpers(apps.bundleProcesses(path: path), bundle: path)
                                   if !helpers.isEmpty { throw Self.helperRefusal(name: (path as NSString).lastPathComponent, path: path, helpers) }
                               }
                           },
@@ -172,12 +178,24 @@ public struct UpdateInstaller: Sendable {
     }
     var store: JournalStore { JournalStore(directory: locations.transactions) }
 
+    /// The processes that stop a swap: everything except app extensions and crash reporters (`.ignorable`). With
+    /// `tolerateQuittable`, nested background apps are left out too, for an early check where quitting is allowed
+    /// and they will be asked to quit just before the swap.
+    static func blockingHelpers(_ processes: [BundleProcess], bundle: String, tolerateQuittable: Bool = false) -> [BundleProcess] {
+        processes.filter {
+            switch $0.classification(inBundle: bundle) {
+            case .ignorable: return false
+            case .quittable: return !tolerateQuittable
+            case .other: return true
+            }
+        }
+    }
+
     /// A process running from inside the bundle that cannot be asked to quit (it is not an app instance).
     /// Patched refuses and names it; it never kills anything.
     static func helperRefusal(name: String, path: String, _ helpers: [BundleProcess]) -> InstallRefusal {
-        .helperRunning("\(name) has a helper process running from inside it that Patched can't ask to quit: "
-                    + helpers.map { $0.description(inBundle: path) }.joined(separator: "; ")
-                    + ". Quit it yourself, then try again")
+        .helperRunning(HelperRefusalDetail.make(name: name,
+                                                helpers: helpers.map { $0.description(inBundle: path) }))
     }
 
     // MARK: Step 1: preconditions
@@ -395,7 +413,9 @@ public struct UpdateInstaller: Sendable {
     // MARK: Step 7: running app
 
     /// Returns whether the app was running (and has now quit).
-    func ensureNotRunning(_ target: InstallTarget, quit: Bool) async throws -> Bool {
+    /// With `allowHelpers` (the `.pkg` path only) processes running from inside the bundle that are not app
+    /// instances never cause a refusal; the app itself is still refused or asked to quit exactly as before.
+    func ensureNotRunning(_ target: InstallTarget, quit: Bool, allowHelpers: Bool = false, nested: NestedQuits? = nil) async throws -> Bool {
         let running = runningApps.runningInstances(bundleID: target.facts.bundleID, path: target.path)
         if !running.isEmpty {
             guard quit else { throw InstallRefusal.appRunning("\(target.name) (pid \(running.map(String.init).joined(separator: ", ")))") }
@@ -403,8 +423,9 @@ public struct UpdateInstaller: Sendable {
                 throw InstallRefusal.appWouldNotQuit("\(target.name) is still running after \(Int(quitTimeout)) s")
             }
         }
+        if allowHelpers { return !running.isEmpty }
         do {
-            try await ensureNoHelpers(name: target.name, path: target.path, grace: running.isEmpty ? 0 : min(quitTimeout, 3))
+            try await ensureNoHelpers(name: target.name, path: target.path, grace: running.isEmpty ? 0 : min(quitTimeout, 3), quit: quit, nested: nested)
         } catch {
             // The app was quit for this update, but a helper (a login item, say) is still running from inside the
             // bundle, so nothing will be installed: reopen the app rather than leave it closed. The bundle has not
@@ -415,16 +436,58 @@ public struct UpdateInstaller: Sendable {
         return !running.isEmpty
     }
 
-    /// Refuses while any process runs from inside the bundle. After the app itself was asked to quit, its helpers
-    /// get `grace` seconds to follow it out before they count.
-    func ensureNoHelpers(name: String, path: String, grace: TimeInterval) async throws {
-        var helpers = runningApps.bundleProcesses(path: path)
+    /// Refuses while a blocking process runs from inside the bundle (app extensions and crash reporters never
+    /// block). After the app itself was asked to quit, its helpers get `grace` seconds to follow it out before
+    /// they count. With `quit` (the user allowed quitting), a nested background app that is still running is
+    /// then asked to quit politely, like the app, and the bundle is looked at again. With `deferQuittable`,
+    /// nested background apps are left for the later quit step instead of counting now.
+    func ensureNoHelpers(name: String, path: String, grace: TimeInterval, quit: Bool = false, deferQuittable: Bool = false,
+                         nested: NestedQuits? = nil) async throws {
+        func blockers() -> [BundleProcess] {
+            Self.blockingHelpers(runningApps.bundleProcesses(path: path), bundle: path, tolerateQuittable: deferQuittable)
+        }
+        var helpers = blockers()
         let deadline = Date().addingTimeInterval(grace)
         while !helpers.isEmpty, Date() < deadline {
             try? await Task.sleep(nanoseconds: 100_000_000)
-            helpers = runningApps.bundleProcesses(path: path)
+            helpers = blockers()
         }
-        if !helpers.isEmpty { throw Self.helperRefusal(name: name, path: path, helpers) }
+        if quit, !deferQuittable, !helpers.isEmpty {
+            let asked = helpers.filter { $0.classification(inBundle: path) == .quittable }
+            for helper in asked {
+                if let relative = Self.nestedAppRelativePath(of: helper, bundle: path) { nested?.add(relative) }
+                _ = await runningApps.quitProcess(pid: helper.pid, timeout: quitTimeout)
+            }
+            if !asked.isEmpty { helpers = blockers() }
+        }
+        if !helpers.isEmpty {
+            // Refused after Patched quit some nested apps: put them back from the unchanged bundle.
+            if let nested { await relaunchNested(nested.paths, bundle: path) }
+            throw Self.helperRefusal(name: name, path: path, helpers)
+        }
+    }
+
+    /// "Contents/Foo.app" for the nested app whose main executable `process` is, relative to `bundle`.
+    static func nestedAppRelativePath(of process: BundleProcess, bundle: String) -> String? {
+        guard process.classification(inBundle: bundle) == .quittable else { return nil }
+        let root = BundleProcessScan.normalised(bundle) + "/"
+        let parts = String(process.executablePath.dropFirst(root.count)).split(separator: "/").map(String.init)
+        return parts.count >= 4 ? parts.dropLast(3).joined(separator: "/") : nil
+    }
+
+    /// Reopens nested apps that Patched itself asked to quit, from `bundle` (the new bundle after a verified
+    /// update, the unchanged one after a refusal). Skips one that is already running again (the app's own
+    /// relaunch may have started it) or that is not a real `.app` folder there. Never opens anything else.
+    func relaunchNested(_ relatives: [String], bundle: String) async {
+        guard !relatives.isEmpty else { return }
+        let running = runningApps.bundleProcesses(path: bundle)
+        for relative in relatives where relative.lowercased().hasSuffix(".app") {
+            let full = BundleProcessScan.normalised(bundle) + "/" + relative
+            guard (try? FileManager.default.attributesOfItem(atPath: full))?[.type] as? FileAttributeType == .typeDirectory else { continue }
+            let marker = "/" + relative.lowercased() + "/"
+            if running.contains(where: { $0.executablePath.lowercased().contains(marker) }) { continue }
+            await runningApps.relaunch(path: full)
+        }
     }
 
     // MARK: Guards shared by update and rollback
@@ -522,7 +585,8 @@ public struct UpdateInstaller: Sendable {
         } else if !options.dryRun && runningApps.runningInstances(bundleID: target.facts.bundleID, path: target.path).isEmpty {
             // Quitting is allowed, but the app is not open: a helper running now won't go away when the app
             // quits, so refuse before downloading anything.
-            try await ensureNoHelpers(name: target.name, path: target.path, grace: 0)
+            // A nested background app is not a reason to stop here: it is asked to quit just before the swap.
+            try await ensureNoHelpers(name: target.name, path: target.path, grace: 0, deferQuittable: true)
         }
 
         let id = UUID().uuidString
@@ -628,7 +692,8 @@ public struct UpdateInstaller: Sendable {
     /// unresolved transaction leaves the app stopped and says to run `recover`.
     func commitAndRelaunch(_ journal: inout TransactionJournal, target: InstallTarget, staged: BundleFacts,
                            status: InstallReport.Status, quit: Bool) async throws -> InstallReport {
-        let wasRunning = try await ensureNotRunning(target, quit: quit)
+        let nested = NestedQuits()
+        let wasRunning = try await ensureNotRunning(target, quit: quit, nested: nested)
         let result: EngineResult
         do {
             result = try engine.commit(&journal) {
@@ -637,7 +702,7 @@ public struct UpdateInstaller: Sendable {
                 if !running.isEmpty {
                     throw InstallRefusal.appRunning("\(target.name) was started again (pid \(running.map(String.init).joined(separator: ", ")))")
                 }
-                let helpers = runningApps.bundleProcesses(path: target.path)
+                let helpers = Self.blockingHelpers(runningApps.bundleProcesses(path: target.path), bundle: target.path)
                 if !helpers.isEmpty { throw Self.helperRefusal(name: target.name, path: target.path, helpers) }
             }
         } catch let crash as SimulatedCrash {
@@ -645,17 +710,20 @@ public struct UpdateInstaller: Sendable {
         } catch {
             // Thrown before the swap: the target was never touched. Relaunch only if it still verifies.
             if wasRunning, (try? engine.verifyOld(target.path, journal)) != nil { await runningApps.relaunch(path: target.path) }
+            await relaunchNested(nested.paths, bundle: target.path)
             throw error
         }
         switch result.outcome {
         case .installedVerified:
             if wasRunning { await runningApps.relaunch(path: target.path) }
+            await relaunchNested(nested.paths, bundle: target.path)
             return InstallReport(status: status, bundleID: target.facts.bundleID, path: target.path,
                                  fromVersion: target.versionText,
                                  toVersion: InstallTarget.versionText(staged.shortVersion, staged.build),
                                  backupFolder: journal.backupDir, relaunched: wasRunning, leftovers: result.leftovers)
         case .restoredVerified:
             if wasRunning { await runningApps.relaunch(path: target.path) }
+            await relaunchNested(nested.paths, bundle: target.path)
             throw result.refusal ?? InstallRefusal.verificationFailedAfterSwap("restored")
         case .unresolved:
             throw result.refusal ?? InstallRefusal.unresolved("journal \(journal.id)")
@@ -765,4 +833,46 @@ public struct UpdateInstaller: Sendable {
     }
 
     public func newestBackup(bundleID: String) -> BackupRecord? { backups(bundleID: bundleID).first }
+}
+
+
+/// The detail text of `InstallRefusal.helperRunning`, built and read back in one place so the app can show
+/// plain helper names without copying the technical wording.
+public enum HelperRefusalDetail {
+    static let marker = "has a helper process running from inside it that Patched can't ask to quit: "
+    static let suffix = ". Quit it yourself, then try again"
+
+    public static func make(name: String, helpers: [String]) -> String {
+        "\(name) " + marker + helpers.joined(separator: "; ") + suffix
+    }
+
+    /// Friendly names of the helpers in a `helperRunning` detail: the outermost `.app`, `.xpc` or `.appex` name,
+    /// else the executable's name, without extension, no pids or paths, in order and without repeats.
+    public static func friendlyNames(in detail: String) -> [String] {
+        guard let range = detail.range(of: marker) else { return [] }
+        var list = String(detail[range.upperBound...])
+        if list.hasSuffix(suffix) { list.removeLast(suffix.count) }
+        var names: [String] = []
+        for entry in list.components(separatedBy: "; ") {
+            var path = entry
+            if let pid = path.range(of: " (pid ", options: .backwards) { path = String(path[..<pid.lowerBound]) }
+            let parts = path.split(separator: "/").map(String.init)
+            let bundleExtensions = [".app", ".xpc", ".appex"]
+            let chosen = parts.first(where: { part in bundleExtensions.contains { part.lowercased().hasSuffix($0) } }) ?? parts.last ?? ""
+            var name = chosen
+            for ext in bundleExtensions where name.lowercased().hasSuffix(ext) { name.removeLast(ext.count) }
+            if !name.isEmpty, !names.contains(name) { names.append(name) }
+        }
+        return names
+    }
+}
+
+
+/// Relative paths ("Contents/Foo.app") of the nested background apps that Patched asked to quit during one
+/// update, so only those are reopened afterwards.
+final class NestedQuits: @unchecked Sendable {
+    private let lock = NSLock()
+    private var list: [String] = []
+    var paths: [String] { lock.withLock { list } }
+    func add(_ relative: String) { lock.withLock { if !list.contains(relative) { list.append(relative) } } }
 }

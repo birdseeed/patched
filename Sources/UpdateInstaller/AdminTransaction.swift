@@ -433,7 +433,7 @@ extension UpdateInstaller {
         if !options.dryRun { try requireInteractive(consent) }
         let lock = try begin(target)
         defer { withExtendedLifetime(lock) {} }
-        if !options.dryRun && !options.quitIfRunning { _ = try await ensureNotRunning(target, quit: false) }
+        if !options.dryRun && !options.quitIfRunning { _ = try await ensureNotRunning(target, quit: false, allowHelpers: true) }
         var initial = privilegedJournal(.update, target: target, format: .pkg)
         initial.viaInstaller = true
         initial.offer = StoredOffer(offer)
@@ -457,7 +457,7 @@ extension UpdateInstaller {
                                      fromVersion: target.versionText, toVersion: offered, backupFolder: nil,
                                      relaunched: false, privileged: true)
             }
-            let wasRunning = try await ensureNotRunning(target, quit: options.quitIfRunning)
+            let wasRunning = try await ensureNotRunning(target, quit: options.quitIfRunning, allowHelpers: true)
             var backupProblem: String?
             do {
                 journal.phase = .backingUp
@@ -474,7 +474,7 @@ extension UpdateInstaller {
                 guard (try? PackageFile.sha256Hex(artifact.path)) == artifact.sha256Hex else {
                     throw InstallRefusal.hashMismatch("the package changed after it was verified")
                 }
-                try engine.runningCheck(target.facts.bundleID, [target.path])
+                try makeEngine(allowHelpers: true).runningCheck(target.facts.bundleID, [target.path])
                 journal.phase = .prepared
                 try engine.write(&journal)
                 try consent.path.opener.openInstaller(forPackageAt: artifact.path)

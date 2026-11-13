@@ -363,8 +363,7 @@ public struct SelfServiceRow: Identifiable, Equatable, Sendable {
         case .destinationExists: return String(localized: "\(name) is already in your Applications folder, so nothing was changed. Use Updates to keep it up to date.")
         case .unsupportedFormat: return String(localized: "\(name): this download format is not supported by Self Service.")
         default:
-            return OutcomeText.line(name: name, status: "refused", from: nil, to: nil, backupFolder: nil,
-                                    reason: refusal.code, detail: refusal.message)
+            return PlainRefusalText.text(name: name, refusal, installing: true)
         }
     }
 

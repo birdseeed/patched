@@ -347,6 +347,44 @@ func signedWorld(signature: String) throws -> FakeFetcher {
     let xml = String(data: try fixture("appcast-realistic.xml"), encoding: .utf8)!.replacingOccurrences(of: "ED2500SIG==", with: signature)
     return FakeFetcher([sparkleFeedURL: .success(Data(xml.utf8))])
 }
+let codexFeed = URL(string: "https://persistent.oaistatic.com/codex-app-prod/appcast.xml")!
+func builtInWorld() throws -> FakeFetcher {
+    let xml = String(data: try fixture("appcast-realistic.xml"), encoding: .utf8)!.replacingOccurrences(of: "ED2500SIG==", with: edSignature64)
+    return FakeFetcher([codexFeed.absoluteString: .success(Data(xml.utf8)),
+                        "https://release.files.ghostty.org/appcast.xml": .success(Data(xml.utf8))])
+}
+check("built-in catalogue: a pinned app with no SUFeedURL resolves to the built-in Sparkle feed") {
+    let checker = try await makeChecker(try builtInWorld())
+    let codex = app("ChatGPT", id: "com.openai.codex", short: "1.0", build: "100", key: edKey)
+    let outcome = await checker.checkOne(codex)
+    try expectEqual(outcome.source, .sparkle(feed: codexFeed))
+    guard case .updateAvailable = outcome.result else { throw CheckFailure(description: "expected update, got \(outcome.result)") }
+    try expect(outcome.installable && outcome.edSignatureBlock == nil, "signed built-in Sparkle offer should be installable")
+    let (_, lines) = await checker.explain(codex)
+    try expect(lines.contains { $0.hasPrefix("built-in catalogue: entry for com.openai.codex -> sparkle ") && $0.contains(codexFeed.absoluteString) }, "explain: \(lines)")
+    let ghostty = await checker.checkOne(app("Ghostty", id: "com.mitchellh.ghostty", key: edKey))
+    try expectEqual(ghostty.source, .sparkle(feed: URL(string: "https://release.files.ghostty.org/appcast.xml")!))
+}
+check("built-in catalogue: the user's catalogue entry (source or ignore) wins; other apps are unaffected") {
+    let world = try builtInWorld()
+    let codex = app("ChatGPT", id: "com.openai.codex", key: edKey)
+    let source = UserCatalogue(entries: ["com.openai.codex": .source(.homebrewCask(token: "example"))])
+    try expectEqual(await (try await makeChecker(world, catalogue: source)).checkOne(codex).source, .homebrewCask(token: "example"))
+    let ignore = UserCatalogue(entries: ["com.openai.codex": .ignore])
+    let ignored = await (try await makeChecker(world, catalogue: ignore)).checkOne(codex)
+    try expect(ignored.source == nil && ignored.noSourceReason == .ignored, "ignore should win: \(ignored.result)")
+    let other = await (try await makeChecker(world)).checkOne(app("Other", id: "com.example.other", key: edKey))
+    try expect(other.source == nil, "unrelated bundle ID must not get a built-in feed: \(String(describing: other.source))")
+    let (_, lines) = await (try await makeChecker(world)).explain(app("Other", id: "com.example.other", key: edKey))
+    try expect(!lines.contains { $0.contains("built-in") }, "unrelated explain: \(lines)")
+}
+check("built-in catalogue: every entry is an https Sparkle URL that parses") {
+    try expect(BuiltInCatalogue.feeds.count >= 2, "expected the built-in entries")
+    for (id, source) in BuiltInCatalogue.feeds {
+        guard case .sparkle(let url) = source else { throw CheckFailure(description: "\(id) is not a Sparkle source") }
+        try expect(url.scheme == "https" && url.host?.isEmpty == false && URL(string: url.absoluteString) == url, "\(id): \(url)")
+    }
+}
 check("checker: the installer's EdDSA rules are mirrored at check time") {
     let world = try fakeWorld()
     // A catalogue Homebrew source is not low confidence, so only the signature rule can make it uninstallable.

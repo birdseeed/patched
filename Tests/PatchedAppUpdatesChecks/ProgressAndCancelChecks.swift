@@ -31,7 +31,7 @@ private final class Flag: @unchecked Sendable {
         await runOperation(controller) { controller.update(id: path) }
         let row = controller.rows.first { $0.name == "Alpha" }!
         try expect(controller.pendingQuit == nil, "offered to quit for a helper: \(String(describing: controller.pendingQuit))")
-        try expect(row.result?.kind == .failure && row.result?.text.contains("helper") == true && row.result?.text.contains("--quit") == false,
+        try expect(row.result?.kind == .failure && row.result?.text == "Alpha is still running in the background. Quit Alpha (check the menu bar too), or restart your Mac, then try again.",
                    "row: \(String(describing: row.result))")
     }
 

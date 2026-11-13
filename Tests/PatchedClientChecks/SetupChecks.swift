@@ -49,7 +49,70 @@ private func legacyRecord(completed: Any?, networkDraft: Bool = true) throws -> 
     return try JSONSerialization.data(withJSONObject: record, options: [.sortedKeys])
 }
 
+private struct FirstRunManaged: ManagedPreferenceReading {
+    var forced: [String: Any] = [:]
+    func isForced(_ key: String) -> Bool { forced[key] != nil }
+    func forcedValue(forKey key: String) -> Any? { forced[key] }
+}
+/// The first-run switch over a fresh in-memory store (or a managed override), sharing the settings object with the session.
+@MainActor private func autoSwitch(time: String? = nil, managed: [String: Any] = [:])
+    -> (view: FirstRunAutomaticUpdatesView, store: MemoryAutomaticUpdateStore, settings: AutomaticUpdateSettings) {
+    let store = MemoryAutomaticUpdateStore()
+    if let time { store.time = TimeOfDay(string: time)! }
+    let settings = AutomaticUpdateSettings(store: store, managed: ManagedPreferences(reader: FirstRunManaged(forced: managed)))
+    return (FirstRunAutomaticUpdatesView(settings: settings), store, settings)
+}
+
 @MainActor func registerSetupChecks() {
+    check("setup: the automatic updates switch is off by default with an empty store") {
+        let s = autoSwitch()
+        try expect(!s.view.switchIsOn && !s.view.switchIsLocked && !s.store.enabled, "First-run switch did not start off and unlocked")
+    }
+    check("setup: turning the switch on writes enabled to the store Settings reads") {
+        let s = autoSwitch()
+        s.view.setSwitch(true)
+        try expect(s.store.enabled && s.view.switchIsOn && s.settings.isEnabled, "Switch did not write enabled=true")
+        s.view.setSwitch(false)
+        try expect(!s.store.enabled && !s.view.switchIsOn, "Switch did not write enabled=false")
+        let f = SetupFixture()
+        let session = NativeClientSession(navigation: f.navigation, firstRun: f.controller, automaticUpdates: s.settings)
+        try expect(session.automaticUpdates === s.settings, "Session does not share the settings object with first run")
+    }
+    check("setup: a managed value shows locked and the switch does not write") {
+        let on = autoSwitch(managed: [AutomaticUpdateSettings.enabledKey: true])
+        try expect(on.view.switchIsOn && on.view.switchIsLocked, "Managed on not shown as on and locked")
+        on.view.setSwitch(false)
+        try expect(on.view.switchIsOn && !on.store.enabled, "Locked switch changed or wrote")
+        let off = autoSwitch(managed: [AutomaticUpdateSettings.enabledKey: false])
+        off.view.setSwitch(true)
+        try expect(!off.view.switchIsOn && off.view.switchIsLocked && !off.store.enabled, "Managed off was overridden")
+        let bad = autoSwitch(managed: [AutomaticUpdateSettings.enabledKey: "yes"])
+        try expect(!bad.view.switchIsOn && bad.view.switchIsLocked && bad.settings.managedValueIgnored, "Invalid managed value not off, locked and flagged")
+    }
+    check("setup: the switch caption shows the current time setting") {
+        try expect(autoSwitch().view.captionText == "Once a day at 02:00. You can change the time in Settings.", "Default caption: \(autoSwitch().view.captionText)")
+        try expect(autoSwitch(time: "07:45").view.captionText == "Once a day at 07:45. You can change the time in Settings.", "Caption ignores a stored time")
+        let managed = autoSwitch(managed: [AutomaticUpdateSettings.timeKey: "23:30"])
+        try expect(managed.view.captionText == "Once a day at 23:30.", "A locked time still says it can be changed: \(managed.view.captionText)")
+    }
+    check("setup: the review step paints with the switch off and on, and the view wires the shared settings") {
+        let s = autoSwitch()
+        let f = SetupFixture()
+        let session = NativeClientSession(navigation: f.navigation, firstRun: f.controller, automaticUpdates: s.settings)
+        f.controller.advance()
+        let off = try setupPaint(session)
+        s.view.setSwitch(true)
+        let on = try setupPaint(session)
+        try expect(off != on, "Review step does not show the switch state")
+        let text = code(try source("Sources/PatchedClient/NativeFirstRunView.swift"))
+        for token in ["Install updates automatically", ".accessibilityLabel(\"Install updates automatically\")", "settings.setEnabled(", "AutomaticUpdateSettings.lockedNote",
+                      "AutomaticUpdateSettings.invalidNote", ".disabled(switchIsLocked)", "turn on automatic updates below"] {
+            try expect(text.contains(token), "First-run switch wiring absent: \(token)")
+        }
+        try expect(!text.contains("automatic updates in Settings"), "Stale point text remains")
+        let root = code(try source("Sources/PatchedClient/NativeClientSession.swift"))
+        try expect(root.contains("automaticUpdates: session.automaticUpdates"), "Root view does not pass the session settings")
+    }
     check("setup: a fresh install presents welcome; a completed setup is not presented again") {
         let fresh = SetupFixture()
         try expect(fresh.controller.isPresented && fresh.controller.step == .welcome && !fresh.controller.setupCompleted, "Fresh install skipped setup")

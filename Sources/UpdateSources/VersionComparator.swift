@@ -127,13 +127,34 @@ public enum SourceVersioning {
     /// than the short and the build has at least as many as the offer. Installed and downloaded bundles go
     /// through the same rule, so detection, matching and the downgrade guard agree. Everything else (App Store,
     /// Electron, Sparkle, build counters, offers one component longer than the short) keeps the short version.
+    ///
+    /// Microsoft style (OneDrive): short "26.198.1011", build "26198.1011.0006", cask "26.198.1011.0006". The
+    /// build is not an extension of the short, but it is the offer written with different dots. When short,
+    /// build and offer are all-numeric dotted, the short is a component prefix of the offer, and the build and
+    /// the offer have the same digits once the dots are removed (leading zeroes kept), the bundle is that
+    /// offered version. This applies only where the build does not already extend the short, so the rules
+    /// above are untouched.
     public static func bundleVersion(short: String?, build: String?, against offered: String, source: UpdateSource) -> String? {
         guard case .homebrewCask = source, let short, let build else { return short }
-        guard let s = numericParts(short), let b = numericParts(build), let o = numericParts(offered),
-              b.count > s.count, Array(b.prefix(s.count)) == s, o.count >= s.count, Array(o.prefix(s.count)) == s else { return short }
+        guard let s = numericParts(short), let b = numericParts(build), let o = numericParts(offered) else { return short }
+        guard b.count > s.count, Array(b.prefix(s.count)) == s, o.count >= s.count, Array(o.prefix(s.count)) == s else {
+            if o.count > s.count, Array(o.prefix(s.count)) == s, !(b.count > s.count && Array(b.prefix(s.count)) == s),
+               let offerDigits = dottedDigits(offered), let buildDigits = dottedDigits(build), offerDigits == buildDigits {
+                return offered
+            }
+            return short
+        }
         if b == o { return build }
         guard o.count >= s.count + 2, b.count >= o.count else { return short }
         return build
+    }
+
+    /// The digits of an all-numeric dotted version with the dots removed, leading zeroes kept. nil otherwise.
+    private static func dottedDigits(_ version: String) -> String? {
+        let stripped = VersionComparator.stripDecoration(version)
+        let parts = stripped.split(separator: ".", omittingEmptySubsequences: false)
+        guard !parts.isEmpty, parts.allSatisfy({ !$0.isEmpty && $0.allSatisfy { $0.isASCII && $0.isNumber } }) else { return nil }
+        return parts.joined()
     }
 
     /// Canonical all-numeric dotted version: the same decoration stripping the display comparator uses

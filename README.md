@@ -66,6 +66,8 @@ Notification Settings.
 
 Mac App Store apps are reported but never installed by Patched: it asks Apple's public App Store lookup for the latest version (only the bundle IDs of your App Store apps are sent, and only to Apple; hide an app on the Applications screen, or ignore it in the catalogue, to stop that) and tells you to update it in the App Store.
 
+Patched includes update feeds for a few apps that don't publish their own (ChatGPT and Ghostty); an entry in your own `catalogue.json` for the same app overrides them.
+
 Patched also tells you when a newer Patched release exists. On the same schedule (when it opens, every three hours and on Check Now) it makes a single anonymous request to GitHub for the latest release of this repository (`api.github.com/repos/birdseeed/patched/releases/latest`). The request carries no identifying data beyond a plain `Patched/<version>` User-Agent. If the release is newer than the app you are running, the menu and the Updates screen show "Patched 0.2.0 is available" with a **Download** button, and you get one notification per new version. Download opens that release's page on GitHub in your browser, only when you click it.
 
 Patched can also update itself, but only when you ask. Next to **Download** there is an **Update** button (and an **Update…** button on the notification). It asks "Update Patched to 0.2.0? Patched will quit and reopen." and does nothing until you confirm. Then it downloads that release's ZIP from GitHub, checks it against an Ed25519 signature made with my release key (the public half is built into Patched), checks the new app's bundle ID, version and code signature, swaps it in for the running Patched, keeps the previous version as a backup, and reopens. If any check fails, the installed Patched is left as it was. If replacing Patched would need administrator rights, it opens the release page instead. Scheduled checks, Update All and the command line never install Patched.
@@ -81,8 +83,8 @@ must be recovered before migration can finish. See
 
 ## Automatic updates at a set time
 
-Off by default. In Settings, "Install updates automatically" installs updates once a day at a
-time you choose (02:00 unless you change it). It is the one exception to "nothing installs
+Off by default. "Install updates automatically", in first-run setup and in Settings (the
+same setting), installs updates once a day at a time you choose (02:00 unless you change it). It is the one exception to "nothing installs
 until you choose Update", and it only happens if you switch it on.
 
 It installs what Update All installs: updates to apps you can replace without admin rights,

@@ -216,6 +216,25 @@ final class FakeRunningApps: RunningAppControlling, @unchecked Sendable {
         lock.withLock { helpers[path] = list; helpersAppearAfter = afterCalls; helperCalls = 0 }
     }
     func clearHelpers() { lock.withLock { helpers = [:] } }
+    private var lateBlockers: [String: BundleProcess] = [:]
+    /// Appears as soon as a nested app was quit (a blocker that starts while it shuts down).
+    func set(lateBlocker process: BundleProcess, at path: String) { lock.withLock { lateBlockers[path] = process } }
+    private(set) var processQuitRequests: [pid_t] = []
+    private var helpersObeyQuit = false
+    /// With `obey` a helper asked to quit via `quitProcess` goes away; by default it stays running.
+    func setHelpersObeyQuit(_ obey: Bool) { lock.withLock { helpersObeyQuit = obey } }
+    func quitProcess(pid: pid_t, timeout: TimeInterval) async -> Bool {
+        lock.withLock {
+            processQuitRequests.append(pid)
+            if helpersObeyQuit {
+                for key in helpers.keys {
+                    helpers[key]?.removeAll { $0.pid == pid }
+                    if let blocker = lateBlockers[key] { helpers[key]?.append(blocker) }
+                }
+            }
+            return helpersObeyQuit
+        }
+    }
     func bundleProcesses(path: String) -> [BundleProcess] {
         lock.withLock {
             helperCalls += 1
@@ -277,11 +296,16 @@ struct World {
     let archive: String
 }
 func world(format: ArtifactFormat = .zip, installedKey: String? = nil, newShort: String = "2.0", newBuild: String = "200",
-           newID: String = bundleID, newTeam: String = teamA) throws -> World {
+           newID: String = bundleID, newTeam: String = teamA, nestedApp: String? = nil) throws -> World {
     let box = try Sandbox()
     let target = try makeApp(at: box.apps + "/Example.app", short: "1.0", build: "100", edKey: installedKey)
     let source = box.fixtures + "/src"
     try makeApp(at: source + "/Example.app", id: newID, short: newShort, build: newBuild, team: newTeam, edKey: installedKey)
+    if let nestedApp {
+        for bundle in [target, source + "/Example.app"] {
+            try FileManager.default.createDirectory(atPath: bundle + "/" + nestedApp + "/Contents/MacOS", withIntermediateDirectories: true)
+        }
+    }
     let archive: String
     if format == .dmg {
         archive = box.fixtures + "/v2.dmg"
@@ -664,9 +688,9 @@ check("running helper: an app quit for the update is reopened when a helper bloc
     try expectEqual(running.relaunched, [], "relaunched an app that was never open")
 }
 
-check("running helper: a login item inside the bundle is refused by name, never asked to quit, and checked again before the swap") {
+check("running helper: an XPC service inside the bundle is refused by name, never asked to quit, and checked again before the swap") {
     let w = try world()
-    let helperPath = w.target + "/Contents/Library/LoginItems/Helper.app/Contents/MacOS/Helper"
+    let helperPath = w.target + "/Contents/XPCServices/Helper.xpc/Contents/MacOS/Helper"
     let helper = BundleProcess(pid: 777, executablePath: helperPath)
     let running = FakeRunningApps()
     running.set(helpers: [helper], at: w.target)
@@ -678,7 +702,7 @@ check("running helper: a login item inside the bundle is refused by name, never 
             throw CheckFailure(description: "updated under a running helper (quit=\(quit))")
         } catch let refusal as InstallRefusal {
             try expectEqual(refusal.code, "helper_running", "quit=\(quit): \(refusal)")
-            try expect(refusal.message.contains("Contents/Library/LoginItems/Helper.app/Contents/MacOS/Helper (pid 777)"), "helper not named: \(refusal.message)")
+            try expect(refusal.message.contains("Contents/XPCServices/Helper.xpc/Contents/MacOS/Helper (pid 777)"), "helper not named: \(refusal.message)")
         }
     }
     try expectEqual(running.quitRequests, 0, "a helper that is not an app instance was asked to quit")
@@ -694,6 +718,147 @@ check("running helper: a login item inside the bundle is refused by name, never 
     running.clearHelpers()
     let report = try await installer(w.box, downloader: w.downloader, running: running).update(appAt: w.target, offer: offer(url))
     try expectEqual(report.status, .installed); try expectEqual(try version(w.target), "2.0")
+}
+check("helper classes: extensions and crash reporters are ignorable, nested apps quittable, everything else blocks") {
+    let b = "/Applications/Foo.app"
+    func cls(_ rel: String, bundle: String = b) -> HelperClass { BundleProcessScan.classify(executable: bundle + "/" + rel, bundle: bundle) }
+    try expectEqual(cls("Contents/PlugIns/WordWidget_mac.appex/Contents/MacOS/WordWidget_mac"), .ignorable, "appex")
+    try expectEqual(cls("Contents/Frameworks/Electron Framework.framework/Helpers/chrome_crashpad_handler"), .ignorable, "chrome_crashpad_handler")
+    try expectEqual(cls("Contents/Frameworks/X.framework/Helpers/crashpad_handler"), .ignorable, "crashpad_handler")
+    try expectEqual(cls("Contents/Library/LoginItems/Agent.app/Contents/MacOS/Agent"), .quittable, "login item")
+    try expectEqual(cls("Contents/OneDrive Sync Service.app/Contents/MacOS/OneDrive Sync Service"), .quittable, "nested sync app")
+    try expectEqual(cls("Contents/StandaloneUpdaterDaemon.xpc/Contents/MacOS/StandaloneUpdaterDaemon"), .other, "xpc")
+    try expectEqual(cls("Contents/MacOS/Daemon"), .other, "bare tool")
+    try expectEqual(cls("Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate"), .other, "Sparkle Autoupdate")
+    try expectEqual(cls("Contents/Frameworks/Sparkle.framework/Versions/B/Updater.app/Contents/MacOS/Updater"), .other, "Sparkle Updater.app")
+    try expectEqual(BundleProcessScan.classify(executable: "/Applications/Bar.app/Contents/PlugIns/W.appex/Contents/MacOS/W", bundle: b), .other, "outside the bundle")
+    try expectEqual(BundleProcessScan.classify(executable: "/Applications/Foo.app2/Contents/Library/LoginItems/A.app/Contents/MacOS/A", bundle: b), .other, "sibling bundle")
+    try expectEqual(BundleProcess(pid: 1, executablePath: b + "/Contents/PlugIns/W.appex/Contents/MacOS/W").classification(inBundle: b + "/"), .ignorable, "trailing slash")
+}
+check("helper classes: a swap update goes ahead with only an extension and crash reporters running, and never asks them to quit") {
+    for quit in [false, true] {
+        let world = try world()
+        let r = FakeRunningApps()
+        r.set(helpers: [BundleProcess(pid: 11, executablePath: world.target + "/Contents/PlugIns/WordWidget_mac.appex/Contents/MacOS/WordWidget_mac"),
+                        BundleProcess(pid: 12, executablePath: world.target + "/Contents/MacOS/crashpad_handler")], at: world.target)
+        let report = try await installer(world.box, downloader: world.downloader, running: r)
+            .update(appAt: world.target, offer: offer("https://example.test/v2.zip"), options: UpdateOptions(quitIfRunning: quit))
+        try expectEqual(report.status, .installed, "quit=\(quit)")
+        try expectEqual(try version(world.target), "2.0")
+        try expectEqual(r.processQuitRequests, [], "an ignorable helper was asked to quit")
+    }
+}
+check("helper classes: a nested background app is asked to quit when quitting is allowed, then the update goes ahead") {
+    let w = try world()
+    let running = FakeRunningApps()
+    running.setHelpersObeyQuit(true)
+    running.set(helpers: [BundleProcess(pid: 1408, executablePath: w.target + "/Contents/OneDrive Sync Service.app/Contents/MacOS/OneDrive Sync Service"),
+                          BundleProcess(pid: 1410, executablePath: w.target + "/Contents/PlugIns/W.appex/Contents/MacOS/W")], at: w.target)
+    let report = try await installer(w.box, downloader: w.downloader, running: running)
+        .update(appAt: w.target, offer: offer("https://example.test/v2.zip"), options: UpdateOptions(quitIfRunning: true))
+    try expectEqual(report.status, .installed)
+    try expectEqual(running.processQuitRequests, [1408], "the nested app (and only it) should be asked to quit")
+    try expectEqual(running.quitRequests, 0, "the main app was not running")
+    try expectEqual(try version(w.target), "2.0")
+}
+check("helper classes: a nested background app that will not quit still refuses; without quit consent it is not asked and refuses") {
+    let nested = { (t: String) in BundleProcess(pid: 1408, executablePath: t + "/Contents/Library/LoginItems/Agent.app/Contents/MacOS/Agent") }
+    // Allowed, but it stays: asked once, then refused, nothing changed.
+    var w = try world()
+    var running = FakeRunningApps()
+    running.set(helpers: [nested(w.target)], at: w.target)
+    try await expectRefusal("helper_running") {
+        _ = try await installer(w.box, downloader: w.downloader, running: running)
+            .update(appAt: w.target, offer: offer("https://example.test/v2.zip"), options: UpdateOptions(quitIfRunning: true))
+    }
+    try expectEqual(running.processQuitRequests, [1408]); try expectEqual(try version(w.target), "1.0"); try expectClean(w.box)
+    // Not allowed: never asked, refused before downloading.
+    w = try world()
+    running = FakeRunningApps()
+    running.setHelpersObeyQuit(true)
+    running.set(helpers: [nested(w.target)], at: w.target)
+    try await expectRefusal("helper_running") {
+        _ = try await installer(w.box, downloader: w.downloader, running: running).update(appAt: w.target, offer: offer("https://example.test/v2.zip"))
+    }
+    try expectEqual(running.processQuitRequests, [], "asked to quit without consent")
+    try expectEqual(w.downloader.calls, 0)
+}
+check("nested relaunch: a nested app Patched quit is reopened from the new bundle after the update commits, main app closed or not") {
+    let rel = "Contents/OneDrive Sync Service.app"
+    for mainOpen in [false, true] {
+        let w = try world(nestedApp: rel)
+        let running = FakeRunningApps()
+        running.setHelpersObeyQuit(true)
+        if mainOpen { running.set(running: w.target, willQuit: true) }
+        running.set(helpers: [BundleProcess(pid: 1408, executablePath: w.target + "/" + rel + "/Contents/MacOS/OneDrive Sync Service")], at: w.target)
+        let report = try await installer(w.box, downloader: w.downloader, running: running)
+            .update(appAt: w.target, offer: offer("https://example.test/v2.zip"), options: UpdateOptions(quitIfRunning: true))
+        try expectEqual(report.status, .installed, "mainOpen=\(mainOpen)")
+        try expectEqual(running.processQuitRequests, [1408])
+        let expected = mainOpen ? [w.target, w.target + "/" + rel] : [w.target + "/" + rel]
+        try expectEqual(running.relaunched, expected, "mainOpen=\(mainOpen)")
+        try expectEqual(try version(w.target), "2.0")
+    }
+}
+check("nested relaunch: a nested app is not reopened when the new bundle lacks it") {
+    let rel = "Contents/Sync.app"
+    let gone = try world()
+    let r2 = FakeRunningApps()
+    r2.setHelpersObeyQuit(true)
+    r2.set(helpers: [BundleProcess(pid: 1408, executablePath: gone.target + "/" + rel + "/Contents/MacOS/Sync")], at: gone.target)
+    _ = try await installer(gone.box, downloader: gone.downloader, running: r2)
+        .update(appAt: gone.target, offer: offer("https://example.test/v2.zip"), options: UpdateOptions(quitIfRunning: true))
+    try expectEqual(r2.relaunched, [], "relaunched a nested app the new bundle does not have")
+}
+check("nested relaunch: a refusal after the nested app was quit reopens it from the unchanged bundle; nothing is reopened without consent") {
+    let rel = "Contents/OneDrive Sync Service.app"
+    let w = try world(nestedApp: rel)
+    let running = FakeRunningApps()
+    running.setHelpersObeyQuit(true)
+    // An XPC service already blocks at the early check, so the nested app is neither quit nor reopened.
+    running.set(helpers: [BundleProcess(pid: 1408, executablePath: w.target + "/" + rel + "/Contents/MacOS/OneDrive Sync Service"),
+                          BundleProcess(pid: 1409, executablePath: w.target + "/Contents/StandaloneUpdaterDaemon.xpc/Contents/MacOS/StandaloneUpdaterDaemon")], at: w.target)
+    try await expectRefusal("helper_running") {
+        _ = try await installer(w.box, downloader: w.downloader, running: running)
+            .update(appAt: w.target, offer: offer("https://example.test/v2.zip"), options: UpdateOptions(quitIfRunning: true))
+    }
+    try expectEqual(running.processQuitRequests, [], "quit a nested app although the update was already blocked")
+    try expectEqual(running.relaunched, [], "reopened an app Patched never quit")
+    try expectEqual(try version(w.target), "1.0"); try expectClean(w.box)
+    // A blocker that appears while the nested app shuts down refuses the update and reopens the nested app.
+    let late = try world(nestedApp: rel)
+    let r2 = FakeRunningApps()
+    r2.setHelpersObeyQuit(true)
+    r2.set(helpers: [BundleProcess(pid: 1408, executablePath: late.target + "/" + rel + "/Contents/MacOS/OneDrive Sync Service")], at: late.target)
+    r2.set(lateBlocker: BundleProcess(pid: 1409, executablePath: late.target + "/Contents/MacOS/Daemon"), at: late.target)
+    try await expectRefusal("helper_running") {
+        _ = try await installer(late.box, downloader: late.downloader, running: r2)
+            .update(appAt: late.target, offer: offer("https://example.test/v2.zip"), options: UpdateOptions(quitIfRunning: true))
+    }
+    try expectEqual(r2.relaunched, [late.target + "/" + rel], "not reopened after a late refusal")
+    try expectEqual(try version(late.target), "1.0"); try expectClean(late.box)
+    // No consent: never asked, never reopened.
+    let n = try world(nestedApp: rel)
+    let r3 = FakeRunningApps()
+    r3.setHelpersObeyQuit(true)
+    r3.set(helpers: [BundleProcess(pid: 1408, executablePath: n.target + "/" + rel + "/Contents/MacOS/OneDrive Sync Service")], at: n.target)
+    try await expectRefusal("helper_running") {
+        _ = try await installer(n.box, downloader: n.downloader, running: r3).update(appAt: n.target, offer: offer("https://example.test/v2.zip"))
+    }
+    try expectEqual(r3.processQuitRequests, []); try expectEqual(r3.relaunched, [], "relaunched something Patched did not quit")
+}
+check("helper classes: an XPC service still refuses with quit allowed and is never asked to quit") {
+    let w = try world()
+    let running = FakeRunningApps()
+    running.setHelpersObeyQuit(true)
+    running.set(helpers: [BundleProcess(pid: 1409, executablePath: w.target + "/Contents/StandaloneUpdaterDaemon.xpc/Contents/MacOS/StandaloneUpdaterDaemon"),
+                          BundleProcess(pid: 1408, executablePath: w.target + "/Contents/OneDrive Sync Service.app/Contents/MacOS/OneDrive Sync Service")], at: w.target)
+    try await expectRefusal("helper_running") {
+        _ = try await installer(w.box, downloader: w.downloader, running: running)
+            .update(appAt: w.target, offer: offer("https://example.test/v2.zip"), options: UpdateOptions(quitIfRunning: true))
+    }
+    try expect(!running.processQuitRequests.contains(1409), "the XPC service was asked to quit")
+    try expectEqual(try version(w.target), "1.0"); try expectClean(w.box)
 }
 check("running helper: a path-prefix match needs the bundle plus a slash") {
     let bundle = "/Applications/Foo.app"
@@ -1542,6 +1707,36 @@ check("v2#5 Electron prereleases: beta to release accepted, release offer with b
     // Same answer as Phase 1, from the same function.
     try expectEqual(SourceVersioning.isNewer(candidateShort: "2.0.0", candidateBuild: nil, installedShort: "2.0.0-beta.1",
                                              installedBuild: nil, source: electron), .success(true))
+}
+check("OneDrive-style versions: build is the cask version with different dots (same build is current, a newer one is offered and matched)") {
+    let cask = UpdateSource.homebrewCask(token: "onedrive")
+    func facts(_ short: String, _ build: String) -> BundleFacts { BundleFacts(bundleID: bundleID, shortVersion: short, build: build, sparklePublicEDKey: nil) }
+    let url = URL(string: "https://example.test/o.pkg")!
+    // Same build: not an update.
+    try expectEqual(SourceVersioning.isNewer(candidateShort: "26.198.1011.0006", candidateBuild: nil, installedShort: "26.198.1011",
+                                             installedBuild: "26198.1011.0006", source: cask), .success(false))
+    // A genuine newer cask version is offered.
+    try expectEqual(SourceVersioning.isNewer(candidateShort: "26.199.1012.0003", candidateBuild: nil, installedShort: "26.198.1011",
+                                             installedBuild: "26198.1011.0006", source: cask), .success(true))
+    // The downloaded newer app matches the offer and passes the version checks.
+    let offer = UpdateOffer(displayVersion: "26.199.1012.0003", downloadURL: url, format: .pkg, source: cask)
+    try expect(SourceVersioning.matchesOffer(offer, short: "26.199.1012", build: "26199.1012.0003"), "downloaded OneDrive should match its offer")
+    try UpdateInstaller.checkVersions(staged: facts("26.199.1012", "26199.1012.0003"), installed: facts("26.198.1011", "26198.1011.0006"), offer: offer)
+    // A different build of the same short is not the offer.
+    try expect(!SourceVersioning.matchesOffer(offer, short: "26.199.1012", build: "26199.1012.0004"), "wrong build matched")
+    // Digits equal but the short is not a prefix of the offer: unchanged (the short stays).
+    try expectEqual(SourceVersioning.bundleVersion(short: "27.198.1011", build: "26198.1011.0006", against: "26.198.1011.0006", source: cask), "27.198.1011")
+    // Digits equal but the build already extends the short: the existing rules decide, not the new one.
+    try expectEqual(SourceVersioning.bundleVersion(short: "1", build: "1.23", against: "1.2.3", source: cask), "1")
+    // Leading zeroes count: "26198.1011.6" is not "26.198.1011.0006".
+    try expectEqual(SourceVersioning.bundleVersion(short: "26.198.1011", build: "26198.1011.6", against: "26.198.1011.0006", source: cask), "26.198.1011")
+    // Other sources are unaffected.
+    for other in [UpdateSource.appStore(trackID: 1),
+                  .electron(feed: URL(string: "https://example.test/latest-mac.yml")!),
+                  .sparkle(feed: URL(string: "https://example.test/a.xml")!)] {
+        try expectEqual(SourceVersioning.bundleVersion(short: "26.198.1011", build: "26198.1011.0006", against: "26.198.1011.0006", source: other), "26.198.1011")
+    }
+    try expectEqual(SourceVersioning.bundleVersion(short: "26.198.1011", build: "26198.1011.0006", against: "26.198.1011.0006", source: cask), "26.198.1011.0006")
 }
 check("v2#6 full version in CFBundleVersion (Opera): offered, accepted, and up to date afterwards") {
     let cask = UpdateSource.homebrewCask(token: "opera")

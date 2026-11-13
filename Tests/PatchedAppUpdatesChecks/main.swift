@@ -212,7 +212,7 @@ check("rows: an unsigned offer for an app that pins SUPublicEDKey is not install
     guard let row = controller.rows.first else { throw CheckFailure(description: "no row") }
     try expect(row.status == .notInstallable, "status \(row.status)")
     try expect(row.kindNote == "Unsigned", "kindNote \(String(describing: row.kindNote))")
-    try expect(row.statusText == "Update found, but it isn't signed the way this app requires. Add a catalogue entry for the app's Sparkle feed to enable updates.", "statusText \(row.statusText)")
+    try expect(row.statusText == "Update found, but this app only accepts updates signed by its developer, and this source isn't. Update it from the app itself.", "statusText \(row.statusText)")
     try expect(!controller.canUpdate(row), "no Update button for an unsigned offer")
 }
 
@@ -267,7 +267,7 @@ check("update all continues past a failure and skips open apps without quitting 
         "update all must try every app in order, never quitting: \(installer.recorder.events)")
     @MainActor func row(_ n: String) -> AppUpdateRow { controller.rows.first { $0.name == n }! }
     try expect(row("Alpha").status == .upToDate && row("Delta").status == .upToDate, "later apps still updated")
-    try expect(row("Bravo").result?.kind == .failure && (row("Bravo").result?.text.contains("hash_mismatch") ?? false), "failure text: \(String(describing: row("Bravo").result))")
+    try expect(row("Bravo").result?.kind == .failure && (row("Bravo").result?.text == "The download didn't pass Patched's security checks, so nothing was changed."), "failure text: \(String(describing: row("Bravo").result))")
     try expect(row("Charlie").status == .updateAvailable && row("Charlie").result?.kind == .info, "open app left updatable")
     // The one question comes after the run, and nothing is quit until it is confirmed.
     try expect(controller.pendingQuit?.action == .updateOpen && controller.pendingQuit?.paths == [c.path], "update all must ask once about the open app: \(String(describing: controller.pendingQuit))")
@@ -780,6 +780,7 @@ registerNoSourceActionChecks()
 registerSelfUpdateChecks()
 registerProgressAndCancelChecks()
 registerSelfServiceChecks()
+registerPlainRefusalChecks()
 registerAvailableChecks()
 
 var failures = 0

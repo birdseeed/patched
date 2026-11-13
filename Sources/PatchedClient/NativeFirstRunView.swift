@@ -4,7 +4,12 @@ import PatchedShell
 /// Displays the setup steps. Only explicit controls request controller actions.
 public struct NativeFirstRunView: View {
     @ObservedObject private var controller: NativeFirstRunController
-    public init(controller: NativeFirstRunController) { self.controller = controller }
+    private let automaticUpdates: AutomaticUpdateSettings?
+    /// `automaticUpdates` is the same object Settings uses, so the switch here is the Settings switch.
+    public init(controller: NativeFirstRunController, automaticUpdates: AutomaticUpdateSettings? = nil) {
+        self.controller = controller
+        self.automaticUpdates = automaticUpdates
+    }
 
     public var body: some View {
         VStack(spacing: 0) {
@@ -50,10 +55,11 @@ public struct NativeFirstRunView: View {
         case .review:
             heading("How Patched works")
             VStack(alignment: .leading, spacing: 16) {
-                point("Checking", "Patched checks for updates when it opens and every 3 hours. Checks never install anything unless you turn on automatic updates in Settings.")
+                point("Checking", "Patched checks for updates when it opens and every 3 hours. Checks never install anything unless you turn on automatic updates below.")
                 point("Notifications", "Patched asks macOS for permission to show notifications the first time it has an update to tell you about.")
-                point("Installing", "An app is updated only when you click Update or Update All, unless you turn on automatic updates in Settings. If the app is open, Patched asks before quitting it.")
+                point("Installing", "An app is updated only when you click Update or Update All, unless you turn on automatic updates below. If the app is open, Patched asks before quitting it.")
                 point("Apps that need more help", "Apps from the App Store are updated in the App Store, and apps that need admin rights are updated with their own updater. Patched opens them for you.")
+                if let automaticUpdates { FirstRunAutomaticUpdatesView(settings: automaticUpdates) }
             }
         case .findApps:
             heading("You are ready")
@@ -102,5 +108,44 @@ public struct NativeFirstRunView: View {
     private func detail(_ value: LocalizedStringKey) -> some View {
         Text(value).font(.callout).foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+/// The opt-in switch on the review step. It reads and writes through `AutomaticUpdateSettings`, exactly as Settings does,
+/// so a managed value shows the same way: the effective value, disabled, with the organisation note.
+@_spi(Testing) public struct FirstRunAutomaticUpdatesView: View {
+    @ObservedObject var settings: AutomaticUpdateSettings
+    public init(settings: AutomaticUpdateSettings) { self.settings = settings }
+
+    /// What the switch shows and whether it can be changed: the effective value, as in Settings.
+    public var switchIsOn: Bool { settings.isEnabled }
+    public var switchIsLocked: Bool { settings.enabledLocked }
+    /// A user flip of the switch. The same call Settings makes; ignored while an organisation manages the setting.
+    public func setSwitch(_ on: Bool) { settings.setEnabled(on) }
+    /// Says where to change the time only when it can be changed.
+    public var captionText: String {
+        settings.timeLocked
+            ? String(localized: "Once a day at \(settings.time.string).")
+            : String(localized: "Once a day at \(settings.time.string). You can change the time in Settings.")
+    }
+
+    public var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Toggle(isOn: Binding(get: { switchIsOn }, set: { setSwitch($0) })) {
+                Text("Install updates automatically").font(.headline)
+            }
+            .disabled(switchIsLocked)
+            .accessibilityLabel("Install updates automatically")
+            .accessibilityHint(Text(verbatim: captionText))
+            Text(verbatim: captionText).font(.callout).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if settings.enabledLocked || settings.timeLocked {
+                Text(verbatim: AutomaticUpdateSettings.lockedNote).font(.callout).foregroundStyle(.secondary)
+            }
+            if settings.managedValueIgnored {
+                Text(verbatim: AutomaticUpdateSettings.invalidNote).font(.callout).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
     }
 }

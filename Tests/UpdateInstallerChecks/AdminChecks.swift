@@ -671,6 +671,55 @@ func registerAdminChecks() {
         try expectEqual(try BundleFacts.read(bundleAt: w.target).shortVersion, "2.0", "rollback changed the app")
     }
 
+    check("pkg: a helper running inside the bundle does not block the update, Installer and the package scripts manage it") {
+        let running = FakeRunningApps()
+        for quit in [false, true] {
+            let x = try packageWorld()
+            running.set(helpers: [BundleProcess(pid: 1409, executablePath: x.target + "/Contents/StandaloneUpdaterDaemon.xpc/Contents/MacOS/StandaloneUpdaterDaemon"),
+                                  BundleProcess(pid: 1408, executablePath: x.target + "/Contents/OneDrive Sync Service.app/Contents/MacOS/OneDrive Sync Service")], at: x.target)
+            let xTarget = x.target
+            let xOpener = FakeOpener()
+            xOpener.onOpen = { _ in try installByInstaller(xTarget) }
+            let report = try await adminInstaller(x.box, admin: adminPath(opener: xOpener), downloader: x.downloader, running: running, uid: geteuid())
+                .update(appAt: x.target, offer: offer(v2pkg, format: .pkg, sha256: try sha256Hex(x.archive)), installable: true,
+                        options: UpdateOptions(quitIfRunning: quit), admin: AdminInteraction())
+            try expectEqual(report.status, .installed, "quit=\(quit)")
+            try expectEqual(xOpener.opened.count, 1, "Installer not opened (quit=\(quit))")
+            try expectEqual(running.quitRequests, 0, "a helper was asked to quit")
+        }
+    }
+    check("pkg: the app itself running is still refused, or asked to quit with --quit; a swap update still refuses on a helper") {
+        let w = try packageWorld()
+        let running = FakeRunningApps()
+        running.set(running: w.target, willQuit: true)
+        running.set(helpers: [BundleProcess(pid: 1409, executablePath: w.target + "/Contents/MacOS/Daemon")], at: w.target)
+        let opener = FakeOpener()
+        let target = w.target
+        opener.onOpen = { _ in try installByInstaller(target) }
+        let path = adminPath(opener: opener)
+        try await expectRefusal("app_running") {
+            _ = try await adminInstaller(w.box, admin: path, downloader: w.downloader, running: running, uid: geteuid())
+                .update(appAt: w.target, offer: offer(v2pkg, format: .pkg, sha256: try sha256Hex(w.archive)), installable: true, admin: AdminInteraction())
+        }
+        try expectEqual(opener.opened.count, 0, "Installer opened with the app running")
+        try expectEqual(running.quitRequests, 0)
+        let report = try await adminInstaller(w.box, admin: path, downloader: w.downloader, running: running, uid: geteuid())
+            .update(appAt: w.target, offer: offer(v2pkg, format: .pkg, sha256: try sha256Hex(w.archive)), installable: true,
+                    options: UpdateOptions(quitIfRunning: true), admin: AdminInteraction())
+        try expectEqual(report.status, .installed)
+        try expectEqual(running.quitRequests, 1, "the app was not asked to quit")
+        // The swap path (a zip update on the same installer) still refuses on the helper, with or without --quit.
+        let z = try world()
+        let zrun = FakeRunningApps()
+        zrun.set(helpers: [BundleProcess(pid: 1409, executablePath: z.target + "/Contents/MacOS/Daemon")], at: z.target)
+        for quit in [false, true] {
+            try await expectRefusal("helper_running") {
+                _ = try await adminInstaller(z.box, admin: path, downloader: z.downloader, running: zrun, uid: geteuid())
+                    .update(appAt: z.target, offer: offer("https://example.test/v2.zip"), options: UpdateOptions(quitIfRunning: quit))
+            }
+        }
+        try expectEqual(try version(z.target), "1.0")
+    }
     check("pkg: a package that fails any check never reaches Apple's Installer") {
         let cases: [(String, any PackageVerifying, String)] = [
             ("wrong team", fixturePackageVerifier(pkgutil: "pkgutil-other-team.txt"), "package_signature_invalid"),

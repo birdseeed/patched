@@ -10,7 +10,7 @@ public enum EdSignatureBlock: String, Sendable, Equatable {
     public var message: String {
         switch self {
         case .keyMalformed: return "This app's update signing key is malformed, so Patched can't verify its updates."
-        case .signatureMissing: return "Update found, but it isn't signed the way this app requires. Add a catalogue entry for the app's Sparkle feed to enable updates."
+        case .signatureMissing: return "Update found, but this app only accepts updates signed by its developer, and this source isn't. Update it from the app itself."
         case .signatureMalformed: return "Update found, but its signature is malformed."
         }
     }
@@ -87,24 +87,35 @@ public struct UpdateChecker: Sendable {
     private let fetcher: any HTTPFetching
     private let caskIndex: any CaskIndexProviding
     private let catalogue: UserCatalogue
+    private let builtIn: [String: UpdateSource]
     private let environment: HostEnvironment
     private let teamID: @Sendable (String) -> String?
     private let concurrency: Int
     private let storeCountry: String
 
     public init(fetcher: any HTTPFetching, caskIndex: any CaskIndexProviding, catalogue: UserCatalogue = .empty,
-                environment: HostEnvironment = .current,
+                builtIn: [String: UpdateSource] = BuiltInCatalogue.feeds, environment: HostEnvironment = .current,
                 teamID: @escaping @Sendable (String) -> String? = { CodeSigningIdentity.teamID(ofBundleAt: URL(fileURLWithPath: $0)) },
                 concurrency: Int = FetchLimits.concurrency, storeCountry: String? = nil) {
-        self.fetcher = fetcher; self.caskIndex = caskIndex; self.catalogue = catalogue
+        self.fetcher = fetcher; self.caskIndex = caskIndex; self.catalogue = catalogue; self.builtIn = builtIn
         self.environment = environment; self.teamID = teamID; self.concurrency = max(1, concurrency)
         self.storeCountry = storeCountry ?? AppStoreResolver.country()
     }
 
     private enum Decision { case source(UpdateSource, lowConfidence: Bool = false), none(NoSourceReason?), refused(RefusalReason) }
 
+    /// The one place the user catalogue and the built-in list are merged: a user entry (source or ignore) always wins,
+    /// and a built-in feed applies only when the user has no entry for the bundle ID.
+    private func sourceEntry(for id: String) -> (source: UpdateSource, isBuiltIn: Bool)? {
+        if let entry = catalogue.entries[id] {
+            if case .source(let source) = entry { return (source, false) }
+            return nil
+        }
+        return builtIn[id].map { ($0, true) }
+    }
+
     private func catalogueOverrides(_ app: InstalledApp) -> Bool {
-        if let id = app.bundleID, case .source? = catalogue.entries[id] { return true }
+        if let id = app.bundleID, sourceEntry(for: id) != nil { return true }
         return false
     }
 
@@ -276,15 +287,15 @@ public struct UpdateChecker: Sendable {
     }
 
     private func decide(_ app: InstalledApp, siblings: Set<String>, trace: ExplainTrace?) async -> Decision {
-        if let id = app.bundleID, let entry = catalogue.entries[id] {
-            if case .source(let source) = entry {
-                trace?.add("catalogue: entry for \(id) -> \(source.kind) \(source.locator)")
-                switch source {
-                case .sparkle(let feed), .electron(let feed):
-                    return feed.isHTTPS ? .source(source) : .refused(.insecureFeed(feed.absoluteString))
-                case .homebrewCask, .appStore: return .source(source)
-                }
+        if let id = app.bundleID, let (source, isBuiltIn) = sourceEntry(for: id) {
+            trace?.add("\(isBuiltIn ? "built-in catalogue" : "catalogue"): entry for \(id) -> \(source.kind) \(source.locator)")
+            switch source {
+            case .sparkle(let feed), .electron(let feed):
+                return feed.isHTTPS ? .source(source) : .refused(.insecureFeed(feed.absoluteString))
+            case .homebrewCask, .appStore: return .source(source)
             }
+        } else if let id = app.bundleID, catalogue.entries[id] != nil {
+            trace?.add("catalogue: no source entry")
         } else { trace?.add("catalogue: no entry") }
         if let feed = app.sparkleFeed {
             trace?.add("Sparkle: SUFeedURL \(feed)")

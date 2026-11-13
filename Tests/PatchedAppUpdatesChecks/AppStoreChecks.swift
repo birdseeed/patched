@@ -344,7 +344,7 @@ func storeOutcome(_ app: InstalledApp, version: String = "3.0", track: Int = 123
         try expect(try text("Unlisted") == "Updates through the App Store", "unlisted")
         try expect(try text("Skipped") == "Hidden", "ignored")
         try expect(try text("Patched") == "This app", "this app")
-        try expect(try text("Brew") == "Homebrew (unconfirmed) — add a catalogue entry to enable updates", "brew: \(try text("Brew"))")
+        try expect(try text("Brew") == "Update found, but Patched can't confirm where it comes from, so it won't install it. Update it from the app itself.", "brew: \(try text("Brew"))")
         try expect(try text("Mystery") == "No public update feed", "default reason")
     }
 
