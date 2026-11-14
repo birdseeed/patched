@@ -18,7 +18,7 @@ output directories must be inside this repository. The app contains the
 `PatchedApp` product as `Contents/MacOS/Patched` and the `patched` product as
 `Contents/Helpers/patched`. `VERSION` supplies the display version and
 `git rev-list --count HEAD` supplies the bundle build number. The copyright notice
-is "Copyright © 2026 Andy Bridson".
+is "Copyright © 2026 Andy Bridson. Licensed under the GNU GPL version 3."
 Compiler module caches and tool temporary files, including universal debug-symbol
 generation, stay under `.build/packaging-module-cache` and `.build/packaging-tmp`.
 

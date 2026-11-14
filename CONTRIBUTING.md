@@ -1,7 +1,7 @@
 # Contributing
 
 Thanks for considering a contribution. Keep changes focused, explain the user
-impact, and retain the project's Apache-2.0 licensing and third-party notices.
+impact, and retain the project's GPL-3.0-only licensing and third-party notices.
 
 ## Build and checks
 

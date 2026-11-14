@@ -360,6 +360,7 @@ func storeOutcome(_ app: InstalledApp, version: String = "3.0", track: Int = 123
         try expect(content.links[2].url.absoluteString == "mailto:hello@patched.im?subject=Patched" && content.links[2].detail.contains("hello@patched.im"), "contact link: \(content.links[2].url)")
         try expect(content.links[3].url.absoluteString == "https://github.com/birdseeed/patched", "source link: \(content.links[3].url)")
         try expect(content.about.contains("free, open source community project") && content.about.contains("no company"), "about: \(content.about)")
+        try expect(content.about.contains("GNU General Public Licence, version 3 only"), "about licence: \(content.about)")
         // Points people at the links below rather than telling them there is nowhere to go.
         try expect(content.about.contains("we'll do our best to help") && !content.about.contains("nowhere"), "about: \(content.about)")
         try expect(opener.nothingOpened, "building the panel opened something")

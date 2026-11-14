@@ -1,6 +1,11 @@
 Patched
 Copyright 2026 Andy Bridson
 
+From the next release after v0.2.4, Patched is licensed under the GNU General
+Public License, version 3 only (GPL-3.0-only). See LICENSE. Releases up to and
+including v0.2.4 were released under the Apache License, Version 2.0, and remain
+so.
+
 This distribution includes or derives from Installomator material, licensed
 under the Apache License, Version 2.0. See ThirdParty/Installomator/LICENSE.
 Installomator: https://github.com/Installomator/Installomator

@@ -168,7 +168,7 @@ assert_key LSUIElement true
 assert_key CFBundleDevelopmentRegion en
 localizations=$(/usr/bin/plutil -extract CFBundleLocalizations json -o - "$plist")
 [[ "$localizations" = '["en"]' ]] || { printf 'Info.plist CFBundleLocalizations: expected ["en"], got %s\n' "$localizations" >&2; exit 1; }
-assert_key NSHumanReadableCopyright 'Copyright © 2026 Andy Bridson'
+assert_key NSHumanReadableCopyright 'Copyright © 2026 Andy Bridson. Licensed under the GNU GPL version 3.'
 # An ad-hoc build pins no release Team ID, so self-update relies on the release key alone.
 assert_key PatchedReleaseTeamID ''
 # The signing-team check refuses this ad-hoc app for any team, so a pinned build or release signed by a

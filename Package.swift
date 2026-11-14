@@ -1,4 +1,5 @@
 // swift-tools-version: 6.0
+// Licensed under GPL-3.0-only. See LICENSE.
 import PackageDescription
 
 let package = Package(
