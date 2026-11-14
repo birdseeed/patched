@@ -175,7 +175,7 @@ public struct AppUpdateRow: Identifiable, Equatable, Sendable {
     public let name: String
     public let path: String
     public let bundleID: String?
-    /// The app is a `LSBackgroundOnly` helper. The lists hide it unless there is an update to show.
+    /// The app is a `LSBackgroundOnly` helper with no icon of its own. The lists hide it unless there is an update to show.
     public internal(set) var isBackgroundOnly = false
     public let icon: LocalInstalledIcon?
     public internal(set) var installedVersion: String

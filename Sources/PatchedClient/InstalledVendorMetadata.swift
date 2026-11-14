@@ -7,7 +7,8 @@ public struct LocalInstalledVendorMetadata: Sendable, Equatable {
     public let productJSONBytes: Data?
     /// `SUPublicEDKey` as the installer reads it: nil when absent, the string when a string, "" for any other type.
     public let sparklePublicEDKey: String?
-    /// `LSBackgroundOnly` truthy in Info.plist. Display hint only, never authority.
+    /// `LSBackgroundOnly` truthy in Info.plist and no icon of its own named there (a helper, not an app people
+    /// know they have). Display hint only, never authority.
     public let backgroundOnly: Bool
     public let sparkleDisposition: LocalInventoryMetadataDisposition
     public let electronDisposition: LocalInventoryMetadataDisposition

@@ -407,6 +407,11 @@ private struct InventoryScan {
             case let text as String: backgroundOnly = ["1", "yes", "true"].contains(text.lowercased())
             default: backgroundOnly = false
             }
+            // Some real menu bar apps (OneDrive, BetterDisplay) declare LSBackgroundOnly too. An app that names
+            // its own icon is one people know they have, so only icon-less helpers count as background-only.
+            if backgroundOnly, ["CFBundleIconFile", "CFBundleIconName"].contains(where: { !((dictionary[$0] as? String) ?? "").isEmpty }) {
+                backgroundOnly = false
+            }
             if let raw = dictionary["SUFeedURL"] {
                 if let text = raw as? String, InventoryIO.safeFeed(text) {
                     feed = text; feedDisposition = .observed

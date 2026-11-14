@@ -143,7 +143,7 @@ private func inventoryPhysical(_ path: String) throws -> (UInt64, UInt64) {
         let absent = try r.applications.first { $0.path.hasSuffix("/Absent.app") }.map(InstalledApp.init(observation:))
         try expect(absent?.pinsSparkleKey == false, "absent key must not pin")
     }
-    check("inventory: LSBackgroundOnly marks background-only helpers, and only a truthy value does") {
+    check("inventory: LSBackgroundOnly marks background-only helpers, only a truthy value does, and an app with its own icon is not one") {
         let f = try InventoryFixture(); defer { f.clean() }
         let base: [String: Any] = ["CFBundleName": "B", "CFBundleIdentifier": "example.b", "CFBundleShortVersionString": "1", "CFBundleVersion": "2"]
         func with(_ extra: [String: Any]) -> [String: Any] { base.merging(extra) { $1 } }
@@ -153,6 +153,11 @@ private func inventoryPhysical(_ path: String) throws -> (UInt64, UInt64) {
         _ = try f.app("StrYes.app", metadata: with(["LSBackgroundOnly": "YES"]))
         _ = try f.app("StrNo.app", metadata: with(["LSBackgroundOnly": "no"]))
         _ = try f.app("UIElement.app", metadata: with(["LSUIElement": true]))
+        // Shaped like the real apps: OneDrive and BetterDisplay are background-only but name an icon; Claude Code
+        // URL Handler names none.
+        _ = try f.app("IconFile.app", metadata: with(["LSBackgroundOnly": true, "CFBundleIconFile": "OneDrive"]))
+        _ = try f.app("IconName.app", metadata: with(["LSBackgroundOnly": true, "CFBundleIconName": "BetterDisplay"]))
+        _ = try f.app("EmptyIcon.app", metadata: with(["LSBackgroundOnly": true, "CFBundleIconFile": ""]))
         let r = await f.scan()
         func flag(_ n: String) throws -> Bool {
             guard let a = r.applications.first(where: { $0.path.hasSuffix("/\(n).app") }) else { throw CheckFailure(description: "missing \(n)") }
@@ -160,7 +165,8 @@ private func inventoryPhysical(_ path: String) throws -> (UInt64, UInt64) {
             try expect(mapped.isBackgroundOnly == a.vendorMetadata.backgroundOnly, "\(n): flag lost mapping into InstalledApp")
             return a.vendorMetadata.backgroundOnly
         }
-        try expect(try flag("BoolTrue") && flag("StrYes"), "truthy LSBackgroundOnly not captured")
+        try expect(try flag("BoolTrue") && flag("StrYes") && flag("EmptyIcon"), "truthy LSBackgroundOnly not captured")
+        try expect(try !flag("IconFile") && !flag("IconName"), "a background-only app with its own icon was still treated as a helper")
         try expect(try !flag("Absent") && !flag("BoolFalse") && !flag("StrNo") && !flag("UIElement"), "non-background app flagged background-only")
     }
     check("inventory: publisher and management-looking plist keys never confer authority") {

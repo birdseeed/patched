@@ -224,7 +224,7 @@ public struct InstalledApp: Sendable, Equatable {
     /// `SUPublicEDKey` as the installer reads it (nil when absent, "" when not a string). A key means every offer needs a valid EdDSA signature.
     public let sparklePublicEDKey: String?
     public var pinsSparkleKey: Bool { sparklePublicEDKey != nil }
-    /// Info.plist `LSBackgroundOnly` is true: a helper with no UI of its own. Display hint only.
+    /// Info.plist `LSBackgroundOnly` is true and names no icon: a helper with no UI of its own. Display hint only.
     public let isBackgroundOnly: Bool
 
     public init(name: String, path: String, bundleID: String?, shortVersion: String?, build: String?,
