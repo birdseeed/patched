@@ -136,7 +136,7 @@ public struct SupportContent: Equatable, Sendable {
         }
         return SupportContent(
             heading: String(localized: "Help & Support"),
-            about: String(localized: "Patched is a free, open source community project. There is no company behind it and no support team, but if something goes wrong, report it or email the developer below and we'll do our best to help."),
+            about: String(localized: "Patched is a free, open source community project, licensed under the GNU General Public Licence, version 3 only. There is no company behind it and no support team, but if something goes wrong, report it or email the developer below and we'll do our best to help."),
             links: links)
     }
 }

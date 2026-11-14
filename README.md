@@ -1,9 +1,14 @@
 # Patched
 
 Patched is a free, open-source Mac app updater. It is a community project with no
-company or support behind it. The source is licensed under the
-Apache License 2.0. Copyright © 2026 Andy Bridson. See [LICENSE](LICENSE) and [NOTICE](NOTICE), including the
-Installomator attribution.
+company or support behind it. The source is licensed under the GNU General Public
+License, version 3 only (GPL-3.0-only). Copyright © 2026 Andy Bridson. See
+[LICENSE](LICENSE), [NOTICE](NOTICE) and [TRADEMARKS](TRADEMARKS.md), including the
+Installomator attribution. Releases up to and including v0.2.4 were released under
+the Apache License 2.0 and remain so.
+
+The "Patched" name, logo and icon are trademarks of Andy Bridson and are not covered
+by the GPL. See [TRADEMARKS](TRADEMARKS.md).
 
 Patched checks installed apps for updates, obtains update information from
 configured sources, verifies downloaded apps, and is designed to replace an app

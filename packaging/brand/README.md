@@ -5,7 +5,8 @@ Patched brand kit v3, copied unchanged from the Patched.im branding kit
 and `patched-mark-primary.svg`).
 
 Copyright 2026 Andy Bridson. All rights reserved. The Patched name, mark and app
-icon are not covered by the repository's software licence.
+icon are not covered by the repository's software licence. See
+[TRADEMARKS.md](../../TRADEMARKS.md).
 
 - `app-icon-1024.png` is the source for `AppIcon.icns`, which `scripts/build-app.sh`
   generates at build time with `sips` and `iconutil`.
