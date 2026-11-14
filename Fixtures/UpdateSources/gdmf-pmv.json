@@ -1,0 +1,36 @@
+{
+  "PublicAssetSets": {
+    "iOS": [
+      {"ProductVersion": "30.0", "Build": "30A1", "PostingDate": "2026-11-09", "ExpirationDate": "2027-02-12", "SupportedDevices": ["J999AP"]}
+    ],
+    "macOS": [
+      {"ProductVersion": "14.8.9", "Build": "23J631", "PostingDate": "2026-11-09", "ExpirationDate": "2027-02-12", "SupportedDevices": ["J100AP", "J200AP"]},
+      {"ProductVersion": "27.2.1", "Build": "26B8132", "PostingDate": "2026-11-09", "ExpirationDate": "2027-02-12", "SupportedDevices": ["J777AP"]},
+      {"ProductVersion": "26.7.3", "Build": "25G342", "PostingDate": "2026-11-09", "ExpirationDate": "2027-02-12", "SupportedDevices": ["J999AP", "J888AP", "J100AP"]},
+      {"ProductVersion": "27.2.1", "Build": "26B7131", "PostingDate": "2026-11-09", "ExpirationDate": "2027-02-12", "SupportedDevices": ["J888AP"]},
+      {"ProductVersion": "15.8.3", "Build": "24H241", "PostingDate": "2026-11-09", "ExpirationDate": "2027-02-12", "SupportedDevices": ["J999AP", "J888AP", "J100AP"]},
+      {"ProductVersion": "27.1", "Build": "26B50", "PostingDate": "2026-10-20", "ExpirationDate": "2027-01-20", "SupportedDevices": ["J999AP", "J888AP"]},
+      {"ProductVersion": "27.2.1", "Build": "26B131", "PostingDate": "2026-11-09", "ExpirationDate": "2027-02-12", "SupportedDevices": ["J999AP", "J555AP"]},
+      {"ProductVersion": "28.0", "Build": "27A100", "PostingDate": "2026-11-10", "ExpirationDate": "2027-02-12", "SupportedDevices": ["J777AP"]},
+      {"ProductVersion": 27.9, "Build": "26C1", "PostingDate": "2026-11-11", "ExpirationDate": "2027-02-12", "SupportedDevices": ["J999AP"]},
+      {"ProductVersion": "27.8", "Build": "26C2", "PostingDate": "2026-11-11", "ExpirationDate": "2027-02-12"},
+      {"ProductVersion": "27.7", "Build": "26C3", "PostingDate": "11/11/2026", "ExpirationDate": "2027-02-12", "SupportedDevices": ["J999AP"]},
+      {"ProductVersion": "27.6 beta", "Build": "26C4", "PostingDate": "2026-11-11", "ExpirationDate": "2027-02-12", "SupportedDevices": ["J999AP"]},
+      {"ProductVersion": "27.5", "Build": "26C5", "PostingDate": "2026-11-11", "ExpirationDate": "2027-02-12", "SupportedDevices": ["J999AP", 7]},
+      {"ProductVersion": "27.4", "Build": "26C6", "PostingDate": "2026-02-30", "ExpirationDate": "2027-02-12", "SupportedDevices": ["J999AP"]},
+      {"ProductVersion": "27.3", "Build": "26C7", "PostingDate": "2026-11-12", "SupportedDevices": ["J444AP"]},
+      {"ProductVersion": "27.3.1", "Build": "26C8", "PostingDate": "2026-11-12", "ExpirationDate": "soon", "SupportedDevices": ["J444AP"]},
+      "not an entry"
+    ]
+  },
+  "AssetSets": {
+    "macOS": [
+      {"ProductVersion": "27.9.9", "Build": "26Z1", "PostingDate": "2026-11-11", "ExpirationDate": "2027-02-12", "SupportedDevices": ["J999AP"]}
+    ]
+  },
+  "PublicBackgroundSecurityImprovements": {
+    "macOS": [
+      {"ProductVersion": "27.3", "Build": "26A434a", "PostingDate": "2026-11-11", "ExpirationDate": "2027-02-12", "SupportedDevices": ["J999AP"]}
+    ]
+  }
+}

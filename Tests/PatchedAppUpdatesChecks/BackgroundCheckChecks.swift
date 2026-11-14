@@ -48,6 +48,11 @@ import PatchedShell
     }
     /// Patched's own release announcements.
     var postedSelf: [SelfUpdate] = []
+    /// macOS announcements and reminders.
+    var postedMacOS: [(notice: MacOSUpdateNotice, reminder: Bool)] = []
+    func notify(macOSUpdate: MacOSUpdateNotice, reminder: Bool, completion: @escaping @MainActor (Bool) -> Void) {
+        postedMacOS.append((macOSUpdate, reminder)); completion(delivers)
+    }
     /// When set, self-update completions wait here until the test releases them (a slow permission prompt).
     var holdSelf = false
     var heldSelf: [@MainActor (Bool) -> Void] = []
@@ -121,7 +126,8 @@ struct FakeNetworkDown: Error {}
 
     init(_ outcomes: [AppCheckOutcome], gated: Bool = false, installer: FakeInstaller = FakeInstaller(), adminUpdates: Bool = false,
          packageUpdates: Bool = false, automatic: AutomaticUpdateSettings? = nil,
-         summaryNotifier: (any UpdateSummaryNotifying)? = nil, calendar: Calendar = .current) {
+         summaryNotifier: (any UpdateSummaryNotifying)? = nil, macOSReminders: MacOSReminderSettings? = nil,
+         calendar: Calendar = .current) {
         let world = World(outcomes), checks = checks, holder = holder
         if gated { holder.current = Gate() }
         installer.world = world
@@ -139,7 +145,8 @@ struct FakeNetworkDown: Error {}
         controller.urlOpener = opener
         let clock = clock, timer = timer, wake = wake, notifier = notifier, store = store
         scheduler = UpdateCheckScheduler(controller: controller, now: { clock.date }, timer: timer, notifier: notifier, wake: wake, store: store,
-                                        automatic: automatic, summaryNotifier: summaryNotifier, calendar: calendar)
+                                        automatic: automatic, summaryNotifier: summaryNotifier, macOSReminders: macOSReminders,
+                                        calendar: calendar)
     }
     /// Makes every later check wait until the returned gate is opened.
     func hold() -> Gate { let g = Gate(); holder.current = g; return g }

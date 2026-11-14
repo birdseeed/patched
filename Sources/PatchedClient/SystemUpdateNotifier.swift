@@ -11,6 +11,8 @@ import UserNotifications
     /// The "Patched X is available" notification. Clicking it opens Updates. When the release can be installed
     /// it has one button, Update…, which opens Updates and asks for confirmation; it never installs by itself.
     nonisolated public static let selfUpdateIdentifier = "im.patched.self-update"
+    /// "macOS X is available" and its reminders. Clicking it opens Updates; it has no buttons and installs nothing.
+    nonisolated public static let macOSUpdateIdentifier = "im.patched.macos-update"
     nonisolated public static let categoryIdentifier = "im.patched.updates-available.category"
     nonisolated public static let updateAllActionIdentifier = "im.patched.update-all"
     nonisolated public static let selfUpdateCategoryIdentifier = "im.patched.self-update.category"
@@ -41,7 +43,7 @@ import UserNotifications
     /// notification updates anything. Anything else is ignored.
     nonisolated public static func route(requestIdentifier: String, actionIdentifier: String) -> Route? {
         if requestIdentifier == Self.requestIdentifier || requestIdentifier == Self.summaryIdentifier
-            || requestIdentifier == Self.selfUpdateIdentifier,
+            || requestIdentifier == Self.selfUpdateIdentifier || requestIdentifier == Self.macOSUpdateIdentifier,
            actionIdentifier == UNNotificationDefaultActionIdentifier { return .openUpdates }
         if requestIdentifier == Self.requestIdentifier, actionIdentifier == Self.updateAllActionIdentifier { return .updateAll }
         if requestIdentifier == Self.selfUpdateIdentifier, actionIdentifier == Self.selfUpdateActionIdentifier { return .selfUpdate }
@@ -133,6 +135,16 @@ import UserNotifications
         content.threadIdentifier = Self.selfUpdateIdentifier
         if selfUpdate.assets != nil { content.categoryIdentifier = Self.selfUpdateCategoryIdentifier }
         post(content, identifier: Self.selfUpdateIdentifier, completion: completion)
+    }
+
+    public func notify(macOSUpdate notice: MacOSUpdateNotice, reminder: Bool, completion: @escaping @MainActor (Bool) -> Void) {
+        guard runsFromAppBundle else { completion(false); return }
+        activate()
+        let content = UNMutableNotificationContent()
+        content.title = notice.notificationTitle(reminder: reminder)
+        content.body = MacOSUpdateNotice.notificationBody
+        content.threadIdentifier = Self.macOSUpdateIdentifier
+        post(content, identifier: Self.macOSUpdateIdentifier, completion: completion)
     }
 
     /// Asks permission the first time, then submits the notification. `completion(true)` only once it was added.

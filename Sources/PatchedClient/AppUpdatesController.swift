@@ -535,6 +535,26 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
     private var selfApplyTask: Task<Void, Never>?
     /// Called when a lookup of the current check has been applied. Used by the background scheduler.
     var onSelfLookupFinished: (() -> Void)?
+
+    /// What Apple's sources last said about macOS (see `MacOSUpdateChecker`). Never part of `rows`: the macOS row is
+    /// not an app, so Update All, automatic updates and the command line's `update` cannot act on it.
+    @Published public private(set) var macOSStatus: MacOSUpdateStatus?
+    /// Looks up macOS once per check, beside the app checks. nil: no lookup. Only `live()` sets a real one.
+    @_spi(Testing) public var macOSUpdateCheck: MacOSUpdateCheck?
+    @_spi(Testing) public var macOSLookupTimeout: TimeInterval = 20
+    /// True from the start of a check until its macOS lookup has answered (or the check ended without using it).
+    @Published public private(set) var macOSLookupPending = false
+    /// Called when the macOS lookup of the current check has been applied. Used by the background scheduler.
+    var onMacOSLookupFinished: (() -> Void)?
+    /// Where "Not now" is remembered. `live()` uses the user's defaults; everything else keeps it in memory.
+    public var macOSHiding: any MacOSUpdateHiding = MemoryMacOSUpdateHiding() { didSet { macOSHiddenKeys = macOSHiding.hiddenKeys } }
+    @Published private var macOSHiddenKeys: [String] = []
+    private var macOSApplyTask: Task<Void, Never>?
+    /// The pinned macOS row, unless "Not now" hid this version. With the minor update hidden, a newer major is still
+    /// shown, in its quieter style.
+    public var macOSNotice: MacOSUpdateNotice? {
+        macOSStatus.flatMap { MacOSUpdateNotice.shown($0, hiddenKeys: macOSHiddenKeys) }
+    }
     private let scanApps: AppUpdateScan
     private let checkApps: AppUpdateCheck
     private let recheckApp: AppUpdateRecheck
@@ -635,10 +655,13 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
         controller.setupProbe = { state.problem }
         controller.installerState = state
         controller.urlOpener = WorkspaceURLOpener()
+        controller.macOSHiding = DefaultsMacOSUpdateHiding()
         // Patched's own release lookup: never under the test tripwire, and only for an installed build that
         // knows its version.
         if let runningVersion, !RealStateTripwire.isActive {
             controller.selfUpdateCheck = { await PatchedReleaseChecker.check(currentVersion: runningVersion, fetcher: fetcher) }
+            // macOS: Apple's feed and the Software Update plist. It reports only; nothing installs macOS.
+            controller.macOSUpdateCheck = { await MacOSUpdateChecker.check(host: .current(), fetcher: fetcher, patchedVersion: runningVersion) }
             // Self-update only for a real Patched.app; a `swift run` build keeps Download only.
             let bundle = Bundle.main
             if bundle.bundlePath.hasSuffix(".app"), bundle.bundleIdentifier == PatchedReleaseKey.bundleID {
@@ -766,6 +789,7 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
         rowsBeforeCheck = rows
         let scanApps = scanApps, checkApps = checkApps
         startSelfLookup(generation: mine)
+        startMacOSLookup(generation: mine)
         checkTask = Task { [weak self] in
             let scanned = await Self.background { await scanApps() }
             guard let self, self.isCurrentCheck(mine) else { return }
@@ -781,6 +805,7 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
                 self.rows = self.rowsBeforeCheck
                 self.phase = .idle; self.checkTask = nil
                 self.stopSelfLookup()
+                self.stopMacOSLookup()
                 self.catalogueError = Self.catalogueMessage(error)
                 self.summary = String(localized: "Check stopped: \(self.catalogueError ?? "\(error)")")
                 self.onCheckFinished?(.failed)
@@ -848,6 +873,7 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
         guard phase == .checking else { return }
         checkTask?.cancel(); checkTask = nil
         stopSelfLookup()
+        stopMacOSLookup()
         generation += 1; epoch += 1; pendingQuit = nil
         rows = rowsBeforeCheck
         phase = .idle
@@ -885,6 +911,38 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
         }
     }
 
+    private func stopMacOSLookup() { macOSApplyTask?.cancel(); macOSApplyTask = nil; macOSLookupPending = false }
+
+    /// Looks up macOS beside the app checks, as the self lookup does: applied when it arrives, only if no newer check
+    /// (or cancel) has happened since. A lookup that could not tell keeps what was known.
+    private func startMacOSLookup(generation mine: Int) {
+        macOSApplyTask?.cancel(); macOSApplyTask = nil
+        guard let lookup = macOSUpdateCheck else { macOSLookupPending = false; return }
+        macOSLookupPending = true
+        let timeout = macOSLookupTimeout
+        macOSApplyTask = Task { [weak self] in
+            let result = await Self.racedMacOS(lookup, timeout: timeout)
+            guard let self, !Task.isCancelled, self.generation == mine else { return }
+            if case .found(let status) = result { self.macOSStatus = status }
+            self.macOSLookupPending = false
+            self.onMacOSLookupFinished?()
+        }
+    }
+
+    /// The macOS lookup, or `.unavailable` once `timeout` passes, whichever is first.
+    nonisolated static func racedMacOS(_ lookup: @escaping MacOSUpdateCheck, timeout: TimeInterval) async -> MacOSUpdateResult {
+        await withTaskGroup(of: MacOSUpdateResult.self) { group in
+            group.addTask { await lookup() }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: UInt64(max(0, timeout) * 1_000_000_000))
+                return .unavailable
+            }
+            let first = await group.next() ?? .unavailable
+            group.cancelAll()
+            return first
+        }
+    }
+
     /// The lookup, or `.unavailable` once `timeout` passes, whichever is first. A lookup that never returns is
     /// abandoned rather than awaited.
     @_spi(Testing) nonisolated public static func raced(_ lookup: @escaping SelfUpdateCheck, timeout: TimeInterval) async -> PatchedReleaseResult {
@@ -904,6 +962,21 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
     private func isCurrentCheck(_ mine: Int) -> Bool { !Task.isCancelled && generation == mine && phase == .checking }
 
     // MARK: Actions
+
+    /// A click on Open Software Update on the macOS row: opens System Settings › Software Update, or System Settings
+    /// itself if that pane does not open. Apple's updater does the rest; Patched installs nothing. Only that click
+    /// reaches here: Update All, automatic updates, the scheduler and the command line never do.
+    @discardableResult public func openSoftwareUpdate() async -> Bool {
+        if urlOpener.open(SoftwareUpdateLinks.settingsURL) { return true }
+        return await urlOpener.openApplication(bundleID: SoftwareUpdateLinks.systemSettingsBundleID)
+    }
+
+    /// "Not now" on the macOS row: hides it until a different version is found. Remembered per user.
+    public func hideMacOSUpdate() {
+        guard let notice = macOSNotice else { return }
+        macOSHiding.hide(notice.key)
+        macOSHiddenKeys = macOSHiding.hiddenKeys
+    }
 
     /// A click on Download beside "Patched X is available": opens the validated release page, nothing else.
     /// It downloads, installs and launches nothing; the scheduler never calls it.
@@ -1347,6 +1420,7 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
         await operation?.value
         await openTask?.value
         await selfApplyTask?.value
+        await macOSApplyTask?.value
         await selfInstallTask?.value
     }
 

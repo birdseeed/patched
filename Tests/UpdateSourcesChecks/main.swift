@@ -1571,6 +1571,10 @@ check("self release: the real fetcher refuses a redirect off api.github.com, and
     try expectEqual(HTTPSRedirectPolicy.decide(URLRequest(url: URL(string: "http://api.github.com/x")!), allowedHosts: ["api.github.com"]) == nil, true, "http redirect")
 }
 
+// MARK: macOS updates (MacOSUpdateChecks.swift)
+
+registerMacOSUpdateChecks()
+
 // MARK: Runner
 
 var failures = 0

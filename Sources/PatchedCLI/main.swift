@@ -13,7 +13,10 @@ usage: patched check [--json] [--app <path>] [--explain <app path | bundle ID>]
          Reads installed apps and reports which have updates and where they come from.
          Read-only: nothing is downloaded or installed. Mac App Store apps are looked up with Apple's
          public App Store lookup (their bundle IDs go to Apple only) and reported; update them in the
-         App Store. --explain prints why a source was or was not chosen for one app.
+         App Store. --explain prints why a source was or was not chosen for one app. A plain
+         `patched check` also prints one line about macOS, from Apple's public version list and
+         Software Update's own record; --json, --explain, --app and --applications-root leave it out.
+         Install macOS in System Settings > General > Software Update (Patched never installs it).
        patched update <app path | bundle ID> [--quit] [--dry-run] [--json]
        patched update --all [--quit] [--dry-run] [--json]
          Downloads, verifies and installs updates for apps you can replace without admin rights.
@@ -172,6 +175,15 @@ let fetcher = URLSessionFetcher()
         do { locations = try InstallerLocations.standard() } catch { fail("\(error)", code: 1) }
     }
     return locations
+}
+
+/// The version of the Patched.app this command runs from, for the User-Agent; "dev" for a `swift run` build.
+func commandLineVersion() -> String {
+    guard let executable = Bundle.main.executableURL.flatMap({ FileSafety.realPath($0.path) }),
+          let range = executable.range(of: ".app/Contents/"),
+          let version = (try? BundleFacts.read(bundleAt: String(executable[..<range.lowerBound]) + ".app"))?.shortVersion,
+          version.range(of: "^[0-9]+(\\.[0-9]+)*\\z", options: .regularExpression) != nil else { return "dev" }
+    return version
 }
 
 /// The Patched.app this command runs from (or that is installed in /Applications or ~/Applications), if any.
@@ -519,4 +531,9 @@ print(line(header))
 for row in rows { print(line(row)) }
 let updates = outcomes.filter { if case .updateAvailable = $0.result { return true } else { return false } }.count
 print("\n\(outcomes.count) apps checked, \(updates) with updates available.")
+// macOS is reported only, for a whole-Mac check. `update` never looks at it. Never under the test tripwire.
+if wantedPath == nil, applicationsRoot == nil, !RealStateTripwire.isActive {
+    let result = await MacOSUpdateChecker.check(host: .current(), fetcher: fetcher, patchedVersion: commandLineVersion())
+    print(MacOSUpdateNotice.commandLineLine(result))
+}
 exit(0)

@@ -4,6 +4,8 @@ public enum FetchLimits {
     public static let feedBytes = 4 * 1024 * 1024
     /// The single GitHub release record Patched reads about itself.
     public static let releaseBytes = 256 * 1024
+    /// Apple's public OS version feed (gdmf.apple.com), about 90 KB in November 2026.
+    public static let macOSFeedBytes = 1024 * 1024
     public static let caskIndexBytes = 64 * 1024 * 1024
     public static let timeout: TimeInterval = 20
     public static let concurrency = 6

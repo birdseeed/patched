@@ -49,13 +49,16 @@ public struct SettingsView: View {
     @ObservedObject private var automaticUpdates: AutomaticUpdateSettings
     @ObservedObject private var openAtLogin: OpenAtLoginController
     @ObservedObject private var notifications: NotificationStatusController
+    @ObservedObject private var macOSReminders: MacOSReminderSettings
     private let openNotificationSettings: () -> Void
     private let version: String?
 
     public init(openAtLogin: OpenAtLoginController, notifications: NotificationStatusController,
                 automaticUpdates: AutomaticUpdateSettings,
+                macOSReminders: MacOSReminderSettings = MacOSReminderSettings(store: MemoryMacOSReminderStore()),
                 version: String?, openNotificationSettings: @escaping () -> Void) {
         self.automaticUpdates = automaticUpdates
+        self.macOSReminders = macOSReminders
         self.openAtLogin = openAtLogin
         self.notifications = notifications
         self.version = version
@@ -85,6 +88,16 @@ public struct SettingsView: View {
                 }
                 Text(verbatim: Self.automaticDetailText).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
+            Section(header: Text("macOS updates")) {
+                Picker(selection: Binding(get: { macOSReminders.reminderDays ?? 0 },
+                                          set: { macOSReminders.setReminderDays($0 == 0 ? nil : $0) })) {
+                    Text(verbatim: MacOSReminderSettings.choiceTitle(nil)).tag(0)
+                    ForEach(MacOSReminderSettings.choices, id: \.self) { days in
+                        Text(verbatim: MacOSReminderSettings.choiceTitle(days)).tag(days)
+                    }
+                } label: { Text("Remind me about macOS updates") }
+                Text(verbatim: MacOSReminderSettings.detailText).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
             Section(header: Text("Notifications")) {
                 Text(verbatim: notifications.statusText).fixedSize(horizontal: false, vertical: true)
                 Button(action: openNotificationSettings) { Text("Open Notification Settings") }
@@ -96,7 +109,7 @@ public struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .onAppear { openAtLogin.refresh(); notifications.refresh(); automaticUpdates.refresh() }
+        .onAppear { openAtLogin.refresh(); notifications.refresh(); automaticUpdates.refresh(); macOSReminders.refresh() }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             openAtLogin.refresh(); notifications.refresh(); automaticUpdates.refresh()
         }
@@ -122,7 +135,7 @@ public struct NativeClientSettingsView: View {
 
     public var body: some View {
         SettingsView(openAtLogin: session.openAtLogin, notifications: session.notificationStatus,
-                     automaticUpdates: session.automaticUpdates,
+                     automaticUpdates: session.automaticUpdates, macOSReminders: session.macOSReminders,
                      version: NativeClientSession.appVersion, openNotificationSettings: { session.openNotificationSettings() })
             .frame(width: 460)
             .fixedSize(horizontal: false, vertical: true)

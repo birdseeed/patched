@@ -67,6 +67,22 @@ restore data.
   in the browser, and a direct, confirmed click on Update installs the release as
   described in "Patched updating itself" below. Nothing is downloaded, installed or
   opened automatically, and Patched's own row is never part of Update All.
+- Apple's public OS version feed, `https://gdmf.apple.com/v2/pmv` (https, 1 MiB cap,
+  strictly parsed), only to say that a newer macOS exists. It is untrusted metadata:
+  only `PublicAssetSets.macOS` is read, and in each entry only `ProductVersion`,
+  `Build`, `PostingDate`, `ExpirationDate` (optional) and `SupportedDevices`. An entry with a
+  missing or wrongly typed field is dropped, and a feed of the wrong shape is not used
+  at all. Only entries whose `SupportedDevices` include this Mac's device ID
+  (`hw.target`) count. The request is a single anonymous GET with a plain
+  `Patched/<version>` User-Agent and no user data, redirects only within
+  gdmf.apple.com, on the normal check schedule and on a plain `patched check`. Its answer can never download,
+  install or run anything: the most it can do is show a wrong version, and the only
+  action on the row is opening System Settings › Software Update.
+- `/Library/Preferences/com.apple.SoftwareUpdate.plist`, read as a file (the file
+  itself must not be a symlink; 1 MiB cap) for what Software Update itself last found. Only its macOS entries in
+  `RecommendedUpdates` and `LastSuccessfulDate` are read. It is used on its own when
+  Apple's feed cannot be reached or used, and like the feed it can only change what
+  the macOS row says.
 - Patched's own Ed25519 release key, for Patched's own updates only (below).
 
 ## Patched updating itself
@@ -319,6 +335,33 @@ kills it: the journal stays open and the result says that the copy at that path 
 not trusted and should be deleted. An older Patched cannot read a
 `freshInstall` journal; it reports it as unreadable and refuses updates until it is resolved,
 which fails safe.
+
+## macOS updates
+
+Patched shows when a macOS update is available and can remind you about it. It never
+downloads or installs macOS, never runs `softwareupdate` and never asks for admin rights
+for this. The only action is opening System Settings › Software Update, where Apple's
+own updater asks for your password and does the install. Update All, automatic updates
+and the command line's `update` leave the macOS row out, and this exclusion is enforced
+in the same places as the `.pkg`, admin and App Store exclusions.
+
+It reads two sources, both Apple's (see "What the tool trusts"):
+- `https://gdmf.apple.com/v2/pmv`, Apple's public list of macOS versions. Patched makes one
+  anonymous GET on the normal check schedule and on a plain `patched check`. The response is size-capped and strictly
+  parsed, and only versions whose supported-device list includes this Mac count. It is
+  untrusted metadata: the worst a wrong or hostile answer can do is show a wrong version
+  or a needless reminder, because the only thing the row can open is System Settings.
+- `/Library/Preferences/com.apple.SoftwareUpdate.plist`, which is readable without admin
+  rights, for what Software Update itself has found. This needs no network. When Apple's
+  feed cannot be reached or parsed, or does not list this Mac, the plist's answer is shown
+  on its own.
+
+A newer version of the running major is an update. A newer major is shown as available,
+for information only.
+
+Deadlines set by an organisation will come in a later release. They will be read only
+from forced managed preferences, as automatic updates are, and fail closed (no deadline)
+on a value of the wrong type. They will never block the Mac or quit apps.
 
 ## Out of scope
 

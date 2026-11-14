@@ -17,6 +17,8 @@ import UpdateSources
     public let notificationStatus: NotificationStatusController
     /// The Install updates automatically setting, with any organisation override.
     public let automaticUpdates: AutomaticUpdateSettings
+    /// "Remind me about macOS updates", off by default.
+    public let macOSReminders: MacOSReminderSettings
     let backgroundChecks: UpdateCheckScheduler?
     let updateNotifier: SystemUpdateNotifier?
     /// The menu item and notification button for Update All; both end in `appUpdates.updateAll()`.
@@ -41,7 +43,10 @@ import UpdateSources
         updateNotifier = notifier
         let automatic = AutomaticUpdateSettings.system()
         automaticUpdates = automatic
-        backgroundChecks = UpdateCheckScheduler.system(controller: live, notifier: notifier, automatic: automatic)
+        let reminders = MacOSReminderSettings.system()
+        macOSReminders = reminders
+        backgroundChecks = UpdateCheckScheduler.system(controller: live, notifier: notifier, automatic: automatic,
+                                                       macOSReminders: reminders)
         updateAllEntry = UpdateAllEntryPoint(controller: live, summaryNotifier: notifier)
         bindAvailableVisibility()
     }
@@ -50,7 +55,7 @@ import UpdateSources
     @_spi(Testing) public init(navigation: ShellNavigation, firstRun: NativeFirstRunController? = nil,
         appUpdates: AppUpdatesController? = nil, urlOpener: (any ExternalURLOpening)? = nil,
         notificationStatus: NotificationStatusController? = nil, selfService: SelfServiceController? = nil,
-        automaticUpdates: AutomaticUpdateSettings? = nil) {
+        automaticUpdates: AutomaticUpdateSettings? = nil, macOSReminders: MacOSReminderSettings? = nil) {
         let setup = firstRun ?? NativeFirstRunController(navigation: navigation, completion: MemorySetupCompletion(completed: true))
         precondition(setup.navigation === navigation, "Testing first-run owners must match the session")
         self.navigation = navigation
@@ -67,6 +72,7 @@ import UpdateSources
         self.openAtLogin = OpenAtLoginController(item: UnavailableLoginItem())
         self.notificationStatus = notificationStatus ?? NotificationStatusController(reader: { $0(.unknown) })
         self.automaticUpdates = automaticUpdates ?? AutomaticUpdateSettings(store: MemoryAutomaticUpdateStore(), managed: ManagedPreferences(reader: NoManagedPreferences()))
+        self.macOSReminders = macOSReminders ?? MacOSReminderSettings(store: MemoryMacOSReminderStore())
         self.backgroundChecks = nil
         self.updateNotifier = nil
         self.updateAllEntry = UpdateAllEntryPoint(controller: self.appUpdates, summaryNotifier: nil)

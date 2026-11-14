@@ -163,6 +163,14 @@ extension NativeClientSession {
         appUpdates.focus(rowID: id)
         return true
     }
+
+    /// A click on the menu's macOS item: open the Updates window at the macOS row. It opens nothing else; Open
+    /// Software Update stays a separate click in the window.
+    @discardableResult public func showMacOSUpdate() -> Bool {
+        navigation.select(.updates)
+        appUpdates.focus(rowID: MacOSUpdateNotice.rowID)
+        return true
+    }
 }
 
 /// Uses the same canonical mark as the shell, in the menu bar's native colour.
@@ -226,6 +234,8 @@ public struct NativeClientMenuItem: Equatable, Identifiable, Sendable {
     public enum Action: Equatable, Sendable {
         /// Open Updates focused on this app. Installs nothing.
         case showUpdate(id: String)
+        /// Open Updates at the macOS row. Installs nothing and opens nothing else.
+        case showMacOSUpdate
         /// Open Patched, and "and N more…": the Updates screen.
         case openUpdates
         case updateAll, stopUpdating, cancelQueuedUpdateAll
@@ -279,7 +289,10 @@ extension NativeClientSession {
             if state.isFailed { command("self-dismiss", String(localized: "Dismiss"), .dismissPatchedFailure) }
         }
         let all = updates.updateAllMenu
-        if !list.rows.isEmpty || all.visible { separator("updates-separator") }
+        let macOS = updates.macOSNotice
+        if !list.rows.isEmpty || all.visible || macOS != nil { separator("updates-separator") }
+        // Listed like an update, first, but it never counts towards Update All.
+        if let macOS { command("row:" + MacOSUpdateNotice.rowID, macOS.menuTitle, .showMacOSUpdate) }
         for row in list.rows {
             command("row:" + row.id, row.name + "  " + row.versions + (row.note.map { " — " + $0 } ?? ""),
                     .showUpdate(id: row.id), iconPath: row.path)
@@ -387,6 +400,7 @@ public struct NativeClientMenuView: View {
     public func perform(_ action: NativeClientMenuItem.Action) {
         switch action {
         case .showUpdate(let id): if session.showUpdate(id: id) { openWindow() }
+        case .showMacOSUpdate: if session.showMacOSUpdate() { openWindow() }
         case .openUpdates: if session.performMenuAction(.updates) { openWindow() }
         case .updateAll: session.updateAllEntry.requestUpdateAll()
         case .stopUpdating, .cancelQueuedUpdateAll: session.updateAllEntry.requestStop()

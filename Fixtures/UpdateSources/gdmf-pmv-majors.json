@@ -1,0 +1,10 @@
+{
+  "PublicAssetSets": {
+    "macOS": [
+      {"ProductVersion": "27.0.1", "Build": "26A434", "PostingDate": "2026-09-29", "ExpirationDate": "2027-01-01", "SupportedDevices": ["J999AP"]},
+      {"ProductVersion": "28.0", "Build": "27A100", "PostingDate": "2026-11-10", "ExpirationDate": "2027-02-12", "SupportedDevices": ["J999AP"]},
+      {"ProductVersion": "28.1", "Build": "27B10", "PostingDate": "2026-11-12", "ExpirationDate": "2027-02-12", "SupportedDevices": ["J999AP"]},
+      {"ProductVersion": "29.0", "Build": "28A5", "PostingDate": "2026-11-13", "ExpirationDate": "2027-02-12", "SupportedDevices": ["J111AP"]}
+    ]
+  }
+}

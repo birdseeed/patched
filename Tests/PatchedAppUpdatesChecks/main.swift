@@ -782,6 +782,8 @@ registerProgressAndCancelChecks()
 registerSelfServiceChecks()
 registerPlainRefusalChecks()
 registerAvailableChecks()
+registerMacOSUpdateChecks()
+registerMacOSReminderChecks()
 
 var failures = 0
 for (name, action) in cases {

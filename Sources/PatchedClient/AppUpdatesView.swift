@@ -59,6 +59,13 @@ public struct AppUpdatesView: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
+                        // Pinned at the top. It only opens Software Update; it is never part of Update All.
+                        if let notice = controller.macOSNotice {
+                            MacOSUpdateRowView(notice: notice, controller: controller,
+                                               highlighted: controller.focusedRowID == MacOSUpdateNotice.rowID)
+                                .id(MacOSUpdateNotice.rowID)
+                            Divider()
+                        }
                         ForEach(controller.updatesRows.updatesFirst) { row in
                             AppUpdateRowView(row: row, controller: controller,
                                              highlighted: controller.focusedRowID == row.id)
@@ -262,6 +269,53 @@ private struct AppUpdateRowView: View {
                     .help(Text("Puts version \(backup) of the app back. Its data is not rolled back, so anything the newer version changed stays changed."))
             }
         }
+    }
+}
+
+/// The pinned macOS row: the version on offer, when Apple posted it, Open Software Update and Not now. A new major
+/// is shown in a quieter style, for information. Nothing here installs anything.
+private struct MacOSUpdateRowView: View {
+    let notice: MacOSUpdateNotice
+    @ObservedObject var controller: AppUpdatesController
+    var highlighted = false
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 12) {
+            Image(systemName: "laptopcomputer").font(.system(size: 26)).frame(width: 40, height: 40)
+                .foregroundStyle(notice.isMajor ? Color.secondary : BrandAccent.color).accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    if notice.isMajor {
+                        Text(verbatim: notice.title).font(.body).foregroundStyle(.secondary)
+                    } else {
+                        Text("macOS").font(.headline)
+                        Text(verbatim: notice.versionChange).font(.callout).foregroundStyle(.secondary)
+                    }
+                }
+                Text(verbatim: notice.statusText).font(.callout)
+                    .foregroundStyle(notice.isMajor ? Color.secondary : BrandAccent.color)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let posted = notice.postedText() {
+                    Text(verbatim: posted).font(.footnote).foregroundStyle(.secondary)
+                }
+                if let major = notice.alsoMajorText {
+                    Text(verbatim: major).font(.footnote).foregroundStyle(.secondary)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            VStack(alignment: .trailing, spacing: 6) {
+                Button(action: { Task { await controller.openSoftwareUpdate() } }) { Text("Open Software Update") }
+                    .borderedButton(prominent: !notice.isMajor)
+                    .accessibilityLabel(Text("Open Software Update in System Settings"))
+                Button(action: { controller.hideMacOSUpdate() }) { Text("Not now") }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel(Text("Hide the macOS update until the next version"))
+            }
+        }
+        .padding(.vertical, 10)
+        .background(RoundedRectangle(cornerRadius: 8, style: .continuous)
+            .fill(highlighted ? BrandAccent.color.opacity(0.12) : Color.clear))
+        .accessibilityElement(children: .contain)
     }
 }
 

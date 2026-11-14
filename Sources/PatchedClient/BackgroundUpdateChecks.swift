@@ -43,11 +43,15 @@ public struct AvailableUpdate: Hashable, Sendable {
     /// "Patched 0.2.0 is available". One call per new version; clicking it opens the Updates view only, and
     /// its Update… button (installable releases only) opens Updates with the confirmation showing.
     func notify(selfUpdate: SelfUpdate, completion: @escaping @MainActor (Bool) -> Void)
+    /// "macOS X is available", or its reminder. Clicking it opens the Updates view only.
+    func notify(macOSUpdate: MacOSUpdateNotice, reminder: Bool, completion: @escaping @MainActor (Bool) -> Void)
 }
 
 extension UpdateNotifying {
     /// Notifiers that do not announce Patched's own releases say nothing.
     public func notify(selfUpdate: SelfUpdate, completion: @escaping @MainActor (Bool) -> Void) { completion(false) }
+    /// Notifiers that do not announce macOS updates say nothing.
+    public func notify(macOSUpdate: MacOSUpdateNotice, reminder: Bool, completion: @escaping @MainActor (Bool) -> Void) { completion(false) }
 }
 
 @MainActor public protocol CancellableToken: AnyObject { func cancel() }
@@ -106,6 +110,8 @@ public enum LoginItemStatus: Equatable, Sendable {
     private let store: any BackgroundCheckStoring
     private let automatic: AutomaticUpdateSettings?
     private let summaryNotifier: (any UpdateSummaryNotifying)?
+    /// The macOS notification bookkeeping and the optional reminder. nil: macOS is never announced.
+    private let macOSReminders: MacOSReminderSettings?
     private let calendar: Calendar
     private var automaticRetryToken: (any CancellableToken)?
     private var timerToken: (any CancellableToken)?
@@ -121,10 +127,11 @@ public enum LoginItemStatus: Equatable, Sendable {
     public init(controller: AppUpdatesController, now: @escaping () -> Date, timer: any CheckTimerScheduling,
                 notifier: any UpdateNotifying, wake: any WakeEventSourcing, store: any BackgroundCheckStoring,
                 automatic: AutomaticUpdateSettings? = nil, summaryNotifier: (any UpdateSummaryNotifying)? = nil,
-                calendar: Calendar = .autoupdatingCurrent) {
+                macOSReminders: MacOSReminderSettings? = nil, calendar: Calendar = .autoupdatingCurrent) {
         self.controller = controller; self.now = now; self.timer = timer
         self.notifier = notifier; self.wake = wake; self.store = store
-        self.automatic = automatic; self.summaryNotifier = summaryNotifier; self.calendar = calendar
+        self.automatic = automatic; self.summaryNotifier = summaryNotifier; self.macOSReminders = macOSReminders
+        self.calendar = calendar
     }
 
     /// Begins the schedule: one check now (unless one ran in the last 10 minutes, or always after a
@@ -135,6 +142,7 @@ public enum LoginItemStatus: Equatable, Sendable {
         checkDespiteRecentCheck = afterSelfUpdate
         controller.onCheckFinished = { [weak self] outcome in self?.finished(outcome) }
         controller.onSelfLookupFinished = { [weak self] in self?.settleSelfUpdateWhenReady() }
+        controller.onMacOSLookupFinished = { [weak self] in self?.settleMacOSWhenReady() }
         controller.onSuccessfulCheckSettled = { [weak self] in self?.runAutomaticIfDue() }
         wakeToken = wake.observe { [weak self] in self?.woke() }
         attempt(.launch)
@@ -146,9 +154,11 @@ public enum LoginItemStatus: Equatable, Sendable {
         wakeToken?.cancel(); wakeToken = nil
         controller.onCheckFinished = nil
         controller.onSelfLookupFinished = nil
+        controller.onMacOSLookupFinished = nil
         controller.onSuccessfulCheckSettled = nil
         automaticRetryToken?.cancel(); automaticRetryToken = nil
         pendingSelfSettle = nil
+        pendingMacOSSettle = nil
         // A check still running will finish unobserved; do not let its ownership outlive this run.
         ownCheckInFlight = false
     }
@@ -215,8 +225,11 @@ public enum LoginItemStatus: Equatable, Sendable {
         // The updates an automatic run is about to attempt are not announced (its summary follows). Every other
         // update, including ones the run leaves out, is announced as usual.
         let attempted = automaticRunWouldStart() ? controller.automaticallyInstallableKeys : []
-        if outcome == .succeeded { settle(notify: mine, unannounced: attempted); pendingSelfSettle = mine; settleSelfUpdateWhenReady() }
-        else { pendingSelfSettle = nil }
+        if outcome == .succeeded {
+            settle(notify: mine, unannounced: attempted)
+            pendingSelfSettle = mine; settleSelfUpdateWhenReady()
+            pendingMacOSSettle = mine; settleMacOSWhenReady()
+        } else { pendingSelfSettle = nil; pendingMacOSSettle = nil }
         arm()
     }
 
@@ -250,6 +263,47 @@ public enum LoginItemStatus: Equatable, Sendable {
             // Quiet when nothing was installed, failed or skipped for being open.
             guard summary.updated + summary.failed + summary.skippedOpen > 0 else { return }
             notifier?.notify(automaticSummary: summary)
+        }
+    }
+
+    // MARK: macOS
+
+    /// Set after a successful check until its macOS lookup has been judged: whether to notify.
+    private var pendingMacOSSettle: Bool?
+    /// A macOS notification still waiting to be delivered (for example on the first permission prompt).
+    private var macOSKeyInFlight: String?
+
+    /// macOS is judged once the app check has finished and its lookup has answered, whichever is later.
+    private func settleMacOSWhenReady() {
+        guard started, let shouldNotify = pendingMacOSSettle, !controller.macOSLookupPending, controller.phase == .idle else { return }
+        pendingMacOSSettle = nil
+        settleMacOSUpdate(notify: shouldNotify)
+    }
+
+    /// One notification per macOS update, never for a new major or a version hidden with Not now. With the reminder
+    /// on, again every N days (at least a day apart) while the same update is still on offer. Nothing is posted while
+    /// an install, roll back or recovery is running; the next check tries again. A check the user started counts as
+    /// the user having seen it, and restarts the reminder clock. A recorded time in the future (a clock set back) is
+    /// brought back to now, which also restarts the clock. Only a delivered notification is remembered.
+    private func settleMacOSUpdate(notify shouldNotify: Bool) {
+        guard let reminders = macOSReminders, let notice = controller.macOSNotice, !notice.isMajor else { return }
+        reminders.refresh()
+        let record = reminders.store
+        let first = record.notifiedKey != notice.key
+        guard shouldNotify else { record.notifiedKey = notice.key; record.notifiedAt = now(); return }
+        if !first {
+            if let at = record.notifiedAt, at > now() { record.notifiedAt = now() }
+            guard let days = reminders.reminderDays else { return }
+            let elapsed = record.notifiedAt.map { now().timeIntervalSince($0) } ?? .infinity
+            guard elapsed >= TimeInterval(max(1, days)) * 24 * 60 * 60 else { return }
+        }
+        guard !controller.isWorking, macOSKeyInFlight != notice.key else { return }
+        let key = notice.key
+        macOSKeyInFlight = key
+        notifier.notify(macOSUpdate: notice, reminder: !first) { [weak self] delivered in
+            guard let self else { return }
+            if self.macOSKeyInFlight == key { self.macOSKeyInFlight = nil }
+            if delivered { record.notifiedKey = key; record.notifiedAt = self.now() }
         }
     }
 
@@ -544,10 +598,10 @@ var runsFromAppBundle: Bool {
 extension UpdateCheckScheduler {
     /// The real timer, wake notification and stored state. Nothing is touched until `start()`.
     static func system(controller: AppUpdatesController, notifier: SystemUpdateNotifier,
-                       automatic: AutomaticUpdateSettings) -> UpdateCheckScheduler {
+                       automatic: AutomaticUpdateSettings, macOSReminders: MacOSReminderSettings) -> UpdateCheckScheduler {
         UpdateCheckScheduler(controller: controller, now: { Date() }, timer: SystemCheckTimer(),
                              notifier: notifier, wake: SystemWakeSource(), store: DefaultsCheckStore(),
-                             automatic: automatic, summaryNotifier: notifier)
+                             automatic: automatic, summaryNotifier: notifier, macOSReminders: macOSReminders)
     }
 }
 

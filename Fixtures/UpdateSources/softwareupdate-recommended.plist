@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>LastSuccessfulDate</key>
+	<date>2026-11-14T13:43:37Z</date>
+	<key>LastResultCode</key>
+	<integer>2</integer>
+	<key>RecommendedUpdates</key>
+	<array>
+		<dict>
+			<key>Display Name</key>
+			<string>Command Line Tools for Xcode</string>
+			<key>Display Version</key>
+			<string>27.3</string>
+			<key>Identifier</key>
+			<string>Command Line Tools for Xcode-27.3</string>
+			<key>Product Key</key>
+			<string>072-12345</string>
+		</dict>
+		<dict>
+			<key>Display Name</key>
+			<string>macOS 27.2.1</string>
+			<key>Display Version</key>
+			<string>27.2.1</string>
+			<key>Identifier</key>
+			<string>MSU_UPDATE_26B131_patch_27.2.1_minor</string>
+			<key>MobileSoftwareUpdate</key>
+			<true/>
+			<key>Product Key</key>
+			<string>MSU_UPDATE_26B131_patch_27.2.1_minor</string>
+		</dict>
+		<dict>
+			<key>Display Name</key>
+			<string>Safari</string>
+			<key>Display Version</key>
+			<string>28.1</string>
+			<key>Identifier</key>
+			<string>Safari28.1</string>
+			<key>Product Key</key>
+			<string>042-99999</string>
+		</dict>
+	</array>
+</dict>
+</plist>
