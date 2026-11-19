@@ -441,6 +441,19 @@ check("matching hashes and length pass") {
     try expectEqual(report.status, .installed); try expectEqual(try version(w.target), "2.0")
 }
 
+check("SHA-512 as 128 hex characters (TradingView's feed) is accepted, and a wrong hex one refused") {
+    let w = try world()
+    let hex = Data(SHA512.hash(data: try Data(contentsOf: URL(fileURLWithPath: w.archive)))).map { String(format: "%02x", $0) }.joined()
+    try await expectRefusal("hash_mismatch") {
+        _ = try await installer(w.box, downloader: w.downloader).update(appAt: w.target,
+            offer: offer("https://example.test/v2.zip", sha512: String(repeating: "ab", count: 64)))
+    }
+    try expectEqual(try version(w.target), "1.0")
+    let report = try await installer(w.box, downloader: w.downloader).update(appAt: w.target,
+        offer: offer("https://example.test/v2.zip", sha512: hex))
+    try expectEqual(report.status, .installed); try expectEqual(try version(w.target), "2.0")
+}
+
 // MARK: 3. Sparkle EdDSA
 
 check("EdDSA: good signature installs, bad and missing are refused") {

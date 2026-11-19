@@ -92,7 +92,9 @@ public enum DigestCheck {
             }
         }
         if let expected = offer.sha512 {
-            guard let bytes = Data(base64Encoded: expected) ?? hexData(expected), bytes.count == 64 else {
+            // 128 hex characters are also valid base64 (decoding to 96 bytes), so hex must be tried first.
+            let hexBytes = expected.count == 128 ? hexData(expected) : nil
+            guard let bytes = hexBytes ?? Data(base64Encoded: expected), bytes.count == 64 else {
                 throw InstallRefusal.hashMismatch("feed SHA-512 is malformed")
             }
             guard bytes == artifact.sha512 else {
