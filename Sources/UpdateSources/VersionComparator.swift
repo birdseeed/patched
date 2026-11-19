@@ -137,6 +137,14 @@ public enum SourceVersioning {
     public static func bundleVersion(short: String?, build: String?, against offered: String, source: UpdateSource) -> String? {
         guard case .homebrewCask = source, let short, let build else { return short }
         guard let s = numericParts(short), let b = numericParts(build), let o = numericParts(offered) else { return short }
+        // Microsoft Office style: short "16.115.1" or "16.115", build "16.115.26111533", cask "16.115.26110837".
+        // Build and offer have the same shape, differ at most in a date-like last component of 8+ digits, and
+        // the short agrees with the build's leading components: the build is the comparable version.
+        if b.count >= 3, b.count == o.count, Array(b.dropLast()) == Array(o.dropLast()),
+           let bl = b.last, let ol = o.last, bl.count >= 8, ol.count >= 8,
+           Array(s.prefix(b.count - 1)) == Array(b.prefix(min(s.count, b.count - 1))) {
+            return build
+        }
         guard b.count > s.count, Array(b.prefix(s.count)) == s, o.count >= s.count, Array(o.prefix(s.count)) == s else {
             if o.count > s.count, Array(o.prefix(s.count)) == s, !(b.count > s.count && Array(b.prefix(s.count)) == s),
                let offerDigits = dottedDigits(offered), let buildDigits = dottedDigits(build), offerDigits == buildDigits {

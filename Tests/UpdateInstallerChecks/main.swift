@@ -1738,6 +1738,32 @@ check("OneDrive-style versions: build is the cask version with different dots (s
     }
     try expectEqual(SourceVersioning.bundleVersion(short: "26.198.1011", build: "26198.1011.0006", against: "26.198.1011.0006", source: cask), "26.198.1011.0006")
 }
+check("Microsoft Office style: short 16.115.1, build 16.115.26111533, cask 16.115.26110837") {
+    let cask = UpdateSource.homebrewCask(token: "microsoft-outlook")
+    // Real values from an installed Office 16.115.1 and the Homebrew casks of the same day.
+    // Same build as the cask: not an update (was offered as one).
+    try expectEqual(SourceVersioning.isNewer(candidateShort: "16.115.26111533", candidateBuild: nil, installedShort: "16.115.1",
+                                             installedBuild: "16.115.26111533", source: cask), .success(false))
+    // Installed build newer than the cask: never offered (was offered as a downgrade).
+    try expectEqual(SourceVersioning.isNewer(candidateShort: "16.115.26110837", candidateBuild: nil, installedShort: "16.115.1",
+                                             installedBuild: "16.115.26111533", source: cask), .success(false))
+    // A genuinely newer build, same minor or next minor: offered.
+    try expectEqual(SourceVersioning.isNewer(candidateShort: "16.115.26120101", candidateBuild: nil, installedShort: "16.115.1",
+                                             installedBuild: "16.115.26111533", source: cask), .success(true))
+    try expectEqual(SourceVersioning.isNewer(candidateShort: "16.116.26120101", candidateBuild: nil, installedShort: "16.115.1",
+                                             installedBuild: "16.115.26111533", source: cask), .success(true))
+    // Excel style (two-part short): an older cask build is not offered either.
+    try expectEqual(SourceVersioning.isNewer(candidateShort: "16.115.26100000", candidateBuild: nil, installedShort: "16.115",
+                                             installedBuild: "16.115.26110837", source: cask), .success(false))
+    // Downgrade guard at install time agrees.
+    func facts(_ short: String, _ build: String) -> BundleFacts { BundleFacts(bundleID: bundleID, shortVersion: short, build: build, sparklePublicEDKey: nil) }
+    let old = UpdateOffer(displayVersion: "16.115.26110837", downloadURL: URL(string: "https://example.test/o.pkg")!, format: .pkg, source: cask)
+    try await expectRefusal("not_newer") {
+        try UpdateInstaller.checkVersions(staged: facts("16.115", "16.115.26110837"), installed: facts("16.115.1", "16.115.26111533"), offer: old)
+    }
+    // Short build-number tails (ordinary patch versions) keep the old rule: short "1.2.9", build "1.2.4" stays "1.2.9".
+    try expectEqual(SourceVersioning.bundleVersion(short: "1.2.9", build: "1.2.4", against: "1.2.5", source: cask), "1.2.9")
+}
 check("v2#6 full version in CFBundleVersion (Opera): offered, accepted, and up to date afterwards") {
     let cask = UpdateSource.homebrewCask(token: "opera")
     func facts(_ short: String, _ build: String) -> BundleFacts { BundleFacts(bundleID: bundleID, shortVersion: short, build: build, sparklePublicEDKey: nil) }
