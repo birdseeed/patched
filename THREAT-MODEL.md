@@ -19,6 +19,13 @@ is experimental and off by default. Both are described at the end.
    path with no shell. Disk images are attached read-only, never shown in Finder,
    and a password or licence prompt fails instead of waiting. Unpacking needs free
    space in advance and is stopped if it grows past a size or file-count budget.
+   When the download link names no format (no `.zip` or `.dmg`, as with some
+   Homebrew casks), the update path without admin rights identifies it after the
+   download and the checks above, from its contents: a zip header gives zip, a disk
+   image trailer gives dmg, and anything else, installer packages included, is
+   refused (`unsupported_format`). The format only chooses `ditto` or `hdiutil`;
+   every check below still applies. The admin path and fresh installs still need a
+   format named by the link.
 5. **The new app.** Exactly one app with the same bundle ID, and no symlinks that
    point outside it. Its code signature must be valid (strict, every architecture,
    nested code, revocation checked) and signed by the installed app's Team ID.
