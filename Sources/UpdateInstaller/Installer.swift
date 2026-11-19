@@ -243,6 +243,8 @@ public struct UpdateInstaller: Sendable {
         if let format {
             switch format {
             case .zip, .dmg: break
+            // No format in the URL: decided from the download's contents (zip or disk image only), never a pkg.
+            case .unknown: break
             case .pkg where !allowAdmin: throw InstallRefusal.unsupportedFormat("pkg installers need admin rights (Phase 2b)")
             case .pkg: break
             default: throw InstallRefusal.unsupportedFormat(format.rawValue)
@@ -605,12 +607,15 @@ public struct UpdateInstaller: Sendable {
                                                consent: packageConsent, vendor: route)
             }
         }
+        if case .appStore = offer.source { throw InstallRefusal.unsupportedFormat("Mac App Store apps update in the App Store") }
         let consent = adminConsent(admin, packages: offer.format == .pkg)
         let target = try inspect(appPath: appPath, format: offer.format, allowAdmin: consent != nil)
         if let consent, offer.format == .pkg {
             return try await packageUpdate(target, offer: offer, options: options, consent: consent)
         }
         if let consent, target.adminReason != nil {
+            // The admin path needs the format up front; an unnamed one is only handled by the plain path.
+            guard offer.format != .unknown else { throw InstallRefusal.unsupportedFormat(offer.format.rawValue) }
             return try await privilegedUpdate(target, offer: offer, options: options, consent: consent)
         }
         let lock = try begin(target)
@@ -631,7 +636,7 @@ public struct UpdateInstaller: Sendable {
             id: id, kind: .update, phase: .staging, bundleID: target.facts.bundleID, teamID: target.teamID,
             targetPath: target.path, stagingDir: target.parent + "/.mac-updater-" + id,
             downloadDir: locations.downloads + "/" + id,
-            mountPoint: offer.format == .dmg ? locations.downloads + "/" + id + "/mnt" : nil,
+            mountPoint: offer.format == .dmg || offer.format == .unknown ? locations.downloads + "/" + id + "/mnt" : nil,
             oldIdentity: target.identity, oldShortVersion: target.facts.shortVersion, oldBuild: target.facts.build,
             backupDir: backupFolder(for: target), createdAt: now, updatedAt: now)
         return try await cleaningUp(initial) { journal in
@@ -646,7 +651,11 @@ public struct UpdateInstaller: Sendable {
             try SparkleSignature.check(publicKey: target.facts.sparklePublicEDKey, signature: offer.edSignature,
                                        archivePath: artifact.path)
             try Task.checkCancellation()
-            let staged = try stageAndVerify(artifact: artifact.path, format: offer.format, target: target, offer: offer,
+            let format = offer.format == .unknown ? ArtifactSniffer.format(of: artifact.path) : offer.format
+            guard format == .zip || format == .dmg || offer.format != .unknown else {
+                throw InstallRefusal.unsupportedFormat("the download is neither a zip archive nor a disk image")
+            }
+            let staged = try stageAndVerify(artifact: artifact.path, format: format, target: target, offer: offer,
                                             stagingDir: journal.stagingDir, mountPoint: journal.mountPoint)
             try Task.checkCancellation()
             if options.dryRun {

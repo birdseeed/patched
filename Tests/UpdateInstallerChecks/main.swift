@@ -375,7 +375,8 @@ check("pkg and other formats are unsupported") {
     let w = try world()
     try await expectRefusal("unsupported_format") { _ = try installer(w.box).checkPreconditions(appPath: w.target, format: .pkg) }
     try await expectRefusal("unsupported_format") { _ = try installer(w.box).checkPreconditions(appPath: w.target, format: .tarball) }
-    try await expectRefusal("unsupported_format") { _ = try installer(w.box).checkPreconditions(appPath: w.target, format: .unknown) }
+    // An unnamed format passes preconditions: it is decided from the download's contents (zip or dmg only).
+    _ = try installer(w.box).checkPreconditions(appPath: w.target, format: .unknown)
     try await expectRefusal("unsupported_format") {
         _ = try await installer(w.box, downloader: w.downloader).update(appAt: w.target, offer: offer("https://example.test/v2.pkg", format: .pkg))
     }
@@ -452,6 +453,39 @@ check("SHA-512 as 128 hex characters (TradingView's feed) is accepted, and a wro
     let report = try await installer(w.box, downloader: w.downloader).update(appAt: w.target,
         offer: offer("https://example.test/v2.zip", sha512: hex))
     try expectEqual(report.status, .installed); try expectEqual(try version(w.target), "2.0")
+}
+
+check("a download link with no file extension (VS Code, Postman) is recognised by its contents") {
+    // Zip and disk image, served from extensionless URLs: both install with every usual check.
+    for format in [ArtifactFormat.zip, .dmg] {
+        let w = try world(format: format)
+        w.downloader.serve("https://example.test/download/stable", from: w.archive)
+        let report = try await installer(w.box, downloader: w.downloader).update(appAt: w.target,
+            offer: offer("https://example.test/download/stable", format: .unknown))
+        try expectEqual(report.status, .installed, "\(format)"); try expectEqual(try version(w.target), "2.0")
+        try expectClean(w.box)
+    }
+    // Anything that is neither a zip nor a disk image (here a flat installer package and plain text) is refused.
+    for (name, bytes) in [("xar", Data("xar!".utf8) + Data(repeating: 0, count: 600)), ("text", Data("<html>hello</html>".utf8))] {
+        let w = try world()
+        let path = w.box.fixtures + "/" + name
+        try bytes.write(to: URL(fileURLWithPath: path))
+        w.downloader.serve("https://example.test/download/stable", from: path)
+        try await expectRefusal("unsupported_format") {
+            _ = try await installer(w.box, downloader: w.downloader).update(appAt: w.target,
+                offer: offer("https://example.test/download/stable", format: .unknown))
+        }
+        try expectEqual(try version(w.target), "1.0"); try expectClean(w.box)
+    }
+    // A recognised zip still has to pass the identity checks: another team's app is refused.
+    let other = try world(newTeam: "BBBBBBBBBB")
+    other.downloader.serve("https://example.test/download/stable", from: other.archive)
+    do {
+        _ = try await installer(other.box, downloader: other.downloader).update(appAt: other.target,
+            offer: offer("https://example.test/download/stable", format: .unknown))
+        try expect(false, "another team's app was installed")
+    } catch let refusal as InstallRefusal { try expect(refusal.code != "unsupported_format", "refused for the wrong reason: \(refusal.code)") }
+    try expectEqual(try version(other.target), "1.0")
 }
 
 // MARK: 3. Sparkle EdDSA

@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import UpdateSources
 
 public enum UnpackLimits {
     public static let dittoTimeout: TimeInterval = 15 * 60
@@ -118,6 +119,22 @@ public enum Unpacker {
         if !isMountPoint(mountPoint) { return true }
         _ = ProcessRunner.run("/usr/bin/hdiutil", ["detach", mountPoint, "-force", "-quiet"], timeout: UnpackLimits.detachTimeout)
         return !isMountPoint(mountPoint)
+    }
+}
+
+/// Identifies a downloaded artifact whose URL named no format (for example `.../darwin-arm64/stable`).
+/// Only a zip ("PK\u{3}\u{4}" at the start) or a UDIF disk image ("koly" trailer in the last 512 bytes) is
+/// recognised; anything else, installer packages included, stays `.unknown` and is refused by the caller.
+/// The format only picks the unpacker: the unpacked app still passes every identity and version check.
+public enum ArtifactSniffer {
+    public static func format(of path: String) -> ArtifactFormat {
+        guard let handle = FileHandle(forReadingAtPath: path) else { return .unknown }
+        defer { try? handle.close() }
+        guard let head = try? handle.read(upToCount: 4), head.count == 4 else { return .unknown }
+        if head == Data([0x50, 0x4B, 0x03, 0x04]) { return .zip }
+        guard let size = try? handle.seekToEnd(), size >= 512 else { return .unknown }
+        guard (try? handle.seek(toOffset: size - 512)) != nil, let tail = try? handle.read(upToCount: 4) else { return .unknown }
+        return tail == Data("koly".utf8) ? .dmg : .unknown
     }
 }
 
