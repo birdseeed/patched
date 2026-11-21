@@ -412,5 +412,6 @@ the expected Team ID can still be malicious.
 
 This is a community project without company-backed support. If you find a
 problem, see [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
+Chat with us in #patched on the [MacAdmins Slack](https://macadmins.org).
 If Patched saves you time, you can [buy me a coffee](https://buymeacoffee.com/andybridson).
 Donations help pay for the Apple Developer membership that signs and notarises releases.
