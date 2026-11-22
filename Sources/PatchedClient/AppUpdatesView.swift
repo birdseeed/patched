@@ -16,8 +16,13 @@ extension LocalInstalledIcon {
 /// The Updates screen: check, per-app Update, Update All, Roll back and Recover.
 public struct AppUpdatesView: View {
     @ObservedObject private var controller: AppUpdatesController
+    /// For the one-time "Patched can update itself next time" offer. nil: never shown.
+    private let automaticUpdates: AutomaticUpdateSettings?
 
-    public init(controller: AppUpdatesController) { self.controller = controller }
+    public init(controller: AppUpdatesController, automaticUpdates: AutomaticUpdateSettings? = nil) {
+        self.controller = controller
+        self.automaticUpdates = automaticUpdates
+    }
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -47,6 +52,7 @@ public struct AppUpdatesView: View {
                     .padding(.horizontal, 10).padding(.vertical, 6)
                     .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(BrandAccent.color.opacity(0.12)))
             }
+            if let automaticUpdates { SelfUpdateOfferNote(settings: automaticUpdates) }
             if let failure = controller.ignoreEditFailure {
                 IgnoreEditFailureBanner(message: failure) { controller.dismissIgnoreEditFailure() }
             }
@@ -407,5 +413,29 @@ public struct NativeClientUpdatesCommands: View {
             .disabled(!controller.canCheck)
         Button("Update All") { controller.updateAll() }
             .disabled(!controller.canUpdateAll)
+    }
+}
+
+/// Shown once, after Patched reopens from an update the user confirmed, while "Also update Patched itself" is off
+/// and can be changed. Showing it counts as the one time; Turn on or Not now remove it. No notification or badge.
+@_spi(Testing) public struct SelfUpdateOfferNote: View {
+    @ObservedObject var settings: AutomaticUpdateSettings
+    public init(settings: AutomaticUpdateSettings) { self.settings = settings }
+
+    public var body: some View {
+        if settings.showsSelfUpdateNote {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(verbatim: settings.selfUpdateNoteText).font(.callout)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 8)
+                Button(action: { settings.declineSelfUpdateNote() }) { Text("Not now") }
+                    .borderedButton(prominent: false)
+                Button(action: { settings.acceptSelfUpdateNote() }) { Text(verbatim: settings.selfUpdateNoteAcceptTitle) }
+                    .borderedButton(prominent: true)
+            }
+            .padding(.horizontal, 10).padding(.vertical, 6)
+            .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(BrandAccent.color.opacity(0.08)))
+            .onAppear { settings.selfUpdateNoteShown() }
+        }
     }
 }

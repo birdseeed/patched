@@ -81,6 +81,28 @@ private func run(_ start: Date, trigger: HistoryRun.Trigger = .updateAll, items:
         try expect(run.summary == "1 updated, 1 failed, 1 skipped because open", "summary: \(run.summary)")
     }
 
+    check("history: an app that updated itself while Patched worked is a success, counted as updated, and recorded as updated_itself") {
+        let installer = FakeInstaller()
+        installer.updateHandler = { outcome, _ in
+            if outcome.app.name == "Bravo" { throw InstallRefusal.updatedItself("Bravo.app is now 3.0 (300)") }
+            return AppUpdateReport(status: "installed", fromVersion: "1.0", toVersion: "2.0", backupFolder: "/b")
+        }
+        let controller = makeController(outcomes: [outcome(app("Alpha"), .updateAvailable(offer("2.0"))),
+                                                   outcome(app("Bravo"), .updateAvailable(offer("3.0")))], installer: installer)
+        let store = MemoryHistoryStore()
+        controller.history = store
+        await runCheck(controller)
+        await runOperation(controller) { _ = controller.updateAll() }
+        let row = controller.row(id: "/Fake/Bravo.app")
+        let expected = PlainRefusalText.text(name: "Bravo", .updatedItself("Bravo.app is now 3.0 (300)"))
+        try expect(row?.result?.kind == .success && row?.result?.text == expected, "row result: \(String(describing: row?.result))")
+        try expect(controller.summary == "2 updated.", "summary: \(controller.summary)")
+        let run = store.runs().first
+        let item = run?.items.first { $0.name == "Bravo" }
+        try expect(run?.outcome == .updated && run?.hasFailures == false && item?.result == .updated && item?.detail == "updated_itself",
+                   "history: \(String(describing: run))")
+    }
+
     check("history: a single app's update is its own run, and a Cancel is recorded as cancelled, not failed") {
         let controller = makeController(outcomes: [outcome(app("Alpha"), .updateAvailable(offer("2.0"))),
                                                    outcome(app("Bravo"), .updateAvailable(offer("3.0")))])

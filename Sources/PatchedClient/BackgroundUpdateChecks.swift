@@ -14,7 +14,10 @@ import UpdateInstaller
 // possibly set by an organisation). Only `runAutomaticIfDue()` below may install, and only when that setting
 // is on, the chosen time has come and no run has happened today. It calls the same `updateAll` as the Update
 // All button, in its narrower `automatic` form: no App Store, no installer packages, no admin, no Patched
-// itself, no hidden apps and no open apps. Nothing else in this file can install.
+// itself, no hidden apps and no open apps. Then, only with the second opt-in "Also update Patched itself" in
+// effect, `runAutomaticSelfUpdateIfOwed()` may install Patched's own release, once that run is over, when
+// nothing else is going on and this Mac has known that exact version for at least 24 hours. It uses the same
+// signed self-update path as a confirmed click. Nothing else in this file can install.
 
 // MARK: Seams
 
@@ -124,6 +127,12 @@ public enum LoginItemStatus: Equatable, Sendable {
     /// Set when Patched was reopened by its own self-update: the first check runs even if the previous copy
     /// checked minutes ago, so the new version's list is never empty. Cleared once that check starts.
     private var checkDespiteRecentCheck = false
+    /// Set when today's automatic run is over, until its self-update has been decided (it may wait for Patched's own
+    /// release lookup to answer). Cleared by the next check, so a later check can never start it.
+    private var automaticSelfUpdateOwed = false
+    /// The check today's automatic run came from (`AppUpdatesController.checkGeneration`). Its own release lookup is
+    /// the only one the self-update may act on.
+    private var automaticRunGeneration: Int?
     public private(set) var started = false
 
     public init(controller: AppUpdatesController, now: @escaping () -> Date, timer: any CheckTimerScheduling,
@@ -143,7 +152,11 @@ public enum LoginItemStatus: Equatable, Sendable {
         started = true
         checkDespiteRecentCheck = afterSelfUpdate
         controller.onCheckFinished = { [weak self] outcome in self?.finished(outcome) }
-        controller.onSelfLookupFinished = { [weak self] in self?.settleSelfUpdateWhenReady() }
+        controller.onSelfLookupFinished = { [weak self] in
+            self?.noteSelfRelease()
+            self?.settleSelfUpdateWhenReady()
+            self?.runAutomaticSelfUpdateIfOwed()
+        }
         controller.onMacOSLookupFinished = { [weak self] in self?.settleMacOSWhenReady() }
         controller.onSuccessfulCheckSettled = { [weak self] in self?.runAutomaticIfDue() }
         wakeToken = wake.observe { [weak self] in self?.woke() }
@@ -159,6 +172,7 @@ public enum LoginItemStatus: Equatable, Sendable {
         controller.onMacOSLookupFinished = nil
         controller.onSuccessfulCheckSettled = nil
         automaticRetryToken?.cancel(); automaticRetryToken = nil
+        automaticSelfUpdateOwed = false; automaticRunGeneration = nil
         pendingSelfSettle = nil
         pendingMacOSSettle = nil
         // A check still running will finish unobserved; do not let its ownership outlive this run.
@@ -215,6 +229,7 @@ public enum LoginItemStatus: Equatable, Sendable {
 
     private func finished(_ outcome: AppCheckRunOutcome) {
         guard started else { return }
+        automaticSelfUpdateOwed = false; automaticRunGeneration = nil
         let mine = ownCheckInFlight
         ownCheckInFlight = false
         // A check the user started counts as the latest check too.
@@ -266,13 +281,63 @@ public enum LoginItemStatus: Equatable, Sendable {
         automaticRetryToken?.cancel(); automaticRetryToken = nil
         // Recorded as the run starts, so a relaunch the same day, or a second check, never runs it again.
         automatic.lastRunDay = AutomaticUpdateSchedule.dayKey(now(), calendar: calendar)
+        automaticRunGeneration = controller.checkGeneration
         let notifier = summaryNotifier, controller = controller
-        controller.updateAll(only: nil, askInWindow: false, automatic: true) { summary in
+        let started = controller.updateAll(only: nil, askInWindow: false, automatic: true) { summary in
             // Quiet when nothing was installed, failed or skipped for being open.
             guard summary.updated + summary.failed + summary.skippedOpen > 0 else { return }
             // The run is recorded just before this is called, so the newest run is this one.
             let run = controller.lastRun.flatMap { $0.trigger == .scheduled ? $0.id : nil }
             notifier?.notify(automaticSummary: summary, historyRunID: run)
+        } afterRun: { [weak self] in self?.automaticRunEnded() }
+        // Nothing to install: the run is already over.
+        if !started { automaticRunEnded() }
+    }
+
+    // MARK: Patched itself (opt-in)
+
+    /// Today's automatic run has finished its app updates and nothing is working: Patched's own update may follow.
+    private func automaticRunEnded() {
+        guard started else { return }
+        automaticSelfUpdateOwed = true
+        runAutomaticSelfUpdateIfOwed()
+    }
+
+    /// A release lookup answered. Newer: remember when this Mac first saw that version with that content (local time
+    /// only). No news: forget it, so a release pulled and published again waits the full 24 hours. A lookup that
+    /// failed says nothing and changes nothing. Only the lookup's own answer is used, never an offer kept from before.
+    private func noteSelfRelease() {
+        guard let automatic, let answer = controller.selfLookupAnswer else { return }
+        switch answer.result {
+        case .newer(let release): automatic.noteSelfRelease(release.version, fingerprint: release.assets?.fingerprint, now: now())
+        case .noNews: automatic.clearSelfReleaseSighting()
+        case .unavailable: break
+        }
+    }
+
+    /// Installs Patched's own release after today's automatic run, at most once per run. Only with "Also update
+    /// Patched itself" in effect (automatic updates on too), when the release lookup of the check this run came from
+    /// answered `.newer` (a failed lookup never falls back to an earlier offer), with a signed zip whose content has a
+    /// fingerprint, that exact version and fingerprint known here for at least 24 hours and not tried automatically
+    /// before, and nothing else going on.
+    /// Waits only for that lookup to answer; anything else unmet leaves it for the next day's run. Never reached from
+    /// a manual Update All or a check.
+    private func runAutomaticSelfUpdateIfOwed() {
+        guard started, automaticSelfUpdateOwed, let automatic else { return }
+        // The lookup of the check this run came from has not answered yet: its end comes back here.
+        if controller.selfLookupPending { return }
+        automaticSelfUpdateOwed = false
+        let generation = automaticRunGeneration
+        automaticRunGeneration = nil
+        automatic.refresh()
+        guard automatic.selfUpdatesEnabled, let generation, let answer = controller.selfLookupAnswer, answer.generation == generation,
+              case .newer(let release) = answer.result, let fingerprint = release.assets?.fingerprint else { return }
+        guard automatic.selfReleaseSoaked(release.version, fingerprint: fingerprint, now: now()),
+              // Tried once already (it failed, or it installed but could not reopen): only a click, or a new release.
+              !automatic.selfUpdateAlreadyAttempted(release.version, fingerprint: fingerprint),
+              controller.idleForAutomaticSelfUpdate else { return }
+        if controller.installSelfUpdateAutomatically(version: release.version, fingerprint: fingerprint, checkGeneration: generation) {
+            automatic.noteSelfUpdateAttempt(release.version, fingerprint: fingerprint)
         }
     }
 

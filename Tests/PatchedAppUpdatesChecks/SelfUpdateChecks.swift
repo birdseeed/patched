@@ -151,6 +151,32 @@ private struct NoIndex: CaskIndexProviding { func index() async -> Result<CaskIn
         try expect(opener.urls == [page020] && opener.apps.isEmpty && opener.appPaths.isEmpty, "click opened \(opener.urls)")
     }
 
+    check("self update: What's new opens exactly the release notes anchor, only on a click, and only for a clean version") {
+        let notes = URL(string: "https://patched.im/releases#v0-2-0")!
+        let opener = RecordingOpener()
+        let c = controller(FakeLookup(newer("0.2.0", page020)))
+        c.urlOpener = opener
+        c.openSelfUpdateReleaseNotes()
+        try expect(opener.nothingOpened, "opened with nothing announced")
+        await runCheck(c)
+        let session = NativeClientSession(navigation: ShellNavigation(destination: .updates), appUpdates: c, urlOpener: opener)
+        try expect(menuWords(session).contains("What's new in Patched 0.2.0"), "menu text: \(menuWords(session))")
+        _ = try paintView(NativeClientMenuView(session: session, openWindow: {}), width: 320, height: 420)
+        _ = try paintView(AppUpdatesView(controller: c), width: 720, height: 300)
+        try expect(opener.nothingOpened, "the check or painting opened something: \(opener.urls)")
+        c.openSelfUpdateReleaseNotes()
+        try expect(opener.urls == [notes] && opener.apps.isEmpty && opener.appPaths.isEmpty, "click opened \(opener.urls)")
+        try expect(SelfUpdate(version: "0.2.0", url: page020).releaseNotesURL == notes, "url")
+        for bad in ["0.2.0/../x", "", "0.2.", "v0.2.0", "0.2.0\n"] {
+            try expect(SelfUpdate(version: bad, url: page020).releaseNotesURL == nil, "\(bad) gave a link")
+        }
+        let odd = controller(nil)
+        odd.urlOpener = opener
+        odd.selfUpdateCheck = { newer("0.2.0/../x", page020) }
+        await runCheck(odd)
+        try expect(!menuWords(NativeClientSession(navigation: ShellNavigation(destination: .updates), appUpdates: odd, urlOpener: opener)).contains("What's new"), "link for no news")
+    }
+
     check("self update: a release page that fails validation shows nothing and Download opens nothing") {
         // The same bytes through the real parser: every unsafe page is dropped before the controller sees it.
         let opener = RecordingOpener()
@@ -434,7 +460,7 @@ private struct NoIndex: CaskIndexProviding { func index() async -> Result<CaskIn
         notifier.handle(requestIdentifier: id, actionIdentifier: UNNotificationDefaultActionIdentifier)
         try expect(opened == 1, "handled: \(opened)")
         let source = try String(contentsOfFile: sourcesRoot() + "/PatchedClient/BackgroundUpdateChecks.swift", encoding: .utf8)
-        try expect(!source.contains("downloadSelfUpdate") && !source.contains("urlOpener"), "scheduler can open the release page")
+        try expect(!source.contains("downloadSelfUpdate") && !source.contains("openSelfUpdateReleaseNotes") && !source.contains("urlOpener"), "scheduler can open the release page")
     }
 
     check("self update: the live wiring makes no request under the tripwire, and one per check without it") {

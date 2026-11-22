@@ -283,6 +283,14 @@ func describe(_ row: UpdateRow) -> String {
                                                              options: UpdateOptions(quitIfRunning: quitIfRunning, dryRun: dryRun),
                                                              scope: scope, notice: installerNotice())
             return row(app, report)
+        } catch InstallRefusal.updatedItself {
+            // The app installed its own update while Patched worked; Patched verified it and changed nothing. It is an
+            // update (status installed, exit 0), and `reason` carries the code so the history item's detail is
+            // `updated_itself`, as the app records it. The printed line reads only the status, versions and note.
+            let now = (try? BundleFacts.read(bundleAt: app.path)).map { InstallTarget.versionText($0.shortVersion, $0.build) }
+            return UpdateRow(name: app.name, path: app.path, bundleID: app.bundleID, status: "installed", fromVersion: versionText(app),
+                             toVersion: now, backupFolder: nil, reason: InstallRefusal.updatedItself("").code, reasonDetail: nil,
+                             note: "the app updated itself while Patched was working")
         } catch let refusal as InstallRefusal {
             return refusedRow(app, code: refusal.code, message: refusal.message)
         } catch {

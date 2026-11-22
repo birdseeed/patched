@@ -54,6 +54,7 @@ import UpdateSources
                                                        macOSReminders: reminders)
         updateAllEntry = UpdateAllEntryPoint(controller: live, summaryNotifier: notifier)
         bindAvailableVisibility()
+        offerSelfUpdatesAfterConfirmedSelfUpdate()
     }
     // Testing-only injection must retain the exact fixture owners. The nil
     // default suppresses setup to preserve every older fixture's paint contract.
@@ -84,6 +85,12 @@ import UpdateSources
         self.updateNotifier = nil
         self.updateAllEntry = UpdateAllEntryPoint(controller: self.appUpdates, summaryNotifier: nil)
         bindAvailableVisibility()
+        offerSelfUpdatesAfterConfirmedSelfUpdate()
+    }
+    /// A confirmed self-update marks the one-time "Patched can update itself next time" offer, which the reopened
+    /// copy shows on the Updates screen (see `AutomaticUpdateSettings.showsSelfUpdateNote`).
+    private func offerSelfUpdatesAfterConfirmedSelfUpdate() {
+        appUpdates.onConfirmedSelfUpdateInstalled = { [weak automatic = automaticUpdates] in automatic?.markSelfUpdateNotePending() }
     }
     /// Available is listed in the sidebar only while a catalogue is managed on this Mac (valid or not).
     private func bindAvailableVisibility() {
@@ -142,7 +149,7 @@ public struct NativeClientRootView: View {
             AppsListView(controller: session.appUpdates, showUpdate: { session.showUpdate(id: $0) })
                 .frame(minHeight: 440)
         case .updates:
-            AppUpdatesView(controller: session.appUpdates)
+            AppUpdatesView(controller: session.appUpdates, automaticUpdates: session.automaticUpdates)
                 .frame(minHeight: 440)
         case .available:
             AvailableView(controller: session.selfService)

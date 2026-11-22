@@ -1422,6 +1422,39 @@ check("self release assets: the exact zip and signature URLs are accepted, along
     try expectEqual(PatchedReleaseChecker.evaluate(assetsJSON([goodZip, goodSig]), currentVersion: "0.1.0"), .newer(release))
 }
 
+check("self release assets: the fingerprint is each file's integer id, plus a well-formed digest when given") {
+    let digestZip = "sha256:" + String(repeating: "a1", count: 32), digestSig = "sha256:" + String(repeating: "0f", count: 32)
+    func pair(_ zipExtra: String, _ sigExtra: String) -> Data {
+        assetsJSON([asset("Patched-0.2.0.zip", download020 + "Patched-0.2.0.zip", extra: zipExtra),
+                    asset("Patched-0.2.0.zip.sig", download020 + "Patched-0.2.0.zip.sig", extra: sigExtra)])
+    }
+    func mark(_ data: Data) throws -> String?? { try PatchedReleaseChecker.parse(data).unwrapChecked().assets.map { $0.fingerprint } }
+    try expectEqual(try mark(pair(#","id":301"#, #","id":302"#)), .some("zip=301;sig=302"))
+    try expectEqual(try mark(pair(#","id":301,"digest":"\#(digestZip)""#, #","id":302,"digest":"\#(digestSig)""#)),
+                    .some("zip=301@\(digestZip);sig=302@\(digestSig)"))
+    try expectEqual(try mark(pair(#","id":301,"digest":null"#, #","id":302"#)), .some("zip=301;sig=302"))
+    try expectEqual(try mark(pair(#","id":9007199254740992"#, #","id":1"#)), .some("zip=9007199254740992;sig=1"))
+    // A replaced file (new id) is a different fingerprint.
+    try expect(try mark(pair(#","id":301"#, #","id":302"#)) != mark(pair(#","id":303"#, #","id":302"#)), "a new id kept the fingerprint")
+    // Anything that is not a plain positive integer id, or a malformed digest: assets kept (a click can install), no fingerprint.
+    let badIDs = [#""#, #","id":true"#, #","id":false"#, #","id":1.5"#, #","id":"301""#, #","id":0"#, #","id":-4"#, #","id":null"#,
+                  #","id":[301]"#, #","id":9007199254740993"#, #","id":1e3"#]
+    for bad in badIDs {
+        try expectEqual(try mark(pair(bad, #","id":302"#)), .some(nil), "zip id \(bad)")
+        try expectEqual(try mark(pair(#","id":301"#, bad)), .some(nil), "sig id \(bad)")
+    }
+    let badDigests = [#","digest":"sha256:6a78""#, #","digest":5"#, #","digest":"SHA256:\#(String(repeating: "a", count: 64))""#,
+                      #","digest":"sha256:\#(String(repeating: "A", count: 64))""#, #","digest":"sha512:\#(String(repeating: "a", count: 64))""#,
+                      #","digest":"sha256:\#(String(repeating: "a", count: 65))""#, #","digest":"""#, #","digest":{}"#]
+    for bad in badDigests {
+        try expectEqual(try mark(pair(#","id":301"# + bad, #","id":302"#)), .some(nil), "zip digest \(bad)")
+    }
+    // The fingerprint never makes assets of a release whose names or URLs fail: they stay notify-only.
+    let wrong = assetsJSON([asset("Patched-0.2.0.zip", "https://evil.example/Patched-0.2.0.zip", extra: #","id":301"#),
+                            asset("Patched-0.2.0.zip.sig", download020 + "Patched-0.2.0.zip.sig", extra: #","id":302"#)])
+    try expect(try PatchedReleaseChecker.parse(wrong).unwrapChecked().assets == nil, "a bad URL with ids was accepted")
+}
+
 check("self release assets: a wrong host, scheme, path, tag, name or query leaves the release notify-only") {
     let zipName = "Patched-0.2.0.zip"
     let badZipURLs = ["https://evil.example/birdseeed/patched/releases/download/v0.2.0/" + zipName,
@@ -1466,16 +1499,16 @@ check("self release assets: a wrong host, scheme, path, tag, name or query leave
     try expect(PatchedReleaseChecker.parse(draft) == nil, "draft with assets accepted")
 }
 
-check("self release: malformed JSON, wrong shapes and oversized responses are silent") {
+check("self release: malformed JSON, wrong shapes and oversized responses say nothing (unavailable, not no news)") {
     for body in ["", "not json", "[]", "null", "{}", #"{"tag_name":5,"html_url":"x","draft":false,"prerelease":false}"#, "{\"tag_name\":\"v9.9.9\""] {
-        try expectEqual(PatchedReleaseChecker.evaluate(Data(body.utf8), currentVersion: "0.1.0"), .noNews, body)
+        try expectEqual(PatchedReleaseChecker.evaluate(Data(body.utf8), currentVersion: "0.1.0"), .unavailable, body)
         let fetcher = ReleaseFetcher(.success(Data(body.utf8)))
-        try expectEqual(await PatchedReleaseChecker.check(currentVersion: "0.1.0", fetcher: fetcher), .noNews, "fetched \(body)")
+        try expectEqual(await PatchedReleaseChecker.check(currentVersion: "0.1.0", fetcher: fetcher), .unavailable, "fetched \(body)")
     }
     let huge = releaseJSON(extra: #","body":""# + String(repeating: "a", count: FetchLimits.releaseBytes) + "\"")
     try expect(huge.count > FetchLimits.releaseBytes, "fixture not oversized")
     try expect(PatchedReleaseChecker.parse(huge) == nil, "oversized record parsed")
-    try expectEqual(await PatchedReleaseChecker.check(currentVersion: "0.1.0", fetcher: ReleaseFetcher(.success(huge))), .noNews)
+    try expectEqual(await PatchedReleaseChecker.check(currentVersion: "0.1.0", fetcher: ReleaseFetcher(.success(huge))), .unavailable)
     try expectEqual(await PatchedReleaseChecker.check(currentVersion: "0.1.0", fetcher: ReleaseFetcher(.failure(.tooLarge))), .unavailable)
 }
 check("self release: 404 (no release yet) is no news; a network failure is unavailable") {

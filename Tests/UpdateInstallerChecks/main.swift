@@ -1431,6 +1431,191 @@ check("#6 relaunch only after a verified outcome: restored is relaunched, unreso
     try expectEqual(running.relaunched, [], "unverified swap must not relaunch")
     try expectEqual(await installer(w.box).recover().reports.map { try? $0.result.get() }, [.completed], "recover finishes it")
 }
+/// What Sparkle's "install on quit" does as the app quits: the app replaces itself on disk.
+func replaceSelf(_ target: String, aside root: String, id: String = bundleID, short: String, build: String, team: String? = teamA,
+                 notarised: Bool = true) throws {
+    let aside = root + "/aside-\(UUID().uuidString)"
+    try FileManager.default.moveItem(atPath: target, toPath: aside)
+    try makeApp(at: target, id: id, short: short, build: build, team: team, notarised: notarised)
+}
+/// A helper from inside `target` that keeps running after the app quits.
+func stuckHelper(_ target: String) -> [BundleProcess] {
+    [BundleProcess(pid: 4321, executablePath: target + "/Contents/XPCServices/Helper.xpc/Contents/MacOS/Helper")]
+}
+check("updated_itself: the app installed its own newer version while it quit; nothing is installed, nothing is left behind") {
+    let w = try world()
+    let running = FakeRunningApps()
+    let (target, root) = (w.target, w.box.root)
+    running.set(running: target, willQuit: true, duringQuit: { try? replaceSelf(target, aside: root, short: "3.0", build: "300") })
+    do {
+        _ = try await installer(w.box, downloader: w.downloader, running: running)
+            .update(appAt: target, offer: offer("https://example.test/v2.zip"), options: UpdateOptions(quitIfRunning: true))
+        throw CheckFailure(description: "expected updated_itself, got success")
+    } catch let refusal as InstallRefusal {
+        try expectEqual(refusal.code, "updated_itself")
+        try expect(refusal.message.contains("Example.app is now 3.0 (300)"), refusal.message)
+    }
+    try expectEqual(try version(target), "3.0", "the app's own version is untouched")
+    try expectEqual(running.relaunched, [target], "relaunched because it was running")
+    try expectClean(w.box)
+}
+check("updated_itself: a same-version replacement, a different app or an older one keeps the original io refusal") {
+    let url = "https://example.test/v2.zip"
+    for (id, short, build, team) in [(bundleID, "1.0", "100", teamA), ("test.other.App", "3.0", "300", teamA),
+                                     (bundleID, "0.9", "90", teamA), (bundleID, "3.0", "300", teamB)] as [(String, String, String, String)] {
+        let w = try world()
+        let running = FakeRunningApps()
+        let (target, root) = (w.target, w.box.root)
+        running.set(running: target, willQuit: true, duringQuit: { try? replaceSelf(target, aside: root, id: id, short: short, build: build, team: team) })
+        try await expectRefusal("io_error") {
+            _ = try await installer(w.box, downloader: w.downloader, running: running)
+                .update(appAt: target, offer: offer(url), options: UpdateOptions(quitIfRunning: true))
+        }
+        try expectClean(w.box)
+        // A replacement that is not a verified, newer copy of the same app is never reopened. (The same-version,
+        // same-team copy still verifies as the old app, so it is reopened as before this change.)
+        let reopensAsOld = id == bundleID && short == "1.0" && team == teamA
+        try expectEqual(running.relaunched, reopensAsOld ? [target] : [], "relaunch for \(id) \(short) \(team)")
+    }
+}
+check("updated_itself: the app replaced itself and its new bundle started a helper while it quit: updated_itself, one relaunch, clean") {
+    let w = try world()
+    let running = FakeRunningApps()
+    let (target, root) = (w.target, w.box.root)
+    running.set(running: target, willQuit: true, duringQuit: {
+        try? replaceSelf(target, aside: root, short: "3.0", build: "300")
+        running.set(helpers: [BundleProcess(pid: 4321, executablePath: target + "/Contents/XPCServices/Helper.xpc/Contents/MacOS/Helper")], at: target)
+    })
+    do {
+        _ = try await installer(w.box, downloader: w.downloader, running: running)
+            .update(appAt: target, offer: offer("https://example.test/v2.zip"), options: UpdateOptions(quitIfRunning: true))
+        throw CheckFailure(description: "expected updated_itself, got success")
+    } catch let refusal as InstallRefusal {
+        try expectEqual(refusal.code, "updated_itself")
+        try expect(refusal.message.contains("Example.app is now 3.0 (300)"), refusal.message)
+    }
+    try expectEqual(try version(target), "3.0", "the app's own version is untouched")
+    try expectEqual(running.relaunched, [target], "exactly one relaunch")
+    try expectClean(w.box)
+}
+check("updated_itself: a helper that keeps running with no replacement is still helper_running, and the app is reopened once") {
+    let w = try world()
+    let running = FakeRunningApps()
+    let target = w.target
+    running.set(running: target, willQuit: true, duringQuit: {
+        running.set(helpers: [BundleProcess(pid: 4321, executablePath: target + "/Contents/XPCServices/Helper.xpc/Contents/MacOS/Helper")], at: target)
+    })
+    try await expectRefusal("helper_running") {
+        _ = try await installer(w.box, downloader: w.downloader, running: running)
+            .update(appAt: target, offer: offer("https://example.test/v2.zip"), options: UpdateOptions(quitIfRunning: true))
+    }
+    try expectEqual(try version(target), "1.0")
+    try expectEqual(running.relaunched, [target], "exactly one relaunch")
+    try expectClean(w.box)
+}
+check("updated_itself: a helper refusal reopens only a bundle that verifies: an other-team, older, other app or rejected copy stays closed") {
+    // (id, short, build, team, notarised, reopened): only the same-version, same-team copy still verifies as the old app.
+    let cases: [(String, String, String, String, Bool, Bool)] = [
+        (bundleID, "1.0", "100", teamA, true, true), (bundleID, "3.0", "300", teamB, true, false),
+        (bundleID, "0.9", "90", teamA, true, false), ("test.other.App", "3.0", "300", teamA, true, false),
+        (bundleID, "3.0", "300", teamA, false, false)]
+    for (id, short, build, team, notarised, reopened) in cases {
+        let w = try world()
+        let running = FakeRunningApps()
+        let (target, root) = (w.target, w.box.root)
+        running.set(running: target, willQuit: true, duringQuit: {
+            try? replaceSelf(target, aside: root, id: id, short: short, build: build, team: team, notarised: notarised)
+            running.set(helpers: stuckHelper(target), at: target)
+        })
+        try await expectRefusal("helper_running") {
+            _ = try await installer(w.box, downloader: w.downloader, running: running)
+                .update(appAt: target, offer: offer("https://example.test/v2.zip"), options: UpdateOptions(quitIfRunning: true))
+        }
+        try expectEqual(running.relaunched, reopened ? [target] : [], "relaunch for \(id) \(short) \(team) notarised=\(notarised)")
+        try expectClean(w.box)
+    }
+}
+/// Runs an update with the main app and a nested login item both open. While the app quits, `replacement` (if any) is put
+/// at the target, with the same nested app folder inside; a stuck helper then refuses the update. Returns what was reopened
+/// and the refusal code.
+func nestedRefusal(replacement: (id: String, short: String, build: String, team: String, notarised: Bool)?)
+    async throws -> (relaunched: [String], code: String, target: String, rel: String) {
+    let rel = "Contents/OneDrive Sync Service.app"
+    let w = try world(nestedApp: rel)
+    let running = FakeRunningApps()
+    running.setHelpersObeyQuit(true)
+    let (target, root) = (w.target, w.box.root)
+    let nestedProcess = BundleProcess(pid: 1408, executablePath: target + "/" + rel + "/Contents/MacOS/OneDrive Sync Service")
+    running.set(running: target, willQuit: true, duringQuit: {
+        if let r = replacement {
+            try? replaceSelf(target, aside: root, id: r.id, short: r.short, build: r.build, team: r.team, notarised: r.notarised)
+            try? FileManager.default.createDirectory(atPath: target + "/" + rel + "/Contents/MacOS", withIntermediateDirectories: true)
+        }
+        running.set(helpers: [nestedProcess] + stuckHelper(target), at: target)
+    })
+    var code = "none"
+    do {
+        _ = try await installer(w.box, downloader: w.downloader, running: running)
+            .update(appAt: target, offer: offer("https://example.test/v2.zip"), options: UpdateOptions(quitIfRunning: true))
+    } catch let refusal as InstallRefusal { code = refusal.code }
+    try expectEqual(running.processQuitRequests, [1408], "the nested app should have been asked to quit")
+    try expectClean(w.box)
+    return (running.relaunched, code, target, rel)
+}
+check("nested relaunch: after a helper refusal a nested app is reopened only from a bundle that verifies") {
+    // The unchanged old bundle: main app and nested app are reopened, as before.
+    let old = try await nestedRefusal(replacement: nil)
+    try expectEqual(old.code, "helper_running")
+    try expectEqual(old.relaunched.sorted(), [old.target, old.target + "/" + old.rel].sorted(), "old bundle")
+    // Other team, older, other app, or Gatekeeper-rejected: nothing is reopened.
+    let bad: [(String, String, String, String, Bool)] = [
+        (bundleID, "3.0", "300", teamB, true), (bundleID, "0.9", "90", teamA, true),
+        ("test.other.App", "3.0", "300", teamA, true), (bundleID, "3.0", "300", teamA, false)]
+    for r in bad {
+        let got = try await nestedRefusal(replacement: r)
+        try expectEqual(got.code, "helper_running", "\(r)")
+        try expectEqual(got.relaunched, [], "reopened from an unverified bundle: \(r)")
+    }
+}
+check("nested relaunch: when the app updated itself, the nested app is reopened from the verified new bundle") {
+    let got = try await nestedRefusal(replacement: (bundleID, "3.0", "300", teamA, true))
+    try expectEqual(got.code, "updated_itself")
+    try expectEqual(got.relaunched.sorted(), [got.target, got.target + "/" + got.rel].sorted(), "self-installed bundle")
+}
+check("updated_itself: a newer copy that Gatekeeper rejects is not updated_itself and is never reopened") {
+    let w = try world()
+    let running = FakeRunningApps()
+    let (target, root) = (w.target, w.box.root)
+    running.set(running: target, willQuit: true, duringQuit: { try? replaceSelf(target, aside: root, short: "3.0", build: "300", notarised: false) })
+    try await expectRefusal("io_error") {
+        _ = try await installer(w.box, downloader: w.downloader, running: running)
+            .update(appAt: target, offer: offer("https://example.test/v2.zip"), options: UpdateOptions(quitIfRunning: true))
+    }
+    try expectEqual(running.relaunched, [], "a rejected copy was reopened")
+    try expectClean(w.box)
+}
+check("updated_itself: a rollback never reports updated_itself, and never reopens a copy that is not the app it rolls back") {
+    for helper in [false, true] {
+        let w = try world()
+        _ = try await installer(w.box, downloader: w.downloader).update(appAt: w.target, offer: offer("https://example.test/v2.zip"))
+        try expectEqual(try version(w.target), "2.0")
+        let running = FakeRunningApps()
+        let (target, root) = (w.target, w.box.root)
+        running.set(running: target, willQuit: true, duringQuit: {
+            try? replaceSelf(target, aside: root, short: "3.0", build: "300")
+            if helper { running.set(helpers: stuckHelper(target), at: target) }
+        })
+        do {
+            _ = try await installer(w.box, running: running).rollback(appAt: target, quitIfRunning: true)
+            throw CheckFailure(description: "helper=\(helper): expected a refusal, got success")
+        } catch let refusal as InstallRefusal {
+            try expect(refusal.code != "updated_itself", "helper=\(helper): a rollback reported updated_itself")
+            try expectEqual(refusal.code, helper ? "helper_running" : "io_error", "helper=\(helper)")
+        }
+        try expectEqual(try version(target), "3.0", "helper=\(helper): the app's own copy was changed")
+        try expectEqual(running.relaunched, [], "helper=\(helper): an unverified copy was reopened")
+    }
+}
 check("#2 recovery will not swap back a restoration source that no longer verifies") {
     let w = try world()
     try await crashUpdate(w, at: .swapBack, verifier: FakeVerifier(failSignatureAt: [w.target], onlyVersion: "2.0"))

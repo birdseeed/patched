@@ -89,6 +89,28 @@ private struct FirstRunManaged: ManagedPreferenceReading {
         let bad = autoSwitch(managed: [AutomaticUpdateSettings.enabledKey: "yes"])
         try expect(!bad.view.switchIsOn && bad.view.switchIsLocked && bad.settings.managedValueIgnored, "Invalid managed value not off, locked and flagged")
     }
+    check("setup: the Patched-itself box sits under the switch, unticked and disabled until automatic updates are on") {
+        let s = autoSwitch()
+        try expect(!s.view.selfBoxIsOn && !s.view.selfBoxIsEnabled, "Box not unticked and disabled with automatic updates off")
+        s.view.setSelfBox(true)
+        try expect(!s.store.selfUpdatesEnabled && !s.view.selfBoxIsOn, "Box ticked while automatic updates were off")
+        s.view.setSwitch(true)
+        try expect(s.view.selfBoxIsEnabled && !s.view.selfBoxIsOn, "Box not enabled, or ticked, once automatic updates were on")
+        s.view.setSelfBox(true)
+        try expect(s.store.selfUpdatesEnabled && s.settings.selfUpdatesEnabled, "Box did not write to the store Settings reads")
+        s.view.setSwitch(false)
+        try expect(!s.view.selfBoxIsOn && !s.view.selfBoxIsEnabled, "Box still in effect with automatic updates off")
+        let managed = autoSwitch(managed: [AutomaticUpdateSettings.enabledKey: true, AutomaticUpdateSettings.selfUpdatesKey: false])
+        try expect(!managed.view.selfBoxIsOn && !managed.view.selfBoxIsEnabled, "Managed box not shown off and locked")
+        let text = code(try source("Sources/PatchedClient/NativeFirstRunView.swift"))
+        for token in ["Text(\"Also update Patched itself\")", ".disabled(!selfBoxIsEnabled)", "AutomaticUpdateSettings.selfUpdatesDetailText",
+                      "unless you also tick the box to update Patched itself"] {
+            try expect(text.contains(token), "First-run box wiring absent: \(token)")
+        }
+        let switchAt = text.range(of: "Text(\"Install updates automatically\")")?.lowerBound
+        let boxAt = text.range(of: "Text(\"Also update Patched itself\")")?.lowerBound
+        try expect(switchAt != nil && boxAt != nil && switchAt! < boxAt!, "Box is not under the switch")
+    }
     check("setup: the switch caption shows the current time setting") {
         try expect(autoSwitch().view.captionText == "Once a day at 02:00. You can change the time in Settings.", "Default caption: \(autoSwitch().view.captionText)")
         try expect(autoSwitch(time: "07:45").view.captionText == "Once a day at 07:45. You can change the time in Settings.", "Caption ignores a stored time")

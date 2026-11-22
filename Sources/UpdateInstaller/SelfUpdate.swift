@@ -4,7 +4,8 @@ import Darwin
 import Security
 import UpdateSources
 
-// Patched updating itself, on an explicit and confirmed click only.
+// Patched updating itself, on an explicit and confirmed click, or in the daily automatic run when the user (or an
+// organisation) has opted in with "Also update Patched itself". Both reach this same code and the same checks.
 //
 // The first trust anchor is Patched's own Ed25519 release key: every release zip is signed with it
 // (scripts/release.sh), and the public half is built into the app below. A zip is only unpacked when its

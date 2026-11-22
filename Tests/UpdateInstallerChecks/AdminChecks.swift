@@ -393,6 +393,62 @@ func registerAdminChecks() {
         }
     }
 
+    check("admin: the app installed its own newer version while it quit: updated_itself, no admin prompt, one relaunch, clean") {
+        let w = try world()
+        let replacer = FakeReplacer()
+        let running = FakeRunningApps()
+        let (target, root) = (w.target, w.box.root)
+        running.set(running: target, willQuit: true, duringQuit: { try? replaceSelf(target, aside: root, short: "3.0", build: "300") })
+        try await expectRefusal("updated_itself") {
+            _ = try await adminInstaller(w.box, admin: adminPath(replacer: replacer), downloader: w.downloader, running: running)
+                .update(appAt: target, offer: offer(v2zip), installable: true, options: UpdateOptions(quitIfRunning: true), admin: AdminInteraction())
+        }
+        try expectEqual(replacer.authorizations, 0, "asked for admin rights")
+        try expectEqual(try version(target), "3.0", "the app's own version is untouched")
+        try expectEqual(running.relaunched, [target], "exactly one relaunch")
+        try expect(backupsFolder(w.box).isEmpty, "backup copy left: \(backupsFolder(w.box))")
+        try expectClean(w.box)
+    }
+
+    check("admin: the app updated itself and its new copy started a helper while it quit: updated_itself, no prompt, one relaunch") {
+        let w = try world()
+        let replacer = FakeReplacer()
+        let running = FakeRunningApps()
+        let (target, root) = (w.target, w.box.root)
+        running.set(running: target, willQuit: true, duringQuit: {
+            try? replaceSelf(target, aside: root, short: "3.0", build: "300")
+            running.set(helpers: stuckHelper(target), at: target)
+        })
+        try await expectRefusal("updated_itself") {
+            _ = try await adminInstaller(w.box, admin: adminPath(replacer: replacer), downloader: w.downloader, running: running)
+                .update(appAt: target, offer: offer(v2zip), installable: true, options: UpdateOptions(quitIfRunning: true), admin: AdminInteraction())
+        }
+        try expectEqual(replacer.authorizations, 0, "asked for admin rights")
+        try expectEqual(try version(target), "3.0", "the app's own version is untouched")
+        try expectEqual(running.relaunched, [target], "exactly one relaunch")
+        try expectClean(w.box)
+    }
+
+    check("admin: a helper that keeps running is helper_running; the old app is reopened, an other-team copy is not") {
+        for replaced in [false, true] {
+            let w = try world()
+            let replacer = FakeReplacer()
+            let running = FakeRunningApps()
+            let (target, root) = (w.target, w.box.root)
+            running.set(running: target, willQuit: true, duringQuit: {
+                if replaced { try? replaceSelf(target, aside: root, short: "3.0", build: "300", team: teamB) }
+                running.set(helpers: stuckHelper(target), at: target)
+            })
+            try await expectRefusal("helper_running") {
+                _ = try await adminInstaller(w.box, admin: adminPath(replacer: replacer), downloader: w.downloader, running: running)
+                    .update(appAt: target, offer: offer(v2zip), installable: true, options: UpdateOptions(quitIfRunning: true), admin: AdminInteraction())
+            }
+            try expectEqual(replacer.authorizations, 0, "replaced=\(replaced): asked for admin rights")
+            try expectEqual(running.relaunched, replaced ? [] : [target], "replaced=\(replaced): relaunch")
+            try expectClean(w.box)
+        }
+    }
+
     check("admin: a same-version backup set aside for the copy comes back when authorization is denied, and stays one after success") {
         let w = try world()
         let replacer = FakeReplacer()

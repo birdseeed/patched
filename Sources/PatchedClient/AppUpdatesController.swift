@@ -250,7 +250,8 @@ public struct AppUpdateRow: Identifiable, Equatable, Sendable {
     /// Rows that offer Open in App Store: Patched only opens the App Store, it never installs these apps.
     public var canOpenInAppStore: Bool { isAppStoreUpdate || isAppStoreUnconfirmed }
     /// What the automatic run may install: a plain update to an ordinary app. Never Patched itself, an installer
-    /// package, an app that needs admin rights, a hidden app or a Mac App Store app.
+    /// package, an app that needs admin rights, a hidden app or a Mac App Store app. (Patched's own opt-in automatic
+    /// update is not a row: it goes through the self-update path, see `installSelfUpdateAutomatically`.)
     var isAutomaticallyInstallable: Bool {
         status == .updateAvailable && privilege == .standard && !needsManualAdmin && !isPatchedItself && !isIgnored
             && !isAppStoreUpdate && !isHiddenBackgroundHelper && outcome?.installable == true
@@ -356,6 +357,12 @@ public struct SelfUpdate: Equatable, Sendable {
     public init(version: String, url: URL, assets: PatchedReleaseAssets? = nil) {
         self.version = version; self.url = url; self.assets = assets
     }
+    /// This version's notes on the website. GitHub's release body is untrusted and never read, so the link is
+    /// built from a fixed base and the version alone; a version that is not dotted digits gives no link.
+    public var releaseNotesURL: URL? {
+        guard version.range(of: #"^[0-9]+(\.[0-9]+)*\z"#, options: .regularExpression) != nil else { return nil }
+        return URL(string: "https://patched.im/releases#v" + version.replacingOccurrences(of: ".", with: "-"))
+    }
     public var text: String { String(localized: "Patched \(version) is available") }
     /// Identity for "have I told the user about this" (one notification per new version).
     @_spi(Testing) public var key: String { "im.patched.self-update\u{1F}" + version }
@@ -364,8 +371,17 @@ public struct SelfUpdate: Equatable, Sendable {
 /// One lookup of Patched's own latest release. At most one request per call.
 public typealias SelfUpdateCheck = @Sendable () async -> PatchedReleaseResult
 
+/// What Patched's own release lookup answered, and which check (`AppUpdatesController.checkGeneration`) it belonged
+/// to. The automatic self-update acts only on a `.newer` answer of the very check its run came from.
+public struct SelfLookupAnswer: Equatable, Sendable {
+    public let generation: Int
+    public let result: PatchedReleaseResult
+}
+
 /// Installs a signed Patched release over the running app, then reopens it. `SelfUpdater` in production;
-/// tests use a fake. Only `confirmSelfUpdate()` ever calls it.
+/// tests use a fake. Only two entries reach it, both through the same `startSelfInstall`: `confirmSelfUpdate()`
+/// (a confirmed click) and `installSelfUpdateAutomatically(version:fingerprint:checkGeneration:)` (the scheduled run, only with "Also update
+/// Patched itself" on and the release known here for at least 24 hours).
 public protocol SelfInstalling: Sendable {
     func install(_ release: PatchedRelease, progress: @escaping @Sendable (SelfUpdateStep) -> Void) async throws -> SelfUpdateReport
     /// Starts the new Patched (it waits for this process to quit). Throws if it could not be started.
@@ -541,7 +557,14 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
     @_spi(Testing) public var selfLookupTimeout: TimeInterval = 15
     /// True from the start of a check until its lookup has answered (or the check ended without using it).
     @Published public private(set) var selfLookupPending = false
-    /// Updating Patched itself: confirmation, progress or failure. Only explicit clicks change it from idle.
+    /// The answer of the latest check's own release lookup, exactly as it came (`.unavailable` included). nil from the
+    /// start of each check until its lookup answers, and when it never does (cancelled, superseded, no lookup). Unlike
+    /// `selfUpdate`, which keeps an earlier offer when a lookup fails, this never carries an answer over to a later check.
+    @_spi(Testing) public private(set) var selfLookupAnswer: SelfLookupAnswer?
+    /// Identifies the current (or latest) check; see `SelfLookupAnswer`.
+    @_spi(Testing) public var checkGeneration: Int { generation }
+    /// Updating Patched itself: confirmation, progress or failure. Explicit clicks change it from idle, and so does
+    /// the opt-in automatic self-update (progress only; it never asks and leaves no failure banner).
     @Published public private(set) var selfInstall: SelfInstallState = .idle
     /// Installs a signed Patched release. Only `live()` sets a real one, and only for an installed Patched.app.
     @_spi(Testing) public var selfInstaller: (any SelfInstalling)?
@@ -549,6 +572,11 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
     @_spi(Testing) public var selfTerminate: @MainActor () -> Void = {}
     /// How many times an install was actually started. For tests of the entry points.
     @_spi(Testing) public private(set) var selfInstallStarts = 0
+    /// The running Patched's version, for the history line of an automatic self-update that failed. `live()` sets it.
+    @_spi(Testing) public var selfRunningVersion: String?
+    /// Called once a confirmed (clicked) self-update has installed, just before Patched reopens. The session uses it
+    /// to offer "Also update Patched itself" once in the new copy. Never called by the automatic path.
+    var onConfirmedSelfUpdateInstalled: (() -> Void)?
     private var selfInstallTask: Task<Void, Never>?
     private var selfApplyTask: Task<Void, Never>?
     /// Called when a lookup of the current check has been applied. Used by the background scheduler.
@@ -697,6 +725,7 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
             controller.selfUpdateCheck = { await PatchedReleaseChecker.check(currentVersion: runningVersion, fetcher: fetcher) }
             // macOS: Apple's feed and the Software Update plist. It reports only; nothing installs macOS.
             controller.macOSUpdateCheck = { await MacOSUpdateChecker.check(host: .current(), fetcher: fetcher, patchedVersion: runningVersion) }
+            controller.selfRunningVersion = runningVersion
             // Self-update only for a real Patched.app; a `swift run` build keeps Download only.
             let bundle = Bundle.main
             if bundle.bundlePath.hasSuffix(".app"), bundle.bundleIdentifier == PatchedReleaseKey.bundleID {
@@ -923,12 +952,13 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
         dropQueuedUpdateAll()
     }
 
-    private func stopSelfLookup() { selfApplyTask?.cancel(); selfApplyTask = nil; selfLookupPending = false }
+    private func stopSelfLookup() { selfApplyTask?.cancel(); selfApplyTask = nil; selfLookupPending = false; selfLookupAnswer = nil }
 
     /// Looks up Patched's own release beside the app checks. The app rows never wait for it: its answer is applied
     /// when it arrives, and only if no newer check (or cancel) has happened since.
     private func startSelfLookup(generation mine: Int) {
         selfApplyTask?.cancel(); selfApplyTask = nil
+        selfLookupAnswer = nil
         guard let lookup = selfUpdateCheck else { selfLookupPending = false; return }
         selfLookupPending = true
         let timeout = selfLookupTimeout
@@ -940,6 +970,7 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
             case .noNews: self.selfUpdate = nil
             case .unavailable: break      // a failed lookup says nothing: keep what was known
             }
+            self.selfLookupAnswer = SelfLookupAnswer(generation: mine, result: result)
             // A confirmation names one version; if the offer changed under it, close it rather than let
             // Update quietly do nothing (or install something the user did not read).
             if case .confirming(let asked) = self.selfInstall, asked != self.selfUpdate?.version { self.selfInstall = .idle }
@@ -1026,6 +1057,13 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
         _ = urlOpener.open(selfUpdate.url)
     }
 
+    /// A click on What's new beside "Patched X is available": opens that version's notes on patched.im, nothing
+    /// else. The scheduler never calls it.
+    public func openSelfUpdateReleaseNotes() {
+        guard let url = selfUpdate?.releaseNotesURL else { return }
+        _ = urlOpener.open(url)
+    }
+
     /// Update is offered beside "Patched X is available" only for a release with a signed zip, in an installed
     /// Patched.app, when nothing else is running.
     public var canInstallSelfUpdate: Bool {
@@ -1034,7 +1072,7 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
 
     /// A click on Update beside "Patched X is available" (menu, Updates, or the button on its notification).
     /// It only asks: nothing is downloaded until `confirmSelfUpdate()`. The scheduler, Update All and the
-    /// command line never call it.
+    /// command line never call it (the scheduler's opt-in path is `installSelfUpdateAutomatically`, which never asks).
     public func requestSelfUpdate() {
         guard let own = selfUpdate, canInstallSelfUpdate else { return }
         selfInstall = .confirming(version: own.version)
@@ -1057,6 +1095,42 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
             selfInstall = .failed(String(localized: "Patched can't update itself while a check or another update is running. Try again when it has finished."))
             return
         }
+        startSelfInstall(version: version, own: own, assets: assets, installer: installer, automatic: false)
+    }
+
+    /// Nothing at all is going on: no check, install, roll back, recovery or Self Service install (they all hold
+    /// `isWorking`), installing is not blocked, no question is open (an open app, Patched's own confirmation or
+    /// Apple's Installer), no Update All is queued and no self-update is under way.
+    @_spi(Testing) public var idleForAutomaticSelfUpdate: Bool {
+        phase == .idle && !isWorking && automaticRunWaitReason == nil && !updateAllQueued && installerWait == nil
+            && (selfInstall == .idle || selfInstall.isFailed)
+    }
+
+    /// The scheduled run's self-update, once its app updates are over. The scheduler calls it only with "Also update
+    /// Patched itself" in effect and `version` with `fingerprint` known here for at least 24 hours (`SelfUpdateSoak`).
+    /// It installs only when the lookup of check `checkGeneration`, which must still be the latest check, answered
+    /// `.newer` with exactly that version and fingerprint: never from an offer kept over from an earlier lookup. It
+    /// installs exactly as `confirmSelfUpdate()` does, through the same installer and checks, without asking. It opens
+    /// nothing; a failure leaves Patched as it was, the usual Update offer in place, and a line in the history.
+    /// Returns whether the install started.
+    @_spi(Testing) @discardableResult
+    public func installSelfUpdateAutomatically(version: String, fingerprint: String, checkGeneration mine: Int) -> Bool {
+        guard mine == generation, let answer = selfLookupAnswer, answer.generation == mine,
+              case .newer(let fresh) = answer.result, fresh.version == version, let assets = fresh.assets,
+              assets.fingerprint == fingerprint,
+              let own = selfUpdate, own.version == version, own.assets == assets, let installer = selfInstaller,
+              idleForAutomaticSelfUpdate else { return false }
+        startSelfInstall(version: version, own: own, assets: assets, installer: installer, automatic: true)
+        return true
+    }
+
+    /// The one self-update path. The result is recorded in the history either way (before reopening, so it survives
+    /// the relaunch). `automatic`: never open the release page, and go back to the plain offer on failure.
+    private func startSelfInstall(version: String, own: SelfUpdate, assets: PatchedReleaseAssets, installer: any SelfInstalling,
+                                  automatic: Bool) {
+        let started = historyNow()
+        // A clicked update is recorded like any single-app run; the scheduled run's is the scheduled one.
+        let trigger: HistoryRun.Trigger = automatic ? .scheduled : .singleApp
         isWorking = true
         epoch += 1; pendingQuit = nil
         selfInstallStarts += 1
@@ -1076,6 +1150,9 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
             self.selfInstallTask = nil
             switch outcome {
             case .success(let report):
+                self.recordSelfUpdate(started, version: version, from: report.fromVersion, result: .updated, reason: nil, detail: nil,
+                                      trigger: trigger)
+                if !automatic { self.onConfirmedSelfUpdateInstalled?() }
                 self.selfInstall = .reopening(version: version)
                 do { try installer.relaunch(report) } catch {
                     self.isWorking = false
@@ -1086,7 +1163,14 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
             case .failure(let error):
                 self.isWorking = false
                 let refusal = error as? InstallRefusal
-                if refusal?.code == "needs_admin" {
+                let reason = refusal?.code == "needs_admin"
+                    ? String(localized: "Patched can't replace itself here without admin rights. Install Patched \(version) from the release page.")
+                    : Self.selfInstallFailure(refusal, error: error)
+                self.recordSelfUpdate(started, version: version, from: self.selfRunningVersion, result: .failed,
+                                      reason: reason, detail: refusal?.code, trigger: trigger)
+                if automatic {
+                    self.selfInstall = .idle
+                } else if refusal?.code == "needs_admin" {
                     _ = self.urlOpener.open(own.url)
                     self.selfInstall = .failed(String(localized: "Patched can't replace itself here without admin rights, so the release page is open. Install Patched \(version) from there."))
                 } else {
@@ -1161,6 +1245,8 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
     /// Each app is rescanned and rechecked just before it is installed. Never passes admin consent.
     /// Only an explicit click (the Updates window, the menu item or the notification's Update All button)
     /// may call this, or the scheduler's automatic run (`automatic: true`, gated on the Automatic updates setting). `onFinished` receives what happened, once, when the run ends.
+    /// It never installs Patched itself, in either form. `afterRun` is called once the run is over and nothing is working,
+    /// unless Stop was pressed during the run: Stop also cancels what was to follow it (the scheduler's self-update).
     /// With `keys` (from a notification) only rows whose current offer is one of those advertised updates are
     /// installed, and each is rechecked to still be that same offer; everything else is left alone.
     /// Returns false when nothing was started.
@@ -1172,7 +1258,8 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
 
     @discardableResult
     func updateAll(only keys: Set<String>?, askInWindow: Bool = false, automatic: Bool = false,
-                   onFinished: (@MainActor (UpdateAllSummary) -> Void)? = nil) -> Bool {
+                   onFinished: (@MainActor (UpdateAllSummary) -> Void)? = nil,
+                   afterRun: (@MainActor () -> Void)? = nil) -> Bool {
         updateAllInvocations += 1
         var candidates = updatableRows
         // The automatic run is narrower than Update All: plain installs only. It never opens the App Store, and
@@ -1191,8 +1278,15 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
         guard !paths.isEmpty || storeAtStart > 0, !isWorking, phase == .idle, !installBlocked else { return false }
         stopRequested = false
         let start = beginRun()
+        var unlessStopped: (@MainActor () -> Void)?
+        if let afterRun {
+            unlessStopped = { [weak self] in
+                guard let self, !self.stopRequested else { return }
+                afterRun()
+            }
+        }
         if paths.isEmpty {
-            launch {
+            launch({
                 let opened = await self.urlOpener.openAppStoreUpdates()
                 self.recordRun(start, trigger: trigger, items: [],
                                note: opened ? String(localized: "opened the App Store for \(storeAtStart)")
@@ -1200,11 +1294,12 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
                 self.summary = opened ? String(localized: "\(storeAtStart) to update in the App Store.") : Self.appStoreOpenFailure
                 onFinished?(UpdateAllSummary(updated: 0, failed: 0, skippedOpen: 0, needsAdmin: self.knownNeedsAdmin(keys).count,
                                              appStore: opened ? storeAtStart : 0, appStoreFailed: opened ? 0 : storeAtStart))
-            }
+            }, then: unlessStopped)
             return true
         }
         updateAllProgress = UpdateAllProgress(done: 0, total: paths.count, stopping: false)
-        launch {
+        // `afterRun` (the scheduler's self-update) runs only once the run is over and nothing is working.
+        launch({
             var updated = 0, failed = 0, skipped = 0, open = 0, stopped = 0, changed = 0
             var adminPaths = Set<String>()
             var openPaths: [String] = []
@@ -1256,7 +1351,7 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
             onFinished?(UpdateAllSummary(updated: updated, failed: failed, skippedOpen: open,
                                          needsAdmin: adminPaths.union(known).count, stopped: stopped, changed: changed,
                                          appStore: store, appStoreFailed: storeFailed, openPaths: openPaths))
-        }
+        }, then: unlessStopped)
         return true
     }
 
@@ -1647,6 +1742,20 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
             return .failed
         } catch let refusal as InstallRefusal {
             let name = outcome.app.name
+            if case .updatedItself = refusal {
+                // The app installed its own update while Patched worked; the installer verified it and changed nothing.
+                // That is the outcome the user wanted, so it is an update, not a failure.
+                let installed = (try? BundleFacts.read(bundleAt: path)).map { InstallTarget.versionText($0.shortVersion, $0.build) }
+                stepInfo[path] = StepInfo(newVersion: installed, detail: refusal.code)
+                mutate(path) {
+                    $0.result = .init(kind: .success, text: PlainRefusalText.text(name: name, refusal))
+                    if let installed { $0.installedVersion = installed }
+                    $0.installedDisplayVersion = nil; $0.status = .needsRecheck; $0.outcome = nil
+                    $0.progress = nil; $0.cancelRequested = false
+                }
+                if Task.isCancelled { await Task { @MainActor in await self.refreshRow(path) }.value } else { await refreshRow(path) }
+                return .updated
+            }
             stepInfo[path] = StepInfo(detail: refusal.code)
             if case .needsAdmin = refusal, interaction == nil {
                 // Needs admin rights whether or not the experimental admin path is on; only with it on does
@@ -1741,6 +1850,15 @@ enum AppCheckRunOutcome: Equatable { case succeeded, failed, cancelled }
                              appsChecked: start.appsChecked, updatesFound: start.updatesFound, outcome: outcome, note: note, items: items)
         history.record(run)
         lastRun = run
+    }
+
+    /// A self-update (automatic: a scheduled run; clicked: a single-app run) with one line for Patched. Written
+    /// straight away, before Patched quits and reopens to finish.
+    private func recordSelfUpdate(_ at: Date, version: String, from: String?, result: HistoryItem.Result, reason: String?, detail: String?,
+                                  trigger: HistoryRun.Trigger) {
+        let item = HistoryItem(name: "Patched", bundleID: PatchedReleaseKey.bundleID, oldVersion: from,
+                               newVersion: result == .updated ? version : nil, result: result, reason: reason, detail: detail)
+        recordRun(RunStart(at: at, appsChecked: 1, updatesFound: 1), trigger: trigger, items: [item])
     }
 
     /// A scheduled run that could not start yet, and why.

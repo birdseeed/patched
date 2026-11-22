@@ -61,6 +61,8 @@ public enum PlainRefusalText {
             return String(localized: "There is no earlier version of \(app) to go back to.")
         case .rollbackUnsupported:
             return String(localized: "\(app) was updated with an installer package, which Patched can't undo.")
+        case .updatedItself:
+            return String(localized: "\(app) updated itself while Patched was working, so Patched left its new version in place.")
         case .destinationExists:
             return String(localized: "\(app) is already installed there, so nothing was changed.")
         default:

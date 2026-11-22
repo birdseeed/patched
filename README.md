@@ -77,7 +77,7 @@ Patched also tells you when a newer Patched release exists. On the same schedule
 
 Patched also tells you when a macOS update is waiting. On the same schedule, and on a plain `patched check`, it makes one more anonymous request, to Apple's public list of OS versions (`gdmf.apple.com/v2/pmv`), with the same plain `Patched/<version>` User-Agent and nothing else. It only counts versions that list your Mac. It also reads `/Library/Preferences/com.apple.SoftwareUpdate.plist`, which needs no network, and uses that on its own when Apple's list cannot be reached. A pinned macOS row at the top of Updates shows the update, and **Open Software Update** opens System Settings, where Apple's own updater installs it. Patched never downloads or installs macOS, and Update All, automatic updates and `patched update` leave the macOS row out. A new major version is shown without notifications; for an update within the version you run, you get one notification, and Settings can remind you every 1, 3 or 7 days (off by default).
 
-Patched can also update itself, but only when you ask. Next to **Download** there is an **Update** button (and an **Update…** button on the notification). It asks "Update Patched to 0.2.0? Patched will quit and reopen." and does nothing until you confirm. Then it downloads that release's ZIP from GitHub, checks it against an Ed25519 signature made with my release key (the public half is built into Patched), checks the new app's bundle ID, version and code signature, swaps it in for the running Patched, keeps the previous version as a backup, and reopens. If any check fails, the installed Patched is left as it was. If replacing Patched would need administrator rights, it opens the release page instead. Scheduled checks, Update All and the command line never install Patched.
+Patched can also update itself, normally only when you ask. Next to **Download** there is an **Update** button (and an **Update…** button on the notification). It asks "Update Patched to 0.2.0? Patched will quit and reopen." and does nothing until you confirm. Then it downloads that release's ZIP from GitHub, checks it against an Ed25519 signature made with my release key (the public half is built into Patched), checks the new app's bundle ID, version and code signature, swaps it in for the running Patched, keeps the previous version as a backup, and reopens. If any check fails, the installed Patched is left as it was. If replacing Patched would need administrator rights, it opens the release page instead. Scheduled checks, Update All and the command line never install Patched. The one exception is the opt-in "Also update Patched itself" under automatic updates (see below).
 
 If you have Patched 0.1.2 or earlier, install 0.1.3 by hand once (see [Install a release](#install-a-release)); from then on Patched offers in-app updates.
 
@@ -96,8 +96,8 @@ until you choose Update", and it only happens if you switch it on.
 
 It installs what Update All installs: updates to apps you can replace without admin rights,
 rechecked just before each install with every usual check. It never installs installer
-packages, apps that need admin rights, Patched itself, hidden apps or Mac App Store apps. It
-never quits an app: open apps are skipped, listed in the summary and still offered on the
+packages, apps that need admin rights, hidden apps or Mac App Store apps, and it installs
+Patched itself only with the box below ticked. It never quits an app: open apps are skipped, listed in the summary and still offered on the
 Updates screen. It runs at the first check at or after the chosen time, at most once a day.
 If the Mac was asleep or Patched was not running, it still runs at the first check within
 6 hours of that time, and not past midnight (a 23:00 setting has one hour), otherwise it waits
@@ -106,6 +106,32 @@ is running, while installing is blocked or a question is open, and skips a check
 failed offline. Updates it leaves out are announced in the usual "updates available"
 notification. You get one summary notification, only when something was updated, failed or
 was skipped because the app was open. Roll back works as for any update.
+
+"Also update Patched itself", directly under it (off by default, and only available while
+automatic updates are on), lets the same daily run update Patched too. It happens after that
+run's app updates have finished and only when nothing else is going on: no other install, roll
+back, recovery or Self Service install, and no open question. Patched waits until this Mac has
+known about that exact release for at least 24 hours, timed by its own clock from when its
+release check first reported it (no date from GitHub is used), so in practice it is installed
+at the first daily run after that. "That exact release" means the version and the two files
+GitHub lists for it, told apart by each file's GitHub asset id (and its digest, when GitHub
+gives one): a newer version, a file replaced under the same name, or a release that a check here saw
+disappear before it was published again all start the wait again. It installs only when the latest release
+check (at most a few hours old) reached GitHub and still offered that exact release; if that check
+failed, nothing is installed that day. Setting the clock back after a release was first seen never
+shortens the wait, but moving it forward does, as with any wait timed by the clock (and so does a
+clock that was behind when the release was first seen and is then corrected). The wait is best-effort: it depends on GitHub's asset ids, and a
+release without them (or with a malformed digest) can still be installed with Update, just not
+automatically. It uses
+exactly the same download and checks as clicking Update (see above), then quits and reopens,
+and the run is recorded in History. If anything fails, Patched stays as it is, opens nothing,
+and the usual Update button stays on offer. A release that was tried automatically and failed
+(or installed but could not reopen Patched) is not tried automatically again: Update still
+installs it, and a newer version or a new upload is tried as usual. Pressing Stop during the
+run also cancels Patched's own update that day. Update All, ordinary checks and the command line still never
+install Patched. Updating Patched by hand works as soon as a version appears, and once, after
+you update Patched by hand, the Updates screen offers to turn this on ("Turn on" or "Not now";
+it is not shown again either way, nor when your organisation manages these settings).
 
 An organisation sets this with a configuration profile that manages the `im.patched.app`
 preference domain (managed preferences). A minimal payload, with a placeholder UUID to replace:
@@ -125,6 +151,7 @@ preference domain (managed preferences). A minimal payload, with a placeholder U
             <dict>
               <key>AutomaticUpdatesEnabled</key><true/>
               <key>AutomaticUpdatesTime</key><string>02:00</string>
+              <key>AutomaticSelfUpdatesEnabled</key><false/>
             </dict>
           </dict></array>
         </dict>
@@ -137,10 +164,12 @@ Writing to `/Library/Managed Preferences` by hand is for testing only.
 | --- | --- | --- |
 | `AutomaticUpdatesEnabled` | Boolean | `true` turns it on, `false` turns it off. |
 | `AutomaticUpdatesTime` | String | Time of day as `HH:mm`, 24-hour, for example `02:00`. |
+| `AutomaticSelfUpdatesEnabled` | Boolean | `true` also updates Patched itself in the daily run, `false` never does. It only has an effect while automatic updates are on. |
 
 A managed value locks that control in Settings with "Set by your organisation". A value of the
-wrong type is not used. For `AutomaticUpdatesEnabled` that fails closed: automatic updates
-are off and locked, and Settings says so. A time that is not exactly `HH:mm` (`2:00`, `24:00`
+wrong type is not used. For `AutomaticUpdatesEnabled` and `AutomaticSelfUpdatesEnabled` that fails
+closed: that setting is off and locked, and Settings says so. Automatic updates turned off by
+the organisation keep Patched's own automatic update off too. A time that is not exactly `HH:mm` (`2:00`, `24:00`
 and `02:00:00` are all refused) is ignored: the user's own time, or 02:00, applies and Settings
 says a managed value was ignored. Only values that are forced count, so a plain user default never locks anything.
 See `THREAT-MODEL.md`, "Automatic updates".
@@ -156,6 +185,17 @@ message the Updates screen showed. **Failures only** and the app picker narrow t
 menu bar menu shows the last run only when something failed (with a warning sign, for example
 "Last run: today 03:00, 1 updated, 1 failed") or the run waited and installed nothing, and the
 notification after an automatic run opens that run in History.
+
+Some apps install their own update as they quit (Sparkle's "install on quit", for example).
+If that happens while Patched is preparing the same update, Patched installs nothing, reopens
+the app and records it as updated, with the detail `updated_itself`, on the Updates screen,
+in History and from `patched update`. It does this only after checking the copy now in place:
+the same bundle ID, a strict code signature from the same Team ID as the app it replaced,
+Apple's notarisation assessment, and a version strictly newer than the one installed before.
+That check does not include the update feed's Sparkle EdDSA signature or the version Patched
+was offered, because Patched did not download that copy. If the copy fails any of these
+checks, Patched reports the update as failed, and reopens the app only if what is there
+still verifies as the app it had before.
 
 The history stays on your Mac, in `~/Library/Application Support/Patched/history.json`. It is
 never sent anywhere. Patched keeps 90 days or the last 500 runs, whichever is smaller, and
@@ -402,7 +442,11 @@ notarisation assessment, and have the offered version newer than the installed
 version. After replacement, Patched checks the installed app again. It keeps a
 backup, supports rollback, and records a journal for crash recovery. Rollback
 applies the same signature, Team ID, and notarisation checks before restoring a
-backup. Checks fail closed when a safe state cannot be established.
+backup. Checks fail closed when a safe state cannot be established. One case is
+reported as an update without these download checks: an app that installed its
+own update while Patched was preparing the same one (see History). That copy is
+checked for the same bundle ID, the pinned Team ID, notarisation and a strictly
+newer version, but not for the feed's EdDSA signature or the offered version.
 
 These checks do not protect against malware already running as your user, or a
 developer's compromised signing key or update server. A valid update signed by

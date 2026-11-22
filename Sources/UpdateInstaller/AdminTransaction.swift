@@ -319,7 +319,9 @@ extension UpdateInstaller {
     /// itself (and, if the result fails its checks, for putting the verified backup copy back).
     func privilegedCommit(_ journal: inout TransactionJournal, target: InstallTarget, staged: BundleFacts,
                           status: InstallReport.Status, quit: Bool, consent: AdminConsent) async throws -> InstallReport {
-        let wasRunning = try await ensureNotRunning(target, quit: quit)
+        // A helper refusal after the app quit is checked as on the plain path: a verified self-installed newer version
+        // is `updatedItself` (read-only, no privilege used), and only a bundle that verifies is reopened.
+        let wasRunning = try await ensureNotRunning(target, quit: quit, journal: journal, detectSelfInstall: status == .installed)
         let session: any PrivilegedReplacementSession
         do {
             // 1. Backup first, as the user. Nothing privileged has happened yet.
@@ -342,6 +344,12 @@ extension UpdateInstaller {
             // The target was never handed to macOS: drop our copy and let the caller clean up.
             engine.discardBackupCopy(&journal)
             journal.phase = .staging
+            // The app may have updated itself while it quit, before anything was handed to macOS: if what is there
+            // now is a verified newer version of the same app, reopen it and say so (read-only; no privilege used).
+            if status == .installed, let now = selfInstalledVersion(at: target.path, journal: journal) {
+                if wasRunning { await runningApps.relaunch(path: target.path) }
+                throw InstallRefusal.updatedItself("\(target.name) is now \(InstallTarget.versionText(now.shortVersion, now.build))")
+            }
             await relaunchIfStillOld(wasRunning, target, journal)
             throw error
         }

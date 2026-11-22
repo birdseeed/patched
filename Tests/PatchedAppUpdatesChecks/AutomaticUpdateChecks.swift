@@ -296,7 +296,7 @@ private struct FakeManaged: ManagedPreferenceReading {
             rig.scheduler.start(); await rig.settle()
             try rig.noInstallerActivity()
         }
-        try expect(AutomaticUpdateSettings.invalidNote == "Your organisation set a value Patched could not use. An invalid on or off value keeps automatic updates off. An invalid time is ignored.", "note text")
+        try expect(AutomaticUpdateSettings.invalidNote == "Your organisation set a value Patched could not use. An invalid on or off value keeps that setting off. An invalid time is ignored.", "note text")
         try expect(AutomaticUpdateSettings.lockedNote == "Set by your organisation", "locked text")
     }
 

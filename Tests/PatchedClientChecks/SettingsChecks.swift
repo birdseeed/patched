@@ -15,8 +15,9 @@ import PatchedShell
 @MainActor private func settingsPaint(_ session: NativeClientSession) throws -> Data {
     let app = NSApplication.shared
     if app.activationPolicy() != .prohibited { _ = app.setActivationPolicy(.prohibited) }
-    let host = NSHostingView(rootView: NativeClientSettingsView(session: session).frame(width: 900, height: 700))
-    host.frame = NSRect(x: 0, y: 0, width: 900, height: 700)
+    // Tall enough for the whole form, down to the notification and version sections.
+    let host = NSHostingView(rootView: NativeClientSettingsView(session: session).frame(width: 900, height: 1000))
+    host.frame = NSRect(x: 0, y: 0, width: 900, height: 1000)
     let window = NSWindow(contentRect: host.frame, styleMask: .borderless, backing: .buffered, defer: false)
     window.isReleasedWhenClosed = false; window.contentView = host
     defer { window.close() }
@@ -70,9 +71,17 @@ import PatchedShell
         for token in ["OpenAtLoginView(controller: openAtLogin)", "Self.scheduleText", "notifications.statusText",
                       "Open Notification Settings", "Text(\"Version\")", "Install updates automatically",
                       ".disabled(automaticUpdates.enabledLocked)", ".disabled(automaticUpdates.timeLocked || !automaticUpdates.isEnabled)",
-                      "AutomaticUpdateSettings.lockedNote", "AutomaticUpdateSettings.invalidNote", "Form {", ".formStyle(.grouped)", "Section("] {
+                      "AutomaticUpdateSettings.lockedNote", "AutomaticUpdateSettings.invalidNote", "Form {", ".formStyle(.grouped)", "Section(",
+                      "Text(\"Also update Patched itself\")", ".disabled(!automaticUpdates.canChangeSelfUpdates)",
+                      "automaticUpdates.setSelfUpdatesEnabled(", "AutomaticUpdateSettings.selfUpdatesDetailText"] {
             try expect(view.contains(token), "Settings lacks \(token)")
         }
+        // Directly under "Install updates automatically", before the time.
+        let automaticAt = view.range(of: "Text(\"Install updates automatically\")")!.lowerBound
+        let selfAt = view.range(of: "Text(\"Also update Patched itself\")")!.lowerBound
+        let timeAt = view.range(of: "DatePicker(")!.lowerBound
+        try expect(automaticAt < selfAt && selfAt < timeAt, "The Patched-itself box is not directly under the automatic updates switch")
+        try expect(!SettingsView.automaticDetailText.contains("skips open apps, Patched itself"), "Detail text still says Patched itself is always skipped")
         try expect(SettingsView.scheduleText == "Patched checks for updates when it opens and every 3 hours. It only installs updates on its own if you turn on automatic updates below.",
                    "Schedule line changed")
         for stale in ["Toggle(\"Automatic", "Pause", "Network", "Diagnostics", "Save schedule", "Reload saved", "requestAuthorization"] {

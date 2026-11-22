@@ -253,6 +253,8 @@ public struct NativeClientMenuItem: Equatable, Identifiable, Sendable {
         /// "Update Patched to X…": asks first, in an alert, and installs only once that is confirmed.
         case updatePatched
         case downloadPatched
+        /// "What's new in Patched X": opens that version's notes on patched.im. Installs nothing.
+        case whatsNewPatched
         case dismissPatchedFailure
         /// "Last run: ...": open History at that run. Installs nothing.
         case showHistory(runID: UUID)
@@ -302,6 +304,9 @@ extension NativeClientSession {
             text("self", available)
             if updates.canInstallSelfUpdate { command("self-update", String(localized: "Update Patched to \(own.version)…"), .updatePatched) }
             command("self-download", String(localized: "Download Patched \(own.version)"), .downloadPatched, enabled: !state.isBusy)
+            if own.releaseNotesURL != nil, !state.isBusy, !state.isConfirming {
+                command("self-whats-new", String(localized: "What's new in Patched \(own.version)"), .whatsNewPatched)
+            }
             // The question itself is asked in an alert; progress and failures are shown here.
             if let status = state.text, !state.isConfirming { text("self-status", status) }
             if state.isFailed { command("self-dismiss", String(localized: "Dismiss"), .dismissPatchedFailure) }
@@ -428,6 +433,7 @@ public struct NativeClientMenuView: View {
         case .quit: NSApplication.shared.terminate(nil)
         case .updatePatched: session.requestSelfUpdateFromMenu(confirm: confirmSelfUpdate)
         case .downloadPatched: updates.downloadSelfUpdate()
+        case .whatsNewPatched: updates.openSelfUpdateReleaseNotes()
         case .dismissPatchedFailure: updates.cancelSelfUpdate()
         case .showHistory(let runID): if session.showHistory(runID: runID) { openWindow() }
         }
@@ -463,7 +469,8 @@ public struct NativeClientMenuView: View {
     }
 }
 
-/// "Patched 0.2.0 is available" with a Download button, which opens the release page on a click only. For a
+/// "Patched 0.2.0 is available" with a Download button, which opens the release page on a click only, and a
+/// "What's new" link to that version's notes on the website (also a click only). For a
 /// release with a signed zip, in an installed Patched.app, there is also Update: it asks "Update Patched to X?
 /// Patched will quit and reopen." and installs only once that is confirmed. Progress and failures show below.
 struct SelfUpdateLine: View {
@@ -472,6 +479,9 @@ struct SelfUpdateLine: View {
     var canInstall = false
     let download: () -> Void
     var update: () -> Void = {}
+    /// Opens the release notes; the link is hidden when `hasNotes` is false.
+    var whatsNew: () -> Void = {}
+    var hasNotes = false
     var confirm: () -> Void = {}
     var cancel: () -> Void = {}
 
@@ -481,6 +491,11 @@ struct SelfUpdateLine: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) { label; Spacer(minLength: 8); buttons }
+            if hasNotes, !state.isConfirming, !state.isBusy {
+                Button(action: whatsNew) { Text("What's new in Patched \(version)").font(.caption).foregroundStyle(BrandAccent.color) }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(Text("What's new in Patched \(version)"))
+            }
             if let status = state.text {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     if state.isBusy { ProgressView().controlSize(.small) }
@@ -534,6 +549,8 @@ extension AppUpdatesController {
         SelfUpdateLine(text: own.text, state: selfInstall, canInstall: canInstallSelfUpdate,
                        download: { [weak self] in self?.downloadSelfUpdate() },
                        update: { [weak self] in self?.requestSelfUpdate() },
+                       whatsNew: { [weak self] in self?.openSelfUpdateReleaseNotes() },
+                       hasNotes: own.releaseNotesURL != nil,
                        confirm: { [weak self] in self?.confirmSelfUpdate() },
                        cancel: { [weak self] in self?.cancelSelfUpdate() })
     }

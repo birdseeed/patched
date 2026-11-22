@@ -63,7 +63,8 @@ restore data.
 - GitHub's latest-release record for this repository (https, 256 KB cap), to say
   that a newer Patched exists and where its signed zip is. It is untrusted metadata:
   only `tag_name`, `html_url`, `draft`, `prerelease` and each asset's `name` and
-  `browser_download_url` are read; the tag must be digits and dots, `html_url` must
+  `browser_download_url` are read (plus the `id` and `digest` of the zip and `.sig`, only as
+  the content fingerprint for the automatic self-update's wait); the tag must be digits and dots, `html_url` must
   be exactly this repository's release page for that same tag, and drafts and
   prereleases are ignored. An asset counts only if it is named exactly
   `Patched-<version>.zip` or `Patched-<version>.zip.sig`, appears once, and its URL
@@ -73,7 +74,9 @@ restore data.
   as "Patched X is available"; a direct click on Download opens that validated page
   in the browser, and a direct, confirmed click on Update installs the release as
   described in "Patched updating itself" below. Nothing is downloaded, installed or
-  opened automatically, and Patched's own row is never part of Update All.
+  opened automatically, unless the user (or an organisation) has turned on both automatic
+  updates and "Also update Patched itself", in which case the daily run may install it as
+  described there. Patched's own row is never part of Update All.
 - Apple's public OS version feed, `https://gdmf.apple.com/v2/pmv` (https, 1 MiB cap,
   strictly parsed), only to say that a newer macOS exists. It is untrusted metadata:
   only `PublicAssetSets.macOS` is read, and in each entry only `ProductVersion`,
@@ -156,13 +159,51 @@ signed with the Developer ID Application certificate, notarised and stapled;
 before publishing. Self-update never uses it: it still requires the Ed25519-signed
 zip and, when pinned, the release Team ID.
 
-**When it runs.** Only from a click on Update beside "Patched X is available" (menu
+**When it runs.** From a click on Update beside "Patched X is available" (menu
 or Updates screen) or on the self-update notification's Update… button, and then
 only after a second click on the confirmation ("Update Patched to X? Patched will
 quit and reopen."). The notification button only brings up that confirmation.
-Scheduled checks, Update All and the command line (including `--all`) have no path
-to it. It is offered only in an installed `Patched.app` whose bundle ID is
+Update All, ordinary scheduled checks and the command line (including `--all`) have
+no path to it. It is offered only in an installed `Patched.app` whose bundle ID is
 `im.patched.app`, and only while nothing else is checking or installing.
+
+The one other way in is opt-in: "Also update Patched itself", off by default, under
+"Install updates automatically" (managed key `AutomaticSelfUpdatesEnabled`, which fails
+closed like the others and has no effect while automatic updates are off, including when
+an organisation turns them off). With both on, the daily automatic run, after its app
+updates have finished, calls `installSelfUpdateAutomatically`, which goes through the same
+`startSelfInstall` and the same `SelfUpdater` as the confirmed click: every check below
+applies unchanged and nothing is added or relaxed. It runs only when nothing else is going
+on (no check, install, roll back, recovery, Self Service install, open question, Apple
+Installer window or queued Update All), for a release with its signed zip, and only once
+this Mac has known about that exact release for at least 24 hours. That time is measured
+locally: Patched records the version, a fingerprint of the release's content and its own
+clock time when its release check first reports it, and never trusts a date from GitHub.
+The fingerprint is each file's GitHub asset `id` for the zip and the `.sig`, plus the asset
+`digest` when GitHub gives one. A release whose ids are missing or not plain integers, or
+whose digest is present but not exactly `sha256:` and 64 lowercase hex digits, has no
+fingerprint and is never installed automatically. The wait starts again for
+any other version, for the same version with a different fingerprint (a file deleted and
+uploaded again under the same name gets a new id), and after a check that finds no newer
+release (a release pulled and published again waits the full 24 hours from its return, as
+long as a check on this Mac saw it gone in between). A
+check that fails, or a record Patched cannot read or validate, says nothing and changes nothing.
+The install is bound to a fresh offer: the release lookup of the latest check (the one the
+automatic run started from, at most a few hours old) must have answered, with that version and
+fingerprint, so an offer kept on screen from an earlier lookup is never acted on. A
+first sighting in the future (a clock set back) is kept, so the release stays waiting until
+the clock passes that time plus 24 hours: setting the clock back after a release was first seen
+never shortens the wait. Moving the clock forward does shorten it, as it would any wait timed
+by the wall clock, and so does a clock that was behind when the release was first seen and is
+then corrected. Because the
+run is once a day, the real wait is between 24 and 48 hours. A release that the automatic
+path has started once, whether it failed or installed but could not reopen Patched, is not
+started automatically again (the version and fingerprint are kept locally); Update still
+installs it, and a newer version or fingerprint is tried as usual. Stop during the run also
+cancels that day's self-update. A failure leaves Patched as it was, opens nothing
+(not even the release page for a release that needs admin rights), keeps the normal Update
+offer and is written to the local history. A success is written to the history before
+Patched quits and reopens.
 
 **What is checked, in order.** Any failure stops the update and leaves the
 installed Patched exactly as it was:
@@ -220,6 +261,25 @@ replaced zip fails the signature check, and the attacker can only withhold
 releases, offer an old version (refused as not newer), or point the release page
 somewhere (Download opens only the exact release page URL). If the key is lost or
 leaked, the only fix is a release with a new key built in, installed by hand.
+
+With "Also update Patched itself" on, the same compromise reaches those users without
+anyone clicking Update: a malicious release that passes every check (a signature with the
+release key, and for a pinned Patched the owner's Developer ID and notarisation) is
+installed at the next daily run once its 24 hours are up. The mitigations: it is off by
+default and needs automatic updates on as well; it uses exactly the same checks as the
+click, so it needs exactly the same keys; the 24-hour wait, counted on each Mac from when
+that Mac first saw the release, gives time to notice and pull a bad release (and Apple to
+revoke its certificate or notarisation, which the revocation check then refuses) before
+anyone receives it automatically, and swapping the files of a waiting release starts that
+wait again; and an organisation can force it off with
+`AutomaticSelfUpdatesEnabled` (or `AutomaticUpdatesEnabled`) set to false. A GitHub
+account compromise alone still gains nothing: without the keys a replaced zip fails the
+same signature check. The wait is best-effort, not a security boundary. It relies on what
+GitHub reports: the asset ids and digests come from the same untrusted release record, and
+the download is still fetched by name, so it is not pinned to the id that waited (the
+signature check is what protects the content). A release pulled and published again while
+no check on this Mac saw it gone (the Mac was asleep, offline or Patched was not running)
+keeps its first sighting, and a clock moved forward shortens the wait.
 TLS to GitHub is relied on only for availability, not for integrity.
 
 **Later.** A full Gatekeeper (`spctl`) assessment of the new app on this path, as the
@@ -229,7 +289,7 @@ notarisation ticket).
 ## Automatic updates
 
 Off by default, set by the user in Settings or by an organisation through managed preferences
-(`AutomaticUpdatesEnabled`, `AutomaticUpdatesTime`, for `im.patched.app`). It is the one
+(`AutomaticUpdatesEnabled`, `AutomaticUpdatesTime` and `AutomaticSelfUpdatesEnabled`, for `im.patched.app`). It is the one
 deliberate exception to "nothing installs until you choose Update". The only code that can
 start it is the scheduler's `runAutomaticIfDue`, after a successful check, when the setting
 is on, the chosen time has passed by no more than 6 hours and it is still the same day (the window never crosses midnight, so a late time has a shorter window), and no run is recorded for today.
@@ -239,7 +299,7 @@ before its install.
 
 Exclusions, enforced twice (in Update All's selection and again in the automatic form):
 installer packages (Apple's Installer needs a password), root-owned or admin apps, including
-those with a developer package route (consent is never passed), Patched itself (self-update stays an explicit confirmed click), hidden apps and
+those with a developer package route (consent is never passed), Patched itself (it is never one of the run's apps; the separate opt-in "Also update Patched itself" uses the self-update path, see "Patched updating itself"), hidden apps and
 Mac App Store apps (the App Store is not even opened). Open apps are skipped and never quit,
 and recovery never runs. It waits while an install, roll back or recovery is running, and is
 skipped after a check that mostly failed offline. It does not wake the Mac or hold power
@@ -247,7 +307,7 @@ assertions. Roll back works as for any update.
 
 Managed values are read with `CFPreferencesAppValueIsForced`: only a forced value counts, so a
 user default is never mistaken for policy. A forced value locks the control. A forced
-`AutomaticUpdatesEnabled` of the wrong type fails closed (off and locked, reported in Settings),
+`AutomaticUpdatesEnabled` or `AutomaticSelfUpdatesEnabled` of the wrong type fails closed (off and locked, reported in Settings),
 so a bad profile cannot leave installs running that the organisation meant to stop. A time that
 is not exactly `HH:mm` is ignored and reported, and the user's time or 02:00 applies. It waits
 while installing is blocked or a confirmation is open, and it does not dismiss one. An attacker who can write managed preferences already
@@ -424,7 +484,16 @@ code. A scheduled run that found nothing, or had to wait, is recorded too. `patc
 ## When something goes wrong
 
 - **Fail closed.** Any check that cannot pass refuses the update with a reason.
-  The installed app is left untouched and temporary files are removed.
+  The installed app is left untouched and temporary files are removed. One outcome
+  is reported as an update although Patched installed nothing: `updated_itself`, when the
+  app replaced itself (Sparkle's "install on quit", for example) while Patched was preparing
+  the same update, up to the moment Patched would swap. Patched then reopens that copy and
+  calls the app updated only if it has the same bundle ID, passes the strict signature check
+  for the pinned Team ID and Apple's notarisation assessment, and is strictly newer than the
+  version Patched prepared against (by exact numeric comparison). That check does not cover
+  the feed's Sparkle EdDSA signature, the offered version or the download checks, because
+  Patched did not download that copy: it vouches only that the app's own developer signed
+  something newer. Anything else at the path is refused as before. Rollbacks never report it.
 - **One-step swap.** The new app replaces the old one in a single atomic
   exchange. If the new app fails its checks afterwards, the old app is checked and
   put back.
@@ -437,8 +506,11 @@ code. A scheduled run that found nothing, or had to wait, is recorded too. `patc
   deletes nothing, leaves the app stopped, and says so.
 - **Running apps.** Updates, rollbacks and `recover` refuse to touch an app that is
   running from an affected bundle. An app is only quit if you ask (`--quit`). It is asked to
-  quit, never force-killed, and is only relaunched once the result has been
-  verified. The check looks at more than the app's own instances: it also lists every
+  quit, never force-killed, and is only relaunched from a bundle that has been verified:
+  the new app after a verified update, the old app when it still verifies as the old app
+  (signature, Team ID, bundle ID and version) after a refusal, or a copy the app installed
+  itself that passed the `updated_itself` checks above. If none of these holds, the app is
+  left closed. The check looks at more than the app's own instances: it also lists every
   process on the Mac whose executable lives inside the bundle (login items in
   `Contents/Library/LoginItems`, XPC services, and tools in `Contents/MacOS` however
   they were launched, symlinks included), using `proc_listallpids` and `proc_pidpath`.
@@ -453,14 +525,20 @@ code. A scheduled run that found nothing, or had to wait, is recorded too. `patc
   politely, exactly like the app (`NSRunningApplication.terminate`, never a force
   terminate), waited for up to the quit timeout, and the bundle is looked at again; without
   that consent it blocks. A nested app that Patched itself quit is reopened afterwards,
-  from the new bundle once the update is verified or from the unchanged bundle if the
-  update is refused or fails, and nothing Patched did not quit is ever reopened. Every *other* process (XPC services, daemons, bare tools,
+  from the new bundle once the update is verified. After a refusal or failure before the swap it
+  is reopened only from a bundle at the same path that can be vouched for, by the rule that
+  governs the app itself: the unchanged old app (it still verifies against the transaction's
+  journal), or a verified newer copy the app installed itself (reported as `updated_itself`).
+  Anything else at the path, and any case without a journal, leaves the nested app closed.
+  On the admin route Patched does not reopen nested apps it quit at all; it reopens only the
+  app itself, under the same rule.
+  Nothing Patched did not quit is ever reopened. Every *other* process (XPC services, daemons, bare tools,
   Sparkle's updater, anything inside a framework) blocks, even with `--quit`: the update is
   refused with `helper_running`, naming it and its pid, and you quit it yourself. Rollback
   and recovery treat ignorable processes the same way; recovery never asks a nested app to
   quit, and rollback does so only under the same consent it needs to quit the app. The sweep
   runs before the download (nested apps are not yet asked to quit), again before the app is
-  quit, once more after the quit (helpers get a few seconds to follow the app out) and a
+  quit, once more after the quit (helpers get up to 10 seconds to follow the app out) and a
   last time immediately before the swap, all with the same classification. It is
   best-effort: it sees only processes the current user may inspect.
 - **Helpers and `.pkg` updates.** `.pkg` updates do not refuse on helpers running from inside

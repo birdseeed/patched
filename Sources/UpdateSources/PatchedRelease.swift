@@ -7,12 +7,21 @@ import Foundation
 public struct PatchedReleaseAssets: Equatable, Sendable {
     public let zipURL: URL
     public let signatureURL: URL
-    public init(zipURL: URL, signatureURL: URL) { self.zipURL = zipURL; self.signatureURL = signatureURL }
+    /// What GitHub says the two files are, beyond their names: each asset's numeric `id` and, when GitHub gives one,
+    /// its `digest`. Uploading a different file under the same name gives it a new id (and digest), so the automatic
+    /// self-update's 24-hour wait starts again. Untrusted and only compared for equality; it is never used to fetch or
+    /// verify anything. nil when either file has no valid id, or carries a digest that is not well formed: such a
+    /// release can still be installed with a click, never automatically.
+    public let fingerprint: String?
+    public init(zipURL: URL, signatureURL: URL, fingerprint: String? = nil) {
+        self.zipURL = zipURL; self.signatureURL = signatureURL; self.fingerprint = fingerprint
+    }
 }
 
 /// A newer Patched release, as announced by GitHub's "latest release" record. Patched shows the version and,
 /// on a click, opens the validated release page. When the release also carries its signed zip (`assets`), an
-/// explicit, confirmed click can install it (see `SelfUpdater`); nothing else ever does.
+/// explicit, confirmed click can install it (see `SelfUpdater`). The only other path is the opt-in "Also update
+/// Patched itself" daily run, through the same `SelfUpdater` and checks, for a version known on this Mac for 24 hours.
 public struct PatchedRelease: Equatable, Sendable {
     /// The version without any leading "v", for example "0.2.0".
     public let version: String
@@ -29,14 +38,16 @@ public struct PatchedRelease: Equatable, Sendable {
 public enum PatchedReleaseResult: Equatable, Sendable {
     /// A valid release newer than the running app.
     case newer(PatchedRelease)
-    /// No release, an older or equal one, a draft or prerelease, or a record that failed validation.
+    /// No release (404), an older or equal one, or a draft or prerelease.
     case noNews
-    /// The request itself failed (offline, server error). Says nothing about whether there is news.
+    /// The request failed (offline, server error), or the record could not be read or failed validation.
+    /// Says nothing about whether there is news.
     case unavailable
 }
 
 /// Reads `GET https://api.github.com/repos/birdseeed/patched/releases/latest`. The record is untrusted: only
-/// `tag_name`, `html_url`, `draft`, `prerelease` and each asset's `name` and `browser_download_url` are read.
+/// `tag_name`, `html_url`, `draft`, `prerelease` and each asset's `name`, `browser_download_url`, `id` and `digest`
+/// are read (the last two only for the zip and signature, as their fingerprint).
 /// `html_url` must be this repository's page for that exact tag, and an asset counts only under its exact
 /// name and exact download URL for that tag. Nothing is downloaded here.
 public enum PatchedReleaseChecker {
@@ -67,10 +78,17 @@ public enum PatchedReleaseChecker {
         return evaluate(data, currentVersion: currentVersion)
     }
 
-    /// Pure: the record's bytes against the running version.
+    /// Pure: the record's bytes against the running version. A draft or prerelease, or a valid release that is
+    /// not newer, is no news. A record Patched cannot read or validate says nothing (`.unavailable`), so it never
+    /// counts as the release having gone (which would restart the automatic self-update's wait).
     public static func evaluate(_ data: Data, currentVersion: String) -> PatchedReleaseResult {
-        guard let release = parse(data), VersionComparator.isNewer(release.version, than: currentVersion) else { return .noNews }
-        return .newer(release)
+        guard let release = parse(data) else {
+            if data.count <= FetchLimits.releaseBytes,
+               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               object["draft"] as? Bool == true || object["prerelease"] as? Bool == true { return .noNews }
+            return .unavailable
+        }
+        return VersionComparator.isNewer(release.version, than: currentVersion) ? .newer(release) : .noNews
     }
 
     public static func parse(_ data: Data) -> PatchedRelease? {
@@ -89,9 +107,11 @@ public enum PatchedReleaseChecker {
         guard let list = value as? [Any], list.count <= maxAssets else { return nil }
         let zip = zipName(version: version), sig = signatureName(version: version)
         var found: [String: [String]] = [:]
+        var marks: [String: String?] = [:]
         for case let asset as [String: Any] in list {
             guard let name = asset["name"] as? String, name == zip || name == sig else { continue }
             found[name, default: []].append((asset["browser_download_url"] as? String) ?? "")
+            marks[name] = mark(asset)
         }
         func exact(_ name: String) -> URL? {
             let expected = downloadBase + tag + "/" + name
@@ -100,7 +120,26 @@ public enum PatchedReleaseChecker {
             return url
         }
         guard let zipURL = exact(zip), let sigURL = exact(sig) else { return nil }
-        return PatchedReleaseAssets(zipURL: zipURL, signatureURL: sigURL)
+        // Each name appears exactly once here, so each mark is that one asset's.
+        var fingerprint: String?
+        if let zipMark = marks[zip] ?? nil, let sigMark = marks[sig] ?? nil { fingerprint = "zip=" + zipMark + ";sig=" + sigMark }
+        return PatchedReleaseAssets(zipURL: zipURL, signatureURL: sigURL, fingerprint: fingerprint)
+    }
+
+    /// One asset's `id`, plus its `digest` when present: "123" or "123@sha256:<64 hex>". The id must be a JSON
+    /// integer from 1 to 2^53 (not a boolean, fraction or string). A digest, when present, must be exactly
+    /// "sha256:" and 64 lowercase hex digits. nil otherwise: no fingerprint.
+    static func mark(_ asset: [String: Any]) -> String? {
+        guard let number = asset["id"] as? NSNumber, CFGetTypeID(number) == CFNumberGetTypeID(), !CFNumberIsFloatType(number as CFNumber) else {
+            return nil
+        }
+        let id = number.int64Value
+        guard id > 0, id <= 1 << 53, number.stringValue == String(id) else { return nil }
+        guard let value = asset["digest"], !(value is NSNull) else { return String(id) }
+        guard let digest = value as? String, digest.utf8.count == 71, digest.hasPrefix("sha256:"),
+              digest.utf8.dropFirst(7).allSatisfy({ (UInt8(ascii: "0")...UInt8(ascii: "9")).contains($0) || (UInt8(ascii: "a")...UInt8(ascii: "f")).contains($0) })
+        else { return nil }
+        return String(id) + "@" + digest
     }
 
     /// `v1.2.3` or `1.2.3`: digits and single dots only after an optional "v".

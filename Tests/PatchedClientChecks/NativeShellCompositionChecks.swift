@@ -128,7 +128,7 @@ import PatchedShell
     check("actual root uses shared shell and real children, with no local disk image inspection") {
         let root = code(try source("Sources/PatchedClient/NativeClientSession.swift"))
         for required in ["ShellView(", "AppsListView(", "supportPanel", "session.navigation",
-                         "case .applications", "case .updates", "case .support", "AppUpdatesView(controller: session.appUpdates)",
+                         "case .applications", "case .updates", "case .support", "AppUpdatesView(controller: session.appUpdates, automaticUpdates: session.automaticUpdates)",
                          "case .history", "HistoryView(history: session.history"] {
             try expect(root.contains(required), "Root lacks real composition binding: \(required)")
         }

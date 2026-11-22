@@ -24,6 +24,10 @@ private func helperDetail(_ paths: [String]) -> String {
         try expect(one.contains("(Word Daemon)"), one)
         try expect(HelperRefusalDetail.friendlyNames(in: "unrelated").isEmpty, "names from unrelated text")
     }
+    check("plain refusals: updated_itself says the app's own new version was left in place") {
+        let text = PlainRefusalText.text(name: "Superwhisper", .updatedItself("Superwhisper.app is now 3.4.0 (340)"))
+        try expect(text == "Superwhisper updated itself while Patched was working, so Patched left its new version in place.", text)
+    }
     check("plain refusals: app_running, app_would_not_quit, security refusals and the fallback") {
         try expect(PlainRefusalText.text(name: "Notes", .appRunning("Notes (pid 12)")) == "Quit Notes, then try again.", "app_running")
         try expect(PlainRefusalText.text(name: "Notes", .appWouldNotQuit("x")) == "Notes didn't quit. Quit it yourself, then try again.", "app_would_not_quit")

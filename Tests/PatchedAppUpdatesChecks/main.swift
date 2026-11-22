@@ -774,6 +774,7 @@ check("offscreen: the Updates view paints rows, in light and dark, and is inert"
 registerBackgroundCheckChecks()
 registerAdminUpdateChecks()
 registerAutomaticUpdateChecks()
+registerAutomaticSelfUpdateChecks()
 registerUpdateAllEntryChecks()
 registerAppStoreChecks()
 registerMenuAndManualAdminChecks()

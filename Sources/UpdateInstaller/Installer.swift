@@ -436,10 +436,23 @@ public struct UpdateInstaller: Sendable {
 
     // MARK: Step 7: running app
 
+    /// How long to keep looking for the app's helpers to exit after the app itself quit. Some apps' helpers
+    /// (Claude's `disclaimer`) take several seconds. The wait polls and ends as soon as they are gone, so a
+    /// clean quit costs nothing extra.
+    static let helperGrace: TimeInterval = 10
+
     /// Returns whether the app was running (and has now quit).
     /// With `allowHelpers` (the `.pkg` path only) processes running from inside the bundle that are not app
     /// instances never cause a refusal; the app itself is still refused or asked to quit exactly as before.
-    func ensureNotRunning(_ target: InstallTarget, quit: Bool, allowHelpers: Bool = false, nested: NestedQuits? = nil) async throws -> Bool {
+    /// When a helper refusal follows quitting the app, the app is reopened only from a bundle that can be vouched for,
+    /// and only with `journal` (the transaction the commit belongs to): with `detectSelfInstall` (an update, never a
+    /// rollback), a verified newer version the app installed itself (`selfInstalledVersion`), which is reopened once
+    /// and reported as `updatedItself` instead of the refusal; otherwise the old app, still verifying against the
+    /// journal (`engine.verifyOld`). Anything else at the path is left closed. Without a journal it is never reopened;
+    /// the callers without one (the checks before downloading, and the `.pkg` path with `allowHelpers`) never get here
+    /// with an app they quit.
+    func ensureNotRunning(_ target: InstallTarget, quit: Bool, allowHelpers: Bool = false, nested: NestedQuits? = nil,
+                          journal: TransactionJournal? = nil, detectSelfInstall: Bool = false) async throws -> Bool {
         let running = runningApps.runningInstances(bundleID: target.facts.bundleID, path: target.path)
         if !running.isEmpty {
             guard quit else { throw InstallRefusal.appRunning("\(target.name) (pid \(running.map(String.init).joined(separator: ", ")))") }
@@ -449,12 +462,25 @@ public struct UpdateInstaller: Sendable {
         }
         if allowHelpers { return !running.isEmpty }
         do {
-            try await ensureNoHelpers(name: target.name, path: target.path, grace: running.isEmpty ? 0 : min(quitTimeout, 3), quit: quit, nested: nested)
+            try await ensureNoHelpers(name: target.name, path: target.path, grace: running.isEmpty ? 0 : min(quitTimeout, Self.helperGrace), quit: quit, nested: nested)
         } catch {
             // The app was quit for this update, but a helper (a login item, say) is still running from inside the
-            // bundle, so nothing will be installed: reopen the app rather than leave it closed. The bundle has not
-            // been touched yet.
-            if !running.isEmpty { await runningApps.relaunch(path: target.path) }
+            // bundle, so nothing will be installed: reopen the app rather than leave it closed. Patched has not touched
+            // the bundle, but the app may have replaced it while it quit, so only a bundle that verifies is reopened.
+            // Nested apps Patched quit are reopened under the same rule, from the same decision.
+            if let journal, !running.isEmpty || !(nested?.paths.isEmpty ?? true) {
+                // The app may have updated itself while it quit (its new bundle may have started a helper too).
+                if detectSelfInstall, let now = selfInstalledVersion(at: target.path, journal: journal) {
+                    if !running.isEmpty { await runningApps.relaunch(path: target.path) }
+                    if let nested { await relaunchNested(nested.paths, bundle: target.path) }
+                    if !running.isEmpty {
+                        throw InstallRefusal.updatedItself("\(target.name) is now \(InstallTarget.versionText(now.shortVersion, now.build))")
+                    }
+                } else if (try? engine.verifyOld(target.path, journal)) != nil {
+                    if !running.isEmpty { await runningApps.relaunch(path: target.path) }
+                    if let nested { await relaunchNested(nested.paths, bundle: target.path) }
+                }
+            }
             throw error
         }
         return !running.isEmpty
@@ -485,8 +511,9 @@ public struct UpdateInstaller: Sendable {
             if !asked.isEmpty { helpers = blockers() }
         }
         if !helpers.isEmpty {
-            // Refused after Patched quit some nested apps: put them back from the unchanged bundle.
-            if let nested { await relaunchNested(nested.paths, bundle: path) }
+            // Refused after Patched quit some nested apps: they are NOT reopened here. Only a caller that holds the
+            // journal can vouch for the bundle now at `path` (see `ensureNotRunning`), so a caller without one
+            // never reopens them (none of those quits any).
             throw Self.helperRefusal(name: name, path: path, helpers)
         }
     }
@@ -499,8 +526,8 @@ public struct UpdateInstaller: Sendable {
         return parts.count >= 4 ? parts.dropLast(3).joined(separator: "/") : nil
     }
 
-    /// Reopens nested apps that Patched itself asked to quit, from `bundle` (the new bundle after a verified
-    /// update, the unchanged one after a refusal). Skips one that is already running again (the app's own
+    /// Reopens nested apps that Patched itself asked to quit, from `bundle`, which the caller has verified (the new
+    /// bundle after a verified update or self-install, the old one after a refusal once `verifyOld` passed). Skips one that is already running again (the app's own
     /// relaunch may have started it) or that is not a real `.app` folder there. Never opens anything else.
     func relaunchNested(_ relatives: [String], bundle: String) async {
         guard !relatives.isEmpty else { return }
@@ -738,7 +765,8 @@ public struct UpdateInstaller: Sendable {
     func commitAndRelaunch(_ journal: inout TransactionJournal, target: InstallTarget, staged: BundleFacts,
                            status: InstallReport.Status, quit: Bool) async throws -> InstallReport {
         let nested = NestedQuits()
-        let wasRunning = try await ensureNotRunning(target, quit: quit, nested: nested)
+        let wasRunning = try await ensureNotRunning(target, quit: quit, nested: nested, journal: journal,
+                                                    detectSelfInstall: status == .installed)
         let result: EngineResult
         do {
             result = try engine.commit(&journal) {
@@ -753,9 +781,19 @@ public struct UpdateInstaller: Sendable {
         } catch let crash as SimulatedCrash {
             throw crash
         } catch {
-            // Thrown before the swap: the target was never touched. Relaunch only if it still verifies.
-            if wasRunning, (try? engine.verifyOld(target.path, journal)) != nil { await runningApps.relaunch(path: target.path) }
-            await relaunchNested(nested.paths, bundle: target.path)
+            // Thrown before the swap: the target was never touched by Patched.
+            // The app may have updated itself meanwhile (Sparkle's "install on quit" runs as the app quits).
+            // If what is there now is a verified, newer version of the same app, say so instead of failing.
+            if status == .installed, let now = selfInstalledVersion(at: target.path, journal: journal) {
+                if wasRunning { await runningApps.relaunch(path: target.path) }
+                await relaunchNested(nested.paths, bundle: target.path)
+                throw InstallRefusal.updatedItself("\(target.name) is now \(InstallTarget.versionText(now.shortVersion, now.build))")
+            }
+            // Relaunch only if it still verifies, and reopen the nested apps under the same decision.
+            if wasRunning || !nested.paths.isEmpty, (try? engine.verifyOld(target.path, journal)) != nil {
+                if wasRunning { await runningApps.relaunch(path: target.path) }
+                await relaunchNested(nested.paths, bundle: target.path)
+            }
             throw error
         }
         switch result.outcome {
@@ -773,6 +811,32 @@ public struct UpdateInstaller: Sendable {
         case .unresolved:
             throw result.refusal ?? InstallRefusal.unresolved("journal \(journal.id)")
         }
+    }
+
+    /// The facts of the bundle at `path` when it is not the one this transaction prepared against but a newer,
+    /// correctly signed and Gatekeeper-accepted version of the same app (the app updated itself). nil in every
+    /// other case, including when newness cannot be established exactly. Reads only; never touches the bundle.
+    func selfInstalledVersion(at path: String, journal: TransactionJournal) -> BundleFacts? {
+        // Only before Patched's own swap: from `swapped` on, the bundle at the target may be the one Patched staged.
+        guard journal.phase == .staging || journal.phase == .prepared,
+              let identity = FileSafety.directoryIdentity(path), identity != journal.oldIdentity, identity != journal.newIdentity,
+              let info = FileSafety.lstatInfo(path), !FileSafety.isSymlink(info), FileSafety.isDirectory(info),
+              let facts = try? BundleFacts.read(bundleAt: path), facts.bundleID == journal.bundleID,
+              Self.exactlyNewer(facts, thanShort: journal.oldShortVersion, build: journal.oldBuild),
+              (try? verifier.verifySignature(ofBundleAt: path, teamID: journal.teamID)) != nil,
+              (try? verifier.assessGatekeeper(ofBundleAt: path)) != nil else { return nil }
+        return facts
+    }
+
+    /// Strictly newer by exact numeric comparison of the build, or of the short version when the builds
+    /// cannot be compared; and not older by either. Anything not canonical numeric is not judged newer.
+    static func exactlyNewer(_ new: BundleFacts, thanShort oldShort: String?, build oldBuild: String?) -> Bool {
+        func order(_ a: String?, _ b: String?) -> ComparisonResult? {
+            guard let a, let b else { return nil }
+            return SourceVersioning.numericCompare(a, b)
+        }
+        let results = [order(new.build, oldBuild), order(new.shortVersion, oldShort)].compactMap { $0 }
+        return results.contains(.orderedDescending) && !results.contains(.orderedAscending)
     }
 
     /// `backupFolder(for:)` under a name that a local `backupFolder` in the callers cannot shadow.
@@ -832,7 +896,7 @@ public struct UpdateInstaller: Sendable {
                             }
                             if path == journal.targetPath { quitTarget = true }
                         }
-                        try await ensureNoHelpers(name: journal.targetName, path: path, grace: pids.isEmpty ? 0 : min(quitTimeout, 3))
+                        try await ensureNoHelpers(name: journal.targetName, path: path, grace: pids.isEmpty ? 0 : min(quitTimeout, Self.helperGrace))
                     }
                 }
                 let recovered = try engine.recover(journal)

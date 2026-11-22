@@ -57,7 +57,7 @@ public struct NativeFirstRunView: View {
             VStack(alignment: .leading, spacing: 16) {
                 point("Checking", "Patched checks for updates when it opens and every 3 hours. Checks never install anything unless you turn on automatic updates below.")
                 point("Notifications", "Patched asks macOS for permission to show notifications the first time it has an update to tell you about.")
-                point("Installing", "An app is updated only when you click Update or Update All, unless you turn on automatic updates below. If the app is open, Patched asks before quitting it.")
+                point("Installing", "An app is updated only when you click Update or Update All, unless you turn on automatic updates below. If the app is open, Patched asks before quitting it. Patched updates itself only when you confirm it, unless you also tick the box to update Patched itself.")
                 point("Apps that need more help", "Apps from the App Store are updated in the App Store, and apps that need admin rights are updated with their own updater. Patched opens them for you.")
                 if let automaticUpdates { FirstRunAutomaticUpdatesView(settings: automaticUpdates) }
             }
@@ -122,6 +122,10 @@ public struct NativeFirstRunView: View {
     public var switchIsLocked: Bool { settings.enabledLocked }
     /// A user flip of the switch. The same call Settings makes; ignored while an organisation manages the setting.
     public func setSwitch(_ on: Bool) { settings.setEnabled(on) }
+    /// "Also update Patched itself", under the switch: unticked by default, and greyed out until automatic updates are on.
+    public var selfBoxIsOn: Bool { settings.selfUpdatesEnabled }
+    public var selfBoxIsEnabled: Bool { settings.canChangeSelfUpdates }
+    public func setSelfBox(_ on: Bool) { settings.setSelfUpdatesEnabled(on) }
     /// Says where to change the time only when it can be changed.
     public var captionText: String {
         settings.timeLocked
@@ -139,7 +143,18 @@ public struct NativeFirstRunView: View {
             .accessibilityHint(Text(verbatim: captionText))
             Text(verbatim: captionText).font(.callout).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-            if settings.enabledLocked || settings.timeLocked {
+            Toggle(isOn: Binding(get: { selfBoxIsOn }, set: { setSelfBox($0) })) {
+                Text("Also update Patched itself")
+            }
+            .toggleStyle(.checkbox)
+            .disabled(!selfBoxIsEnabled)
+            .accessibilityLabel("Also update Patched itself")
+            .accessibilityHint(Text(verbatim: AutomaticUpdateSettings.selfUpdatesDetailText))
+            .padding(.leading, 20)
+            Text(verbatim: AutomaticUpdateSettings.selfUpdatesDetailText).font(.callout).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.leading, 20)
+            if settings.enabledLocked || settings.timeLocked || settings.selfUpdatesLocked {
                 Text(verbatim: AutomaticUpdateSettings.lockedNote).font(.callout).foregroundStyle(.secondary)
             }
             if settings.managedValueIgnored {

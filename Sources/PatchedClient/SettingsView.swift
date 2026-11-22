@@ -45,7 +45,7 @@ public enum NotificationPermission: Equatable, Sendable { case unknown, notDeter
 /// The Settings window: Open at login, how checking works, notifications and the version, as a grouped form.
 public struct SettingsView: View {
     public static let scheduleText = String(localized: "Patched checks for updates when it opens and every 3 hours. It only installs updates on its own if you turn on automatic updates below.")
-    public static let automaticDetailText = String(localized: "Once a day at this time, or at the first check after it (within 6 hours, and not past midnight), Patched installs updates for apps you can replace without admin rights, after the same checks as Update All. It skips open apps, Patched itself, installer packages, App Store apps, hidden apps and apps that need admin rights. You can roll back any update.")
+    public static let automaticDetailText = String(localized: "Once a day at this time, or at the first check after it (within 6 hours, and not past midnight), Patched installs updates for apps you can replace without admin rights, after the same checks as Update All. It skips open apps, installer packages, App Store apps, hidden apps and apps that need admin rights. It updates Patched itself only when \"Also update Patched itself\" is on. You can roll back any app update.")
     @ObservedObject private var automaticUpdates: AutomaticUpdateSettings
     @ObservedObject private var openAtLogin: OpenAtLoginController
     @ObservedObject private var notifications: NotificationStatusController
@@ -82,15 +82,21 @@ public struct SettingsView: View {
                     Text("Install updates automatically")
                 }
                 .disabled(automaticUpdates.enabledLocked)
+                // Shows what is in effect: off whenever automatic updates are off.
+                Toggle(isOn: Binding(get: { automaticUpdates.selfUpdatesEnabled }, set: { automaticUpdates.setSelfUpdatesEnabled($0) })) {
+                    Text("Also update Patched itself")
+                }
+                .disabled(!automaticUpdates.canChangeSelfUpdates)
                 DatePicker(selection: timeBinding, displayedComponents: .hourAndMinute) { Text("Time") }
                     .disabled(automaticUpdates.timeLocked || !automaticUpdates.isEnabled)
-                if automaticUpdates.enabledLocked || automaticUpdates.timeLocked {
+                if automaticUpdates.enabledLocked || automaticUpdates.timeLocked || automaticUpdates.selfUpdatesLocked {
                     Text(verbatim: AutomaticUpdateSettings.lockedNote).foregroundStyle(.secondary)
                 }
                 if automaticUpdates.managedValueIgnored {
                     Text(verbatim: AutomaticUpdateSettings.invalidNote).foregroundStyle(.secondary)
                 }
                 Text(verbatim: Self.automaticDetailText).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                Text(verbatim: AutomaticUpdateSettings.selfUpdatesDetailText).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
             Section(header: Text("macOS updates")) {
                 Picker(selection: Binding(get: { macOSReminders.reminderDays ?? 0 },
