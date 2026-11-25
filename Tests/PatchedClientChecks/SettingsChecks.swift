@@ -15,7 +15,7 @@ import PatchedShell
 @MainActor private func settingsPaint(_ session: NativeClientSession) throws -> Data {
     let app = NSApplication.shared
     if app.activationPolicy() != .prohibited { _ = app.setActivationPolicy(.prohibited) }
-    // Tall enough for the whole form, down to the notification and version sections.
+    // Larger than the fixed Settings window, which opens on General with its notification and version sections.
     let host = NSHostingView(rootView: NativeClientSettingsView(session: session).frame(width: 900, height: 1000))
     host.frame = NSRect(x: 0, y: 0, width: 900, height: 1000)
     let window = NSWindow(contentRect: host.frame, styleMask: .borderless, backing: .buffered, defer: false)
@@ -87,6 +87,19 @@ import PatchedShell
         for stale in ["Toggle(\"Automatic", "Pause", "Network", "Diagnostics", "Save schedule", "Reload saved", "requestAuthorization"] {
             try expect(!view.contains(stale), "Settings still has \(stale)")
         }
+        // Laid out like System Settings, so no page outgrows a small laptop screen: a sidebar of General, Updates
+        // and macOS, and the window titled after the chosen page. General opens first and holds notifications (the
+        // paint check above relies on that); the schedule line's "below" points at automatic updates on Updates.
+        try expect(view.contains("case general, updates, macOS") && view.contains("@State private var pane: Pane = .general")
+                   && view.contains(".listStyle(.sidebar)") && view.contains("SettingsWindowTitle(title: pane.title)")
+                   && view.contains("case .general: general") && view.contains("case .updates: updates") && view.contains("case .macOS: macOS"),
+                   "Settings is not a General, Updates, macOS sidebar with a page title")
+        try expect(SettingsView.Pane.allCases.map(\.title) == ["General", "Updates", "macOS"], "Sidebar titles changed")
+        let generalBody = view.range(of: "private var general: some View")!.lowerBound, updatesBody = view.range(of: "private var updates: some View")!.lowerBound
+        let notificationsAt = view.range(of: "Text(\"Notifications\")")!.lowerBound, scheduleAt = view.range(of: "Self.scheduleText")!.lowerBound
+        let macOSBody = view.range(of: "private var macOS: some View")!.lowerBound, macOSAt = view.range(of: "Text(\"macOS updates\")")!.lowerBound
+        try expect(generalBody < notificationsAt && notificationsAt < updatesBody && updatesBody < scheduleAt && scheduleAt < automaticAt
+                   && automaticAt < macOSBody && macOSBody < macOSAt, "Sections are on the wrong pages")
         let root = code(try source("Sources/PatchedClient/NativeClientSession.swift"))
         try expect(!root.contains("case .settings") && !root.contains("SettingsView(") && !root.contains("NativeScheduleSettingsView")
                    && !root.contains("NativeNetworkSettingsView") && !root.contains("unavailable in this preview"), "Root still routes settings inside the main window")

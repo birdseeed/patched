@@ -396,6 +396,15 @@ public struct UpdateInstaller: Sendable {
             var floor = installedVersion
             if let oldBuild = installed.build, SourceVersioning.fullOrRefined(oldBuild, of: oldShort),
                SourceVersioning.numericCompare(oldBuild, floor) == .orderedDescending { floor = oldBuild }
+            // CCleaner style: a bare build counter of 3+ digits on the same short ("2.11" build 300) is the installed
+            // "2.11.300", so a lagging cask's 2.11 (195) is not installed over it. This only ever raises the floor.
+            if let oldBuild = installed.build, let stagedShort = staged.shortVersion,
+               SourceVersioning.sameNumeric(oldShort, stagedShort),
+               !oldBuild.isEmpty, oldBuild.allSatisfy({ $0.isASCII && $0.isNumber }),
+               case let counter = String(oldBuild.drop(while: { $0 == "0" })), counter.count >= 3,
+               SourceVersioning.numericCompare("\(oldShort).\(counter)", floor) == .orderedDescending {
+                floor = "\(oldShort).\(counter)"
+            }
             guard SourceVersioning.numericCompare(stagedVersion, floor) == .orderedDescending else {
                 throw InstallRefusal.notNewer("\(InstallTarget.versionText(staged.shortVersion, staged.build)) is not newer than installed \(InstallTarget.versionText(installed.shortVersion, installed.build))")
             }

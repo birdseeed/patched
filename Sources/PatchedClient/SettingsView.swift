@@ -42,7 +42,9 @@ public enum NotificationPermission: Equatable, Sendable { case unknown, notDeter
     }
 }
 
-/// The Settings window: Open at login, how checking works, notifications and the version, as a grouped form.
+/// The Settings window, laid out like System Settings: a sidebar of pages, each a grouped form. General (Open at
+/// login, notifications, the version), Updates (how checking works, automatic updates) and macOS (macOS update
+/// reminders). The window title follows the chosen page.
 public struct SettingsView: View {
     public static let scheduleText = String(localized: "Patched checks for updates when it opens and every 3 hours. It only installs updates on its own if you turn on automatic updates below.")
     public static let automaticDetailText = String(localized: "Once a day at this time, or at the first check after it (within 6 hours, and not past midnight), Patched installs updates for apps you can replace without admin rights, after the same checks as Update All. It skips open apps, installer packages, App Store apps, hidden apps and apps that need admin rights. It updates Patched itself only when \"Also update Patched itself\" is on. You can roll back any app update.")
@@ -69,11 +71,92 @@ public struct SettingsView: View {
         self.startUninstall = startUninstall
     }
 
+    /// The pages in the sidebar, in order. General is first, so the window opens on it.
+    @_spi(Testing) public enum Pane: Hashable, CaseIterable, Sendable {
+        case general, updates, macOS
+        /// Shown in the sidebar and, for the chosen page, as the window title, as System Settings does.
+        public var title: String {
+            switch self {
+            case .general: return String(localized: "General")
+            case .updates: return String(localized: "Updates")
+            case .macOS: return String(localized: "macOS")
+            }
+        }
+        var symbol: String {
+            switch self { case .general: return "gearshape.fill"; case .updates: return "arrow.triangle.2.circlepath"; case .macOS: return "desktopcomputer" }
+        }
+        var tint: Color {
+            switch self { case .general: return .gray; case .updates: return .blue; case .macOS: return .indigo }
+        }
+    }
+    @State private var pane: Pane = .general
+
     public var body: some View {
+        // Laid out like System Settings: a sidebar of pages with coloured icons, and the chosen page beside it,
+        // so no page outgrows a small laptop screen.
+        HStack(spacing: 0) {
+            List(selection: Binding(get: { pane }, set: { if let new = $0 { pane = new } })) {
+                ForEach(Pane.allCases, id: \.self) { item in
+                    Label {
+                        Text(verbatim: item.title)
+                    } icon: {
+                        Image(systemName: item.symbol)
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .frame(width: 20, height: 20)
+                            .background(RoundedRectangle(cornerRadius: 5, style: .continuous).fill(item.tint.gradient))
+                    }
+                    .tag(item)
+                }
+            }
+            .listStyle(.sidebar)
+            .frame(width: 180)
+            Divider()
+            Group {
+                switch pane {
+                case .general: general
+                case .updates: updates
+                case .macOS: macOS
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        }
+        .background(SettingsWindowTitle(title: pane.title))
+        .onAppear { openAtLogin.refresh(); notifications.refresh(); automaticUpdates.refresh(); macOSReminders.refresh() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            openAtLogin.refresh(); notifications.refresh(); automaticUpdates.refresh()
+        }
+    }
+
+    /// Open at login, notifications, the version and Uninstall.
+    private var general: some View {
         Form {
             Section(header: Text("Open at login")) {
                 OpenAtLoginView(controller: openAtLogin)
             }
+            Section(header: Text("Notifications")) {
+                Text(verbatim: notifications.statusText).fixedSize(horizontal: false, vertical: true)
+                Button(action: openNotificationSettings) { Text("Open Notification Settings") }
+            }
+            if version != nil || startUninstall != nil {
+                Section {
+                    if let version {
+                        LabeledContent { Text(verbatim: version).textSelection(.enabled) } label: { Text("Version") }
+                    }
+                    if let startUninstall {
+                        // Lives here rather than the menu bar menu, away from everyday commands.
+                        Button(action: startUninstall) { Text("Uninstall Patched…") }
+                            .disabled(!runsFromAppBundle)
+                    }
+                }
+            }
+        }
+        .formStyle(.grouped)
+    }
+
+    /// How checking works and automatic updates.
+    private var updates: some View {
+        Form {
             Section(header: Text("Checking for updates")) {
                 Text(verbatim: Self.scheduleText).fixedSize(horizontal: false, vertical: true)
             }
@@ -98,6 +181,13 @@ public struct SettingsView: View {
                 Text(verbatim: Self.automaticDetailText).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 Text(verbatim: AutomaticUpdateSettings.selfUpdatesDetailText).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
+        }
+        .formStyle(.grouped)
+    }
+
+    /// Reminders about macOS updates, which Patched never installs itself.
+    private var macOS: some View {
+        Form {
             Section(header: Text("macOS updates")) {
                 Picker(selection: Binding(get: { macOSReminders.reminderDays ?? 0 },
                                           set: { macOSReminders.setReminderDays($0 == 0 ? nil : $0) })) {
@@ -108,28 +198,8 @@ public struct SettingsView: View {
                 } label: { Text("Remind me about macOS updates") }
                 Text(verbatim: MacOSReminderSettings.detailText).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
-            Section(header: Text("Notifications")) {
-                Text(verbatim: notifications.statusText).fixedSize(horizontal: false, vertical: true)
-                Button(action: openNotificationSettings) { Text("Open Notification Settings") }
-            }
-            if version != nil || startUninstall != nil {
-                Section {
-                    if let version {
-                        LabeledContent { Text(verbatim: version).textSelection(.enabled) } label: { Text("Version") }
-                    }
-                    if let startUninstall {
-                        // Lives here rather than the menu bar menu, away from everyday commands.
-                        Button(action: startUninstall) { Text("Uninstall Patched…") }
-                            .disabled(!runsFromAppBundle)
-                    }
-                }
-            }
         }
         .formStyle(.grouped)
-        .onAppear { openAtLogin.refresh(); notifications.refresh(); automaticUpdates.refresh(); macOSReminders.refresh() }
-        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            openAtLogin.refresh(); notifications.refresh(); automaticUpdates.refresh()
-        }
     }
 
     /// The picker works in dates; the setting is an hour and minute.
@@ -155,7 +225,24 @@ public struct NativeClientSettingsView: View {
                      automaticUpdates: session.automaticUpdates, macOSReminders: session.macOSReminders,
                      version: NativeClientSession.appVersion, openNotificationSettings: { session.openNotificationSettings() },
                      startUninstall: { Task { await UninstallFlow.system().run() } })
-            .frame(width: 460)
-            .fixedSize(horizontal: false, vertical: true)
+            .frame(width: 640, height: 600)
+    }
+}
+
+/// Sets the hosting window's title, as System Settings titles its window after the chosen page. SwiftUI's
+/// navigationTitle does not reach a Settings scene's window on every supported macOS, so this sets it directly.
+private struct SettingsWindowTitle: NSViewRepresentable {
+    let title: String
+    func makeNSView(context: Context) -> SettingsWindowTitleView { SettingsWindowTitleView(title: title) }
+    func updateNSView(_ nsView: SettingsWindowTitleView, context: Context) { nsView.title = title }
+}
+
+private final class SettingsWindowTitleView: NSView {
+    var title: String { didSet { window?.title = title } }
+    init(title: String) { self.title = title; super.init(frame: .zero) }
+    required init?(coder: NSCoder) { return nil }
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        window?.title = title
     }
 }

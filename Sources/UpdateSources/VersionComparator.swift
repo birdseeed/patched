@@ -134,6 +134,12 @@ public enum SourceVersioning {
     /// the offer have the same digits once the dots are removed (leading zeroes kept), the bundle is that
     /// offered version. This applies only where the build does not already extend the short, so the rules
     /// above are untouched.
+    ///
+    /// CCleaner style: short "2.11", build "194", cask "2.11.194". When the build is a single number of at least
+    /// 3 digits and the offer is exactly the short with that number appended (leading zeroes ignored), the bundle
+    /// is the offered version. Any other build keeps the short, so build counters ("2.0" build 4512 against cask
+    /// "2.0.1") are still offered updates, unless the cask's last component happens to equal the counter. The
+    /// installer refuses a staged build lower than an installed bare build counter on the same short.
     public static func bundleVersion(short: String?, build: String?, against offered: String, source: UpdateSource) -> String? {
         guard case .homebrewCask = source, let short, let build else { return short }
         guard let s = numericParts(short), let b = numericParts(build), let o = numericParts(offered) else { return short }
@@ -146,6 +152,12 @@ public enum SourceVersioning {
             return build
         }
         guard b.count > s.count, Array(b.prefix(s.count)) == s, o.count >= s.count, Array(o.prefix(s.count)) == s else {
+            // CCleaner style: short "2.11", build "194", cask "2.11.194". The cask is the short with the build appended,
+            // so the bundle is the offered version. Only on an exact match: a build that differs could be a counter
+            // ("2.0" build 4512, cask "2.0.1"), and builds under 3 digits are often placeholders ("1", "0").
+            if b.count == 1, b[0].count >= 3, o.count == s.count + 1, Array(o.prefix(s.count)) == s, o.last == b[0] {
+                return offered
+            }
             if o.count > s.count, Array(o.prefix(s.count)) == s, !(b.count > s.count && Array(b.prefix(s.count)) == s),
                let offerDigits = dottedDigits(offered), let buildDigits = dottedDigits(build), offerDigits == buildDigits {
                 return offered

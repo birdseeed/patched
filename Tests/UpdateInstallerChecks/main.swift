@@ -1970,6 +1970,54 @@ check("OneDrive-style versions: build is the cask version with different dots (s
     }
     try expectEqual(SourceVersioning.bundleVersion(short: "26.198.1011", build: "26198.1011.0006", against: "26.198.1011.0006", source: cask), "26.198.1011.0006")
 }
+check("CCleaner-style versions: cask is the short version with the build number appended") {
+    let cask = UpdateSource.homebrewCask(token: "ccleaner")
+    func facts(_ short: String, _ build: String) -> BundleFacts { BundleFacts(bundleID: bundleID, shortVersion: short, build: build, sparklePublicEDKey: nil) }
+    // Real values: CCleaner 2.11 (194) installed, Homebrew cask 2.11.194. Same release, so not an update.
+    try expectEqual(SourceVersioning.isNewer(candidateShort: "2.11.194", candidateBuild: nil, installedShort: "2.11",
+                                             installedBuild: "194", source: cask), .success(false))
+    // Newer casks are still offered, whether the build or the short moves on.
+    try expectEqual(SourceVersioning.isNewer(candidateShort: "2.11.195", candidateBuild: nil, installedShort: "2.11",
+                                             installedBuild: "194", source: cask), .success(true))
+    try expectEqual(SourceVersioning.isNewer(candidateShort: "2.12.1", candidateBuild: nil, installedShort: "2.11",
+                                             installedBuild: "194", source: cask), .success(true))
+    // The downloaded newer app matches its offer and passes the version checks; a different build does not match.
+    let offer = UpdateOffer(displayVersion: "2.11.195", downloadURL: URL(string: "https://example.test/c.dmg")!, format: .dmg, source: cask)
+    try expect(SourceVersioning.matchesOffer(offer, short: "2.11", build: "195"), "downloaded CCleaner should match its offer")
+    try expect(!SourceVersioning.matchesOffer(offer, short: "2.11", build: "196"), "wrong build matched")
+    try UpdateInstaller.checkVersions(staged: facts("2.11", "195"), installed: facts("2.11", "194"), offer: offer)
+    // Rule boundaries: only a 3+ digit build that is exactly the offer's extra component, on an offer one component
+    // longer than the short with the short as its prefix. Anything else keeps the short, so counters still see updates.
+    try expectEqual(SourceVersioning.bundleVersion(short: "2.11", build: "194", against: "2.11.195", source: cask), "2.11")
+    try expectEqual(SourceVersioning.bundleVersion(short: "2.11", build: "0194", against: "2.11.194", source: cask), "2.11.194")
+    try expectEqual(SourceVersioning.bundleVersion(short: "2.11", build: "194", against: "2.11.0.194", source: cask), "2.11")
+    try expectEqual(SourceVersioning.bundleVersion(short: "2.11", build: "194", against: "2.12.194", source: cask), "2.11")
+    try expectEqual(SourceVersioning.isNewer(candidateShort: "2.0.1", candidateBuild: nil, installedShort: "2.0",
+                                             installedBuild: "4512", source: cask), .success(true))
+    // An installed build ahead of a lagging cask is never replaced by the cask's older build.
+    let lagging = UpdateOffer(displayVersion: "2.11.195", downloadURL: offer.downloadURL, format: .dmg, source: cask)
+    try await expectRefusal("not_newer") {
+        try UpdateInstaller.checkVersions(staged: facts("2.11", "195"), installed: facts("2.11", "300"), offer: lagging)
+    }
+    try await expectRefusal("not_newer") {
+        try UpdateInstaller.checkVersions(staged: facts("2.11", "195"), installed: facts("2.11", "0300"), offer: lagging)
+    }
+    try await expectRefusal("not_newer") {
+        try UpdateInstaller.checkVersions(staged: facts("2.11", "195"), installed: facts("2.11", "195"), offer: lagging)
+    }
+    // A placeholder build ("1", "0", "12") never hides a real update.
+    try expectEqual(SourceVersioning.isNewer(candidateShort: "1.2.1", candidateBuild: nil, installedShort: "1.2",
+                                             installedBuild: "1", source: cask), .success(true))
+    try expectEqual(SourceVersioning.isNewer(candidateShort: "3.1", candidateBuild: nil, installedShort: "3",
+                                             installedBuild: "1", source: cask), .success(true))
+    try expectEqual(SourceVersioning.bundleVersion(short: "1.2", build: "12", against: "1.2.12", source: cask), "1.2")
+    // A one-component short works the same way.
+    try expectEqual(SourceVersioning.isNewer(candidateShort: "5.311", candidateBuild: nil, installedShort: "5",
+                                             installedBuild: "311", source: cask), .success(false))
+    // Other sources are unaffected.
+    try expectEqual(SourceVersioning.bundleVersion(short: "2.11", build: "194", against: "2.11.194",
+                                                   source: .sparkle(feed: URL(string: "https://example.test/a.xml")!)), "2.11")
+}
 check("Microsoft Office style: short 16.115.1, build 16.115.26111533, cask 16.115.26110837") {
     let cask = UpdateSource.homebrewCask(token: "microsoft-outlook")
     // Real values from an installed Office 16.115.1 and the Homebrew casks of the same day.
